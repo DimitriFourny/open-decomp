@@ -100,7 +100,7 @@ Check `expected_revision` → validate edits against the snapshot (subjects, evi
 - **Cold cost is per process.** Image indexes, image decode and module load repeat per CLI process (~0.4 s fixed, `PERFORMANCE.md`); oversized units stay cold.
 - **Concurrency ceilings.** One owner and one running job per project; pool default 2 workers, queue 16. A second process on the same project fails after ~1 s lock wait. Export runs N workers on clonefile copies: no shared artifacts or summaries, indexes and units rebuilt per worker, ~1.2 GB RSS each on SQLite-size images.
 - **Cancellation is a process kill;** every in-process cache dies with it. [inference] A queued job whose deadline expires (timer includes queue wait) also restarts the child and fails jobs in flight.
-- **Hard-limit failures are all-or-nothing.** Brotli `main` and SQLite `whereLoopAddBtreeIndex` sit ~0.3–0.4 M work under the 10 M default (`CONTINUE.md`); beyond it, no partial output. Levers: more degradable stages, per-stage budgets.
+- **Hard-limit failures are all-or-nothing.** Brotli `main` (9.24 M), SQLite `whereLoopAddBtreeIndex` (9.45 M) and `sqlite3Fts3Incrmerge` (9.87 M) sit under the 10 M default (docs/PERFORMANCE.md, "Roadmap 3: round result"); beyond it, no partial output. Levers: more degradable stages, per-stage budgets (TODO.md C3).
 - **No retention.** Artifacts, historical rows and jobs are never pruned; open scans every job; every call, even navigation, writes job rows.
 - **Dead schema.** `types`, `signatures`, `lineage` tables have readers, no production writer; recovered types live only in artifacts.
-- **Open trust items** (`CONTINUE.md`): foreign project directory trust check, stdio cancellation cleanup, poisoned-cache cases beyond digest-checked summaries and artifact bytes.
+- **Open trust items:** foreign project directory trust check, stdio cancellation cleanup, poisoned-cache cases beyond digest-checked summaries and artifact bytes.

@@ -134,7 +134,7 @@ Seams are interfaces in `src/core/contracts.ts`: `Loader` (format), `Decoder` + 
 
 ## Global limits and improvement levers
 
-Measured state (docs/PERFORMANCE.md, TODO.md, CONTINUE.md): the R1–R5 readability roadmap landed; blind preference vs Ghidra is now favourable on reviewed pairs of the third held-out suite, but the correctness gate is not met and many cells produce no text (work limit, selector/discovery failures on stripped binaries). Where quality is lost, by pipeline position:
+Measured state (docs/PERFORMANCE.md, TODO.md): the R1–R5 readability roadmap landed; blind preference vs Ghidra is now favourable on reviewed pairs of the third held-out suite, but the correctness gate is not met and many cells produce no text (work limit, selector/discovery failures on stripped binaries). Where quality is lost, by pipeline position:
 
 | Lever                                                                                         | Symptom                                                                          | Owning stage                                    |
 | --------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- | ----------------------------------------------- |

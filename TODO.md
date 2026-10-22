@@ -1,519 +1,1152 @@
-# Roadmap 3: remove machine-state artifacts (`physical_return`, `entry_sp`, `indirect_exit`)
+# Roadmap 4: beat Ghidra on odbench quality and decompile speed
 
 ## Goal and rules
 
-odbench (docs/PERFORMANCE.md "odbench: the benchmark") shows that Haiku prefers Open Decomp's listings to Ghidra's overall (full tier 0.659), but that an LLM understands Ghidra's slightly better (comprehension −0.15). The losses concentrate in functions that print three machine-level artifacts. This roadmap removes them at their root. Readability roadmap 2 (G1–G9) is done; its text is at `git show f61e1a1:TODO.md`.
+The odbench full tier after roadmap 3 (`.odbench/reports/2026-10-22-145217-od-rm3-final-full/report.md`, lane `od-rm3-final` = `main` `f919627`) puts Open Decomp ahead of Ghidra 12.1.4 on readability (0.726) and QA answers (78% vs 67%). It is behind on functions with text, comprehension coverage, wrong claims and the readability noise dimension (0.383): these are the goals of this roadmap. Decompile speed has its own target (D8). Token counts are not a goal (D9): the items that reduce tokens stay for their readability and noise value, and no item trades correctness or information for tokens. Roadmap 3 is done; its text is at `git show 11135ed:TODO.md`. The former continuation notes (roadmap 3 leftovers; reliability, ObjC and hygiene backlog) are at `git show 11135ed:CONTINUE.md`.
 
-Each item below is sized for one agent. The root causes were found by reading the code and confirmed with checked views, instrumented copies of `dist/` and prototype hacks outside the repository (2026-10-21). The prototypes measured the effect but wrote no validation records, so each item still has to be implemented properly. Line references are at `f61e1a1`.
+Each item is sized for one agent. The causes come from an investigation on 2026-10-22 in ten slices: result types, callee summaries, call sites, floating point, frames and saves, preamble, expressions, control flow, coverage and speed. Each slice read the code and checked its findings with `--json` and `--view checked` outputs, instrumented throwaway copies, and prototypes run on the corpus. Prototype numbers are labelled _measured_; text-based estimates are labelled _[estimate]_. No prototype wrote tests or validation records, so every item still has to be implemented properly. Line references are at `11135ed` (= `f919627` + docs).
 
 - **Correctness first.** Every rewrite keeps fixed-width arithmetic, signedness, memory and call ordering, aliasing and explicit unknowns. A shorter wrong program is a regression.
-- **Proven vs likely.** The default `proven` mode prints only what is proven or rests on an ABI premise recorded with `validation.requireAbi(...)`, like G7's `frame_object` or the existing `exit_scratch` / `incidental_result` rules. Heuristics go behind `inference: "likely"` and its precision gate (`src/reconstruction/source-likely.ts`, `scripts/bench/likely-precision.ts`).
-- **Fix the owning shared layer.** That is the lifter, discovery, SSA, native summaries, reconstruction or the renderer. Never patch emitted text with regexes, and never special-case functions or fixtures. Both dialects consume the same result.
-- **Validator records.** Every new presentation rule writes a `validation.presentation(...)` record (`src/reconstruction/local-validation.ts`). The checked view (`--view checked`) stays byte-identical unless the item says otherwise.
-- **Never raise budgets.** brotli `main` and SQLite `whereLoopAddBtreeIndex` run close to the 10M work limit. An item that adds work pays for it in the same change, and the cost is measured with M1.
+- **Proven vs likely.** odbench measures the default `proven` mode. A rule that can only be `likely` (behind `inference: "likely"` and `LIKELY_GATE`, `src/reconstruction/source-likely.ts`, `scripts/bench/likely-precision.ts`) does not move the benchmark. A proven rule either needs no premise, or rests on an ABI or language premise recorded with `validation.requireAbi(...)`. Only the premises listed under "Decisions" may be added.
+- **Fix the owning shared layer**: lifter, discovery, SSA, native summaries, reconstruction or renderer. Never patch emitted text with regexes. Never special-case functions or fixtures. Both dialects consume the same result.
+- **Validator records.** Every new presentation rule writes a `validation.presentation(...)` record (`src/reconstruction/local-validation.ts`). The checked view (`--view checked`) stays byte-identical unless the item says otherwise (only A1 and F2 change it).
+- **Never raise budgets.** The request work limit stays 10M. An item may reallocate the request's own work between stages (C3). Work spent outside the request's accounting counts as raising, except the open-time job of T8, which is not a request and runs under its own reported budget (Decision D4). Near-limit functions: `sqlite3Fts3Incrmerge` 9.87M, `isDate` 9.79M, brotli `main` 9.24M. An item that adds work there pays for it in the same change.
+- **Work counts are noisy until T2 lands.** Two runs of one build differ in about 21 SQLite functions, by up to a few hundred units each. Until T2 lands, treat |Δ| ≤ 300 per function as noise.
 - **Version bumps happen at merge time.** Take the next free number on `main`; do not pre-assign. Components:
-  - `discovery`, `stack-calls`, `reconstruction` and `pipeline` in `src/service/analysis/versions.ts:62`;
-  - `C_EMITTER_VERSION` in `src/emitters/c/index.ts:5` and `PYTHON_LIKE_EMITTER_VERSION` in `src/emitters/python-like/index.ts:5`;
-  - `NATIVE_SUMMARY_FORMAT` in `src/service/analysis/native-summaries.ts:17`.
+  - `discovery`, `stack-calls`, `reconstruction` and `pipeline` in `src/service/analysis/versions.ts`;
+  - `C_EMITTER_VERSION` (`src/emitters/c/index.ts`) and `PYTHON_LIKE_EMITTER_VERSION` (`src/emitters/python-like/index.ts`);
+  - `NATIVE_SUMMARY_FORMAT` (`src/service/analysis/native-summaries.ts`).
 
-## Baseline (odbench full tier, head `0eaab0f` = `f61e1a1` for `src/`, 231 functions with text)
+## Baseline: od-rm3-final vs Ghidra, full tier (231 paired functions)
 
-| artifact in the C source view                             | functions | occurrences | readability vs Ghidra on them | comprehension OD / Ghidra | tokens × Ghidra |
-| --------------------------------------------------------- | --------: | ----------- | ----------------------------: | ------------------------: | --------------: |
-| `physical_return(explicit_values(…), physical_inputs(…))` |        18 | 34 calls    |                         0.167 |               2.44 / 2.50 |            2.22 |
-| `entry_sp` formal and `*(T *)(entry_sp ± k)`              |        13 | 163 lines   |                         0.462 |               2.00 / 1.46 |            2.14 |
-| `indirect_exit(target, reason, physical_inputs())`        |         6 | 6           |                         0.417 |               1.67 / 3.17 |            0.48 |
-| none of these (nor `__unknown_effect`)                    |       192 | —           |                         0.733 |               2.64 / 2.80 |            1.31 |
+| row                                                  | OD                                                          | Ghidra                                                    | status                            | moved by                    |
+| ---------------------------------------------------- | ----------------------------------------------------------- | --------------------------------------------------------- | --------------------------------- | --------------------------- |
+| functions with text (of 237)                         | 232 (4 work limit, 1 invariant failure)                     | 237                                                       | behind                            | C1–C4                       |
+| lexical tokens vs Ghidra (geomean)                   | 1.337 (sum 202,541 vs 129,170)                              | 1                                                         | not a goal (D9)                   | P1, P2, E1–E6, A1–A3, C2, K |
+| Claude tokens vs Ghidra (geomean)                    | 1.477                                                       | 1                                                         | not a goal (D9)                   | the above, P3, P4, F3       |
+| readability overall                                  | 0.726 (136 / 62 / 33)                                       | —                                                         | ahead                             | all                         |
+| readability noise dimension                          | 0.383                                                       | —                                                         | behind                            | P, F, A, E, C2, K, V        |
+| readability control_flow                             | 0.570                                                       | —                                                         | barely                            | L1–L4, E                    |
+| comprehension coverage (0–4)                         | 2.665 (SQLite 2.50, brotli 2.67, matrix 2.83)               | 2.723 (2.73, 3.07, 2.67)                                  | behind                            | V1–V3, K, F, E2, E3         |
+| wrong claims per function                            | 2.67 (SQLite 3.07, brotli 3.13)                             | 2.26 (2.28, 1.87)                                         | behind                            | V1–V3, K, F, E2, E3         |
+| QA correct                                           | 78%                                                         | 67%                                                       | ahead                             | —                           |
+| QA Claude tokens per correct answer                  | 4,785                                                       | 3,528                                                     | not a goal (D9)                   | token items, C2, K2–K4      |
+| decompile time after open vs Ghidra's whole run (D8) | SQLite 121.4 s, brotli 7.7 s, matrix 0.7–1.9 s; total 140 s | SQLite 38.7 s, brotli 3.9 s, matrix 3.5–7.3 s; total 87 s | behind (SQLite 3.1×, brotli 2.0×) | M2, T1–T9, C4               |
 
-Report: `.odbench/reports/2026-10-21-173924-od-head-full/report.md` (local). Section 7 lists the grader's wrong claims about these functions. Typical examples are "returns via `physical_return`", "updates a caller-supplied frame region at `entry_sp`" and "the function is a stub that exits to an indirect branch".
+### Where the gap comes from
 
-| class                                                            | functions                                                               | items  |
-| ---------------------------------------------------------------- | ----------------------------------------------------------------------- | ------ |
-| return join split into register cells                            | `matrix_switch` ELF/PE `-O2`                                            | R1     |
-| self-recursive call counted as result demand                     | `btreeOverwriteContent`, `fts3EvalAllocateReaders`, `fts3EvalNextRow`   | R2     |
-| context-specialized callee summary switches result register      | `matrix_variadic_call` `-O2` (ELF, PE, both stripped)                   | R3     |
-| `-O0` callee summary misses a slot-typed double                  | `matrix_variadic_call` `-O0` (ELF, PE, Mach-O)                          | R4     |
-| vector copy/zero-fill temporary taken for an FP result           | `vdbePmaReaderClear`, `matrix_aggregate` ×4 (sret)                      | R5     |
-| integer-built double in an FP register                           | `sqlite3Fp10Convert2`                                                   | R6     |
-| incoming stack arguments not bound as formals                    | `createFunctionApi` (AAPCS64 args 9–11)                                 | S1     |
-| frame object switched off while any entry-SP address is live     | multiplier: 104 of the 163 lines                                        | S2     |
-| reloaded stack addresses printed as constants (undeclared names) | the SysV and PE variadics                                               | S3     |
-| written by-value aggregate in the incoming area                  | `matrix_aggregate` ×3 (SysV MEMORY class)                               | S4, S5 |
-| callee-side variadic areas                                       | `matrix_variadic` Win64 ×3 and Darwin ×3 (S6); SysV ×3 (S7)             | S6, S7 |
-| jump table proved on a stale chain                               | `selectInnerLoop` (+ `jsonTranslateTextToBlob`, `sqlite3_str_vappendf`) | J1     |
-| table base or index fact set before a merge or call              | `jsonTranslateTextToBlob` (+ 5 more SQLite tables)                      | J2     |
-| tail-jumped callee absorbed into its caller (stripped)           | `matrix_switch` stripped llvm-clang23 ELF/PE                            | J3     |
-| indirect tail call through a register                            | `sqlite3_result_pointer`, `pcache1Shrink` (about 282 `br` in SQLite)    | J4     |
+**1. Return types (largest wrong-claim class in SQLite).** Counted from the lane texts against the source declarations:
+
+| source declaration | OD prints `void` | OD prints a value | OD prints `unknown_result` | Ghidra                 |
+| ------------------ | ---------------: | ----------------: | -------------------------: | ---------------------- |
+| `void` (42)        |               17 |                13 |                         12 | 40 `void`              |
+| a value (189)      |                8 |               180 |                          1 | 172 of 186 (14 `void`) |
+
+The grader counts every "returns X" on a void function as wrong. 4 of the 8 value→void cases are correctness bugs: callers in the image read the result (V1).
+
+**2. Wrong claims by kind.** All 1,203 listed wrong claims (OD 644, Ghidra 559) were classified (`judge_batch`):
+
+| kind                                                                                                                | OD per fn | Ghidra per fn | OD − Ghidra | SQLite OD / Ghidra |
+| ------------------------------------------------------------------------------------------------------------------- | --------: | ------------: | ----------: | -----------------: |
+| control flow                                                                                                        |      0.51 |          0.42 |       +0.09 |            60 / 51 |
+| return value                                                                                                        |      0.30 |          0.22 |       +0.08 |        **42 / 12** |
+| calls (arguments, formats, function pointers)                                                                       |      0.28 |          0.21 |       +0.07 |            34 / 23 |
+| decompiler artifact read as behavior (`fp_mul(64, …)` read as a call, `unknown_value`, frame slots, raw `va` walks) |      0.19 |          0.13 |       +0.06 |             11 / 6 |
+| inlined or delegated code                                                                                           |      0.38 |          0.34 |       +0.03 |            65 / 50 |
+| constants and fields                                                                                                |      0.28 |          0.24 |       +0.03 |            55 / 50 |
+| arithmetic and data flow (packed `value0/value1` pairs, conversion chains)                                          |      0.19 |          0.16 |       +0.03 |            12 / 14 |
+| parameters                                                                                                          |      0.09 |          0.15 |       −0.06 |              8 / 5 |
+| grader concedes the claim is correct                                                                                |      0.53 |          0.50 |       +0.03 |                  — |
+
+**3. Tokens.** The preamble (everything before the signature) costs 28.5k lexical tokens over 232 texts:
+
+- inlined data tables 15.6k (six 256-byte maps such as `sqlite3UpperToLower` and `sqlite3CtypeMap` are 87% of that, repeated in 38 functions);
+- struct bodies 7.2k (482 of 1,382 members are `pad_0x…`);
+- typedefs 2.1k;
+- externs 2.0k;
+- includes, defines and helpers 1.5k.
+
+Without any preamble the geomean would be 1.147; statements alone are 1.145 against Ghidra's statements. Comments are 33.5 KB (Ghidra 1.3 KB): open-arity lists 14.2 KB, `/* partial */` struct notes 6.0 KB, the FP-environment note 4.6 KB and table notes 3.1 KB. The `/* C-like */` banner is stripped before odbench counts tokens. Statement-level costs:
+
+- `(uintptr_t)` 1,876;
+- 202 derived-pointer temporaries;
+- `frame.` prefixes 2,292 (4.6k tokens);
+- 64-bit cell reassembly in 259 expressions;
+- 67.7 KB of `boundary("unknown_read_write", {…60 registers…})` lines in brotli `main`, `isDate` and `sqlite3Fts3Incrmerge` (C2);
+- `isDate` alone is 18,789 tokens vs Ghidra's 6,521 (A1, F1, E3).
+
+**4. Noise.** OD loses the noise dimension in 118 of 232 functions. Keywords in the judge's reasons there: struct 95, cast 60, artifact 43, goto 35, frame 30, comment 24, value temporaries 24, pad 24, typedef 23, `unknown_value`/`fp_*` helpers about 20.
+
+**5. Control flow.** Loop discovery matches Ghidra: the per-function loop count is identical in 217 of 232 functions. Loop form does not:
+
+|                    |                       `while (true)` | do-while | `while (c)` | `for` |
+| ------------------ | -----------------------------------: | -------: | ----------: | ----: |
+| OD (437 loops)     |                                  217 |      170 |          32 |    18 |
+| Ghidra (409 loops) | 66 (43 of them `do {} while (true)`) |      259 |          42 |    42 |
+
+There are three causes: a loop header that prints a statement, bottom tests whose loop-carried copies are live on exit, and exit choice (L1–L4).
+
+**6. Coverage.** Four functions exceed 10M work: `sqlite3_str_vappendf`, `sqlite3Select`, `sqlite3Pragma` and `sqlite3WhereCodeOneLoopStart`. The work is in the selected body: SSA 2.5–3.6M, types 1.8–2.6M, render. Callee summaries are ≤ 17% of it. `sqlite3CodeRowTrigger` fails a reconstruction invariant. A failure returns no text at all.
+
+**7. Decompile time.** SQLite takes 123.3 s: 1.8 s to open plus 121.4 s for 114 decompiles (the lane started at load average 7, so these times are inflated). In a profile of the worker:
+
+- callee-unit preparation 32.5%, mostly 681 _repeat_ preparations of units the cache refuses to keep;
+- GC 13.4%;
+- dependency-ledger fingerprinting 7.6%;
+- the per-request cache layer 12.4% (about 158 ms per request);
+- the requested function's own pipeline 14.7%.
+
+The 4 work-limit failures cost 20.6 s and produce no text.
+
+**Ruled out by measurement:**
+
+- _More callee-summary budget._ At 10× work, 0 of the 25 void-source mismatches print `void`. 19 texts change, with mixed results. 40 texts gain only the FP note.
+- _An image-wide summary pass to change texts._ Estimated at about 290M work, roughly 100 s single-threaded on SQLite, and fuller summaries do not fix the artifacts (above). T8 runs an open-time preparation pass for speed only; texts and request work stay unchanged.
+- _Library prototypes as escaped-object extents._ A C pointer parameter does not bound accesses: `pipe(int[2])` is declared `int *`.
+- _A Ghidra-style void heuristic._ It can only be `likely`, and Ghidra pays for it with 14 value→void errors.
 
 ## Lanes and order
 
-The work splits into four lanes. Lanes are independent; inside a lane, follow the arrows. Items in different lanes that touch the same file are named, so that the second to merge rebases.
+The lanes are independent. Inside a lane, follow the arrows. Items in different lanes that touch the same file are listed below; the second to merge rebases onto the first.
 
-- **Lane J (discovery):** J1 → J2, J1 → J3.
-- **Lane T (tails):** J4. It extracts the frame-save helper in `src/reconstruction/source-stack.ts`, so land it before S2 or rebase S2 onto it.
-- **Lane R (results):**
-  - R1, R2 and R5 → R6 are in reconstruction and analysis (`source-planner.ts`, `result-demands.ts`/`source-facts.ts`, `source-results.ts`).
-  - R3 → R4 are in native summaries. Land them one after the other.
-- **Lane S (stack):**
-  - S1 → (S2, S3) → S4;
-  - S2 → S6 → S7;
-  - S5, S8 and S9 are optional.
-  - All of them are in `source-stack.ts`, `source-planner.ts` and the renderer. Land them one after the other.
-- **M1** is a prerequisite for every item's work check. It is small; do it first.
+- **M1** (odbench signature rows and diagnostics) and **M2** (speed rows) come first. They are small, and every item uses their rows.
+- **Lane C (coverage):** C1; C2 → C3; C4 (C3's reserve is calibrated after C4a/b/d).
+- **Lane V (return types):** V1 → V2 → V3.
+- **Lane K (call sites):** K1 → K2 → K7; K3, K4, K5 and K6 are independent.
+- **Lane F (floating point):** F1 → F4 → F5; F1 → F2; F3 is independent.
+- **Lane A (ARM64 lifting and frames):** C1 → A1 → A2; A3 is independent. A1 must keep FPCR out of its clobber set, because F1's `isDate` gain depends on it.
+- **Lane E (expressions):** E1 → E2 (judge them together); E1 → E6; E3, E4 and E5 are independent.
+- **Lane P (preamble):** P1; P2 → P3; P4.
+- **Lane L (loops):** L1 → L3; L1 → L2; L4 last (highest risk).
+- **Lane T (time):** T1; T2 → T3 → T6 → T8 → T9; T4 → T5; T7. T8 and T9 need M2 for their acceptance rows.
 
-## M1: Counted work per function in odbench
+Files that several items touch:
 
-Every item has to show that brotli `main` and SQLite `whereLoopAddBtreeIndex` (and every corpus function) still finish within the 10M work limit, and what it costs. Today nothing reports work consumed: `decompile --json` shows only the budget, and earlier rounds used throwaway instrumentation. The counter is `consumed` in `createOperationContext` (`src/core/operation.ts:64-140`, `remainingWork()`).
+| file                                      | items                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/emitters/renderer.ts`                | P1 (tables `:3866-3956`), P2/P3 (`structureBodies` `:3369-3435`, header comments `:9295-9326`), F1 (`printedCopies` `:5884`), F3 (`:8823-8843`), K6 (`functionPointer` `:4690-4727`, tail args `:8425`, `:8519`), E1 (`memberAccess` `:3146`, `sourceStorage` `:4280`, `:1844-1855`), E4 (`chooseLocalTypes` `:7453`), L1–L4 (loop printing, `restateTest` `:8031-8186`), C2 (`commaValue` `:6624`), C3 (`renderSource` `:9484-9519`), A3 (frame printing `:9136-9177`), V2 (`unknown_result` `:9001-9005`) |
+| `src/service/analysis/source-facts.ts`    | V1/V2 (`:2050-2072`), K4 (`sourceAddresses` `:663-902`), T1 (`:1817-1837`), T2/T3 (`:1096-1300`), T4/T5 (`:1869-1881`), C3 (`:1611`), C4a                                                                                                                                                                                                                                                                                                                                                                   |
+| `src/reconstruction/source-planner.ts`    | V1 (`:1557-1573`), V2 (`:706-715`, `:1120-1151`, `:1206-1220`), K3 (`:544-636`), K2 (`:386-390`, `:566-573`)                                                                                                                                                                                                                                                                                                                                                                                                |
+| `src/reconstruction/source-results.ts`    | V2, V3 (`:484-489`, `:556-567`, `:926-936`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `src/service/analysis/native-worklist.ts` | T4, T5, V3                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `src/reconstruction/source-variadic.ts`   | K1, K2, K7                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `src/reconstruction/source-stack.ts`      | A1 (`:1098-1101`), A3 (`frame()` `:2423-2531`, `frameLayout` `:66-316`)                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `src/reconstruction/source-fp.ts`         | F1, F4, F5                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `src/lifters/arm64/*`                     | A1, A2                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `src/emitters/source-control.ts`          | L1–L4                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `src/emitters/source-inlining.ts`         | E1, E6                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `src/reconstruction/index.ts`             | C1 (`:1022-1031`), K2 (`:286-302`), V2 (`:707-790`)                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 
-- [x] Expose the work an operation consumed in the decompile result. Use a field that does not take part in cache identity or output fingerprints, for example operation metadata next to `budget`.
-  - Have the odbench OD lane record it per function (`FunctionResult.work`, `scripts/bench/odbench/od-worker.ts`, `lane-od.ts`).
-  - Have `report.ts` print, in section 8, per-function work, the largest functions, and the functions above 80% of the limit.
-  - Acceptance: `bun run bench run od --label m1 --tier full` records `work` for every function. brotli `main` and `whereLoopAddBtreeIndex` appear in section 8 with their counts. Outputs are byte-identical to `od-head`.
-  - Done: `data.work` on `function_decompile` results (per delivery; a cache `hit` reports the cost of serving the stored result), `FunctionResult.work` per function, report section 8. Full-tier lane `od-rm3-m1`: all 231 texts byte-identical to `od-head`; brotli `main` 9,223,523 and `whereLoopAddBtreeIndex` 9,429,670 of 10,000,000 (the latter is not a corpus function; measured with a fresh cache via the CLI).
+## M1: Signature and diagnostic rows in odbench
 
-## R: `physical_return`
+- [ ] **Problem.** The largest excess wrong-claim class (return types) does not appear in the report. Comprehension is one sample per function, so its noise is about ±0.1. The OD lane does not record diagnostics, so this investigation needed throwaway census scripts for cut callees, partial reasons, unsupported encodings and open arity.
+  - **Change** (`scripts/bench/odbench/`):
+    - `od-worker.ts`/`lane-od.ts`: record per function the diagnostics (code plus first sentence, deduplicated) in `lane.json`. This is not part of text identity.
+    - New `signature.ts` with a tolerant C definition reader for the three lane styles: OD (preamble, one-line signatures), Ghidra (signature line, then `{`) and source (macros such as `SQLITE_API`, multi-line parameters, `KEEP`). The report gains a "signature vs source" table per lane:
+      - return kind (void / value / `unknown_result`) against the source declaration;
+      - parameter count equal / fewer / more.
+    - Report section 5: per-lane counts of `unknown_result`, `unknown_value(`, `__unknown_effect(`, `boundary(`, `requirement_predicate(`, function-pointer casts containing `...`, and functions with a `frame` struct. Add a separate counter for conditions holding an embedded assignment (`(x = e) op k`). OD prints 46 of these that `comma_conditions` (`metrics.ts:253-277`) does not count. Leave the existing counter unchanged.
+  - **Tests:** odbench unit tests in `test/bench/` with one signature per lane style, including multi-line parameters, function-pointer parameters and K&R-free macros. The diagnostics must round-trip through `lane.json`.
+  - **Acceptance:**
+    - `bun run bench report --lanes od-rm3-final,source --tier full` re-renders from the caches, with no model call.
+    - It shows OD void-source 17/13/12 (void/value/unknown) and value-source 8/180/1 (±1 for parser differences, explained).
+    - Texts and judgments are unchanged.
 
-The renderer prints `physical_return` at `src/emitters/renderer.ts:8130-8199` whenever the return projection is `physical`, or `outputs` remain after `exit_scratch`. Every cause is upstream of that point, so no item changes the renderer. With all six prototypes on, the lane went from 34 to 0 calls. In the full tier, only the 18 functions and two more SQLite functions changed, both toward their source types.
+## M2: Speed rows that match the D8 target
 
-### R1: Rebind narrow join exits at the function's integer result width
+- [ ] **Problem.** The scorecard's cold time adds opening and decompiling, but the target (D8) compares the decompile time after open with Ghidra's whole run (import, analysis and decompiles), and asks for quick first decompiles. The report has neither row, no worker memory figure and no parallel OD lane: the lane header always records `jobs: 1` (`scripts/bench/odbench/lane-od.ts:257`).
+  - **Change** (`scripts/bench/odbench/`):
+    - `od-worker.ts`/`lane-od.ts`: record per binary `open_ms` (`openBinary`, including the T8 job once it exists, with the job's own time as `open_job_ms`), `first10_ms` (wall time from open to the 10th corpus function's result, in corpus order), the existing `decompile_ms_total`, and the peak RSS of every process.
+    - `--jobs N`: decompile one binary's functions with N request workers over one opened project (needs T9; until T9 lands it accepts only 1). The lane header records N.
+    - `report.ts`, scorecard and section 8: per binary and in total, OD decompile time after open against Ghidra's `cold_ms`, the ratio and the D8 threshold (1.25×); `first10_ms` against 5 s on SQLite; open time and peak RSS as reported values. Keep the existing cold-time row.
+  - **Tests:** odbench unit tests in `test/bench/`: the ratio and threshold rows from a synthetic lane, and `--jobs 1` lanes re-render unchanged.
+  - **Acceptance:** `bench report` on the existing lanes shows SQLite 121.4 s vs 38.7 s (3.13×) and the total 140 s vs 87 s (1.61×) without a model call; a new `od` run records `first10_ms` and peak RSS.
 
-- [x] **Problem.** In `matrix_switch` (ELF `-O2` `0x401aa0`, PE `-O2` `0x140001040`), `default: return a` and `case 9: return a == b ? 42 : 99` share one `ret`. Case 9 writes `eax`, which zero-extends, so rax is two SSA cells. OD prints `return physical_return(explicit_values((uint64_t)result), physical_inputs("x86_64:rax:32:32", value0));`. Ghidra prints `return param_2;`.
-  - **Root cause:** `source-planner.ts:1115-1127` sets `wide` only when a high cell has a defining expression. A phi has none (`source-cells.ts:111-117`). The join exit therefore binds the 32-bit low cell. Harmonization (`:1227-1252`) then zero-extends it to the function width and keeps the high cell as an overlay. G8 recombination (`source-cells.ts:144-201`) does not fire, because an exit snapshot is not a joint read.
-  - **Change:** in harmonization, for an exit narrower than the function width W, check whether its uncertain outputs cover exactly bits [narrow, W) of the integer return root. If they do, bind the whole location at W (`concat` of the cells) and drop those outputs. Otherwise keep `zero_extend`. `recombineSourceCells` then merges the phi web and records `register_cell_recombination`.
-  - **Soundness:** bit-exact, because concat(cells) is the register value, and needs no ABI premise. Do not widen exits one by one: a prototype that followed phi sources made `btreeOverwriteContent` 64-bit. Decide W from all exits first, then rebind.
-  - **Tests:** an IR fixture for SysV and AAPCS64 (`test/reconstruction/source-results.test.ts` or `source-loop-cells.test.ts`). Nine arms return 64-bit values; one arm joins the default through a 32-bit write plus a 64-bit cmov. Execute the emitted C and Python against an oracle with `a = 0x123456789abcdef0`. Assert:
-    - no `physical_return`;
-    - a recombination record;
-    - an unchanged checked view;
-    - a negative case where every exit is narrow keeps the narrow type.
-  - **Acceptance:** both `matrix_switch` texts end `case 9: arg1 = arg1 == arg2 ? 42 : 99; break; } return arg1;`. No other full-tier text changes.
-  - Evidence (2026-10-22): `source-planner.ts` harmonization rebinds (source view only, record `exit_result_width`) an exit narrower than the all-exit width W whose remaining return-root overlays tile exactly [narrow, W); G8 then records `register_cell_recombination`. OD lane `od-rm3-r1` vs `od-head`: only the two `matrix_switch` texts differ, both ending `case 9: arg1 = arg1 == arg2 ? 42 : 99; break; } return arg1;` (physical_return 1 → 0 each; texts with it 18 → 16); their checked views are byte-identical. Tests: `source-loop-cells.test.ts` SysV + AAPCS64 switch join executed in C and Python with `a = 0x123456789abcdef0`, all-narrow negative keeps `uint32_t`. reconstruction/64.
+## C: Coverage and failures
 
-### R2: Forwarded result demand from a self-recursive call is not demand
+### C1: No edge copy into a proven stack-address phi
 
-- [x] **Problem.** `btreeOverwriteContent` (`static int`) prints 6 × `physical_return(explicit_values((uint32_t)comparison), physical_inputs("arm64:x0:32:32", value2))`. `fts3EvalAllocateReaders` and `fts3EvalNextRow` (both `static void`) print the same overlay. All three are self-recursive.
-  - **Root cause:** `src/analysis/calls/result-demands.ts:94-105` pushes every changed exit cell of the primary result root as a full-width demand on the call that defines it. A callee's high half that only flows to this function's own exit therefore demands `x0[0:64]`. `source-facts.ts:2021-2036` folds dependencies of the function's own unit into `function_return_demands`, so the self-call demands the function's own result. That blocks `exit_scratch` (`reconstruction/index.ts:556-559, 686-689`) and `incidental_result` (`source-results.ts:695-698, 781-791`).
+- [ ] **Problem.** `sqlite3CodeRowTrigger` (`0x1000d41a8`) fails in both views with "Reconstruction invariant failed: a parallel edge copy has an invalid destination or width". `isDate` hits the same failure once A1 lands.
+  - **Root cause:**
+    - `planSourceStack` proves that a loop phi is one frame address on every edge (`source-stack.ts:659-667`); here x28 carries `x29 − 0xb0`.
+    - `reconstructView` therefore marks every `sourceStack.addresses` id inline (`src/reconstruction/index.ts:1043`).
+    - The edge-copy filter (`:1022-1031`) drops only `forcedInline` destinations, so the copies into the inline phi stay.
+    - `validate.ts:178-184` then rejects them.
+  - **Change:** in that filter, also drop copies whose destination is in `sourceStack.addresses`. Add a comment: a proven stack-address parameter prints as its frame address, and every incoming value has the same offset.
+  - **Soundness:** proven, with no new rule. The phi is exactly entry SP + offset on every path.
+  - **Tests:** `test/reconstruction/frame-object.test.ts` or `source-stack-promotion.test.ts`, IR builder:
+    - a loop carrying `fp − 0xb0` in a callee-saved register, re-materialized on one edge as a different SSA value, with loads and stores through it;
+    - `execute()` emitted C and Python-like against an oracle;
+    - assert that no invalid-destination error is raised.
+  - **Acceptance:**
+    - `sqlite3CodeRowTrigger` gets text in both views (measured: 310 lines, 5.42M work).
+    - Every function that renders today is byte-identical in both views. Today a live inline stack-address destination always threw, so no existing render reaches the new branch.
+
+### C2: Exhausted validation never degrades the text
+
+- [ ] **Problem:**
+  - 59 `boundary("unknown_read_write", {"arm64:x0:0:64", … 60 registers})` statements (67.7 KB) in brotli `main` (9), `isDate` (27) and `sqlite3Fts3Incrmerge` (23);
+  - up to 5 full render attempts (5.3M work on `sqlite3Select` at 40M);
+  - a latent "A comma statement printed a line" failure behind `sqlite3Select`/`sqlite3Pragma`.
+  - **Root cause:**
+    - When `ValidationAllowance` runs out (`local-validation.ts:56`), every phi-copy check in the renderer (`renderer.ts:5391-5439`) pushes its own "allowance exhausted" record (`local-validation.ts:537-590`): `Incrmerge` 137, `isDate` 130, brotli `main` 147. These fill the 256-record bound (`:647`).
+    - After that, `presentation()` refuses every rewrite (`:595-625`):
+      - a refused `call_effects` prints the call's clobber contract as a separate statement (`renderer.ts:4520-4532`);
+      - held calls then miss their readers and throw `CallInliningRetry` (`:4681`, `:8752`), and `renderSource` rebuilds up to 5 times (`:9487-9511`).
+    - `commaValue` (`:6624`) accepts a call as a comma operand without checking that `call_effects` will be admitted, so the refused call prints a line inside the test, which then throws (`:6694-6698`).
   - **Change:**
-    - Tag demand roots from the return-exit snapshot as _forwarded_. Every other root is _semantic_: loads, stores, call arguments, branches, switch, indirect targets, explicit return values. A value reached from both is semantic.
-    - `NativeDependency` (`native-prepare.ts:83-86, 141`) keeps `return_demand` and gains `return_demand_semantic`.
-    - In the `source-facts.ts` aggregation, a dependency from the function's own unit contributes only its semantic demand.
-  - **Soundness:** the self-demand is circular. Under the existing `exit_scratch` / `incidental_result` premise ("callers read only the established return storage" / "read no result"), the self-call is one of those callers. No new rule is applied; the existing ones fire with their existing records.
+    - (a) `LocalValidationSession.check`: once the allowance is exhausted, fold `parallel-copy` checks into one terminal limitation record per emission. The record reads "N later phi-copy emissions not validated; local validation allowance exhausted". Reuse the slot logic of `skipExhaustedBitvector` (`:520-535`).
+    - (b) `commaValue` admits a call as a comma operand only after `localValidation.presentation('call_effects', …)` admits it, with the same scope and contract, recorded at planning time.
+  - **Soundness:** no proof is weakened. The unvalidated copies stay unvalidated and are summarized in one record.
   - **Tests:**
-    - `test/analysis/calls/result-demands.test.ts`: forwarded vs semantic tagging.
-    - A recursive AAPCS64 fixture with exits `mov w0,#0`, the self-call result and a library `int` call. Without external demand it prints a 32-bit result with an `exit_scratch` record. With `function_return_demands: [x0 64]` from an external caller the overlay stays.
-    - A void-like recursive fixture becomes `void`.
-    - Execute the low 32 bits against an oracle.
-  - **Acceptance:**
-    - `btreeOverwriteContent` prints `uint32_t btreeOverwriteContent(` with plain `return 0;` / `return (uint32_t)comparison;`.
-    - `fts3EvalNextRow` prints `void`.
-    - `fts3EvalAllocateReaders` has no `physical_return`. Its leftover `uint32_t` result is a known residual: a stored constant 7 left in `w0` looks deliberate.
-    - Expected side changes, both toward the source: `fts3EvalTestExpr` → `uint32_t`, `fts5ParseSetColset` → `void`. Nothing else changes.
-  - **Not in this item:** using forwarded demand for non-self callers only when the caller's own exit is semantically demanded. It changes many callee summaries; measure it as a separate item if wanted.
-  - Evidence (2026-10-22): `CallResultDemands` tags return-exit-snapshot roots forwarded (semantic closure first); `NativeDependency.return_demand_semantic`; the selected function's own unit contributes only semantic demand to `function_return_demands`; `NATIVE_SUMMARY_FORMAT` 2. OD lane `od-rm3-r2` vs main texts: exactly the five listed texts differ (`physical_return` 6→0, 1→0, 6→0). A self-call whose result is returned whole (no 32-bit use joined with an `int` result) still takes the call site's full-width observed result; see `test/reconstruction/recursive-result-source.c` for the shapes that are covered.
+    - `test/reconstruction/local-validation.test.ts`: exhaustion yields one aggregated record, and later presentations are still admitted.
+    - A renderer test in which a refused `call_effects` call is never used as a comma operand. `execute()` both dialects.
+  - **Acceptance** (prototype, measured at 10M):
 
-### R3: A context-specialized callee summary keeps the callee's result root
+    | function      | bytes before → after | `boundary(` before → after |
+    | ------------- | -------------------: | -------------------------: |
+    | brotli `main` |      55,951 → 46,417 |                      9 → 0 |
+    | `isDate`      |     112,804 → 81,593 |                     27 → 0 |
+    | `Incrmerge`   |      80,331 → 56,081 |                     23 → 0 |
 
-- [x] **Problem.** `matrix_variadic_call` `-O2` (ELF `0x401d60`, PE `0x140001260`, stripped ELF `sub@0x401d50` and PE `sub@0x140001250`) is two tail calls to the variadic `matrix_variadic` (returns `double`). OD prints a `void` function whose two exits return different registers through `physical_return`, under the header `/* ABI scratch at return, not results: … */`.
-  - Evidence (2026-10-22): `generic_result` on the context unit = `nativeReturnInterface(baseline, …, untypedFloatWrites)` (no seeding; a literal-zero FP exit counts as a write of the root another exit types), applied by `inheritGenericResult` (`native-transfer.ts`) in `observeNativeUnit` for the summary and `source_interface`; context units are not persisted, so `NATIVE_SUMMARY_FORMAT` stays; `stack-calls/11`. OD lane full tier: exactly the four texts changed (`double …`, `return matrix_variadic(0);` / `return matrix_variadic(2…);`, no "ABI scratch", 0 `physical_return`); `fts3UpdateMethod`, `analyzeDatabase` byte-identical; coverage unchanged. Tests: assembled SysV callee (`native-interface.test.ts`), caller executed as `double` with a stub callee in both dialects (`native-context.test.ts`).
-  - **Root cause:**
-    - `native-context-prepare.ts:28-67` specializes the callee to the call's constants. For `matrix_variadic(0)` only the `xorpd %xmm0,%xmm0; ret` exit survives.
-    - A literal zero has no IEEE type, so `native-transfer.ts:428-453` skips xmm0 (`if (floating && !type) continue;`) and claims `rax[0:64]`, which the `va_list` setup writes.
-    - The other call site still projects xmm0, so the two exits disagree.
-    - The context-free result is already computed (`native-context-prepare.ts:39-49`) but used only for entry registers.
+    `sqlite3Select` renders in one attempt at 40M. All other texts are byte-identical. The checked view is byte-identical (measured on `Incrmerge`: 171,818 bytes both ways).
+
+  - **Expected effect:** lexical tokens about −5k outside `isDate` [estimate]; noise in three large functions; QA tokens (brotli `main` carries 3 QA questions).
+
+### C3: Always produce text within the unchanged 10M
+
+- [ ] **Problem.** Four functions fail with no text. Optional stages (callee summaries, image types, pointer evidence, goto search, provenance metadata) are sized as fractions of what remains, not against what the mandatory tail needs. Two output bounds turn finished text into a failure:
+  - the evidence catalog of 10,000 ids (`catalog.ts:36-62, 95-101`, `src/core/tools.ts:538`);
+  - a cache-catalog type with more than 1,000 `evidence_ids` (`src/project/cache/index.ts:92`).
   - **Change:**
-    - Store the generic result on the context unit.
-    - In `observeNativeUnit` (`source-facts.ts:1383-1509`), use the generic `returns`/`return_types`/`written_result` only when both results are non-empty and their root sets differ, for `observed` and for `source_interface`.
-    - Keep context widths on the same root, and never add a result to an empty context.
-    - Persist the field if prepared units are serialized (`native-summaries.ts`).
-  - **Soundness:** the specialized exits are a subset of the callee's exits, so the generic per-exit proofs hold on each of them. Only the storage classification is inherited; values stay context-precise.
-  - **Tests:** `test/service/analysis/native-context.test.ts` / `native-interface.test.ts`.
-    - A SysV callee with `count == 0 → xorpd xmm0` and a loop exit that `addsd`s into xmm0: the generic and the `count = 0` summaries both give xmm0 f64.
-    - A caller with call sites for count 0 and 2 becomes a `double` function; execute it with a stub callee.
-    - Negative: empty generic and empty context stay empty.
+    1. _Tail reserve._
+       - At the start of source evidence (`source-facts.ts:1611`) and image types (`image-types.ts:990-994`), compute `T = c × IR nodes`. Calibration: the reconstruct + render + validate tail costs 232–250 work per node on `sqlite3Select`/`sqlite3Pragma`. Use a generous `c`.
+       - Set pool = min(current share, max(0, remaining − T) × share).
+       - Functions whose current share already leaves ≥ T keep identical budgets. When remaining ≤ T, the optional stage is skipped with its existing explicit reason.
+    2. _Text-first render._
+       - After `reconstruct()` (`renderer.ts:9484`), when remaining work is below `k_full × units + k_text × units`, run `attempt('omitted')` directly. Rendering with `metadata: 'omitted'` produces byte-identical text and saves 1.4–1.8M on large functions (measured).
+       - The goto search runs only from a sub-allowance that leaves the text render's reserve.
+       - Record the omission with reason `budget` (`withMetadataOmissions`, `src/project/cache/limits.ts:15-43`; `src/core/emission-limits.ts`).
+    3. _Evidence overflow is a metadata omission._ When evidence exceeds a bound, publish the text with the result `evidence` table shed and `evidence_ids` truncated. Add a coverage entry ("N proof references omitted; the pseudocode text is complete"). Do not throw.
+  - **Soundness:**
+    - Nothing about the program is weakened.
+    - An omitted render has byte-identical text (measured on brotli `main`, `isDate`, `Incrmerge`, `sqlite3CodeRowTrigger`).
+    - Skipped stages keep their explicit reasons, and the state stays `partial`.
+    - Every decision is a function of the request's own counters, so determinism under budgets holds.
+  - **Tests:**
+    - `test/service/selected-work.test.ts`: a body whose tail reserve exceeds the remaining work still returns text, and the skipped stage is named.
+    - `test/emitters/metadata-limits.test.ts`: a budget-chosen omitted render has identical text and reason `budget`.
+    - `test/service/evidence-work.test.ts`: more than 10,000 evidence ids publish text with an omission.
   - **Acceptance:**
-    - The four functions print `double …` with `return matrix_variadic(0);` / `return matrix_variadic(2…);` and no "ABI scratch" comment.
-    - `fts3UpdateMethod` and `analyzeDatabase` stay byte-identical. A broader override, applied whenever the results differed, changed them and was rejected.
-    - Nothing else changes.
-  - **Separate problem:** the ELF `-O2` text still drops the double parameters `a`, `b`. They pass through to the variadic callee, so this is open arity; see S8.
-
-### R4: The native return interface types `-O0` slot reloads like the source planner
-
-- [x] **Problem.** `matrix_variadic_call` `-O0` (ELF `0x401ec0`, PE `0x140001410`, Mach-O `0x1000007a4`) prints `physical_return` with `unknown_value(…, "call clobbers zmm0_low64")`. The callee `matrix_variadic` is `double` in its own source view, but its summary says `rax`/`x0`.
-  - **Root cause:**
-    - `nativeReturnInterface` (`native-transfer.ts:242-250, 428-453`) types registers only from expressions and contracts.
-    - At `-O0` the result is a reload of a frame slot (`movsd -0x28(%rbp),%xmm0` / `ldr d0,[sp,#8]`), so the FP root is skipped.
-    - The source planner types the same reload (`source-results.ts:178-253`: `slotStores`, `reloaded`, `slotType`). Two implementations of "which register is the result" disagree.
-  - **Change:** move the slot-typing helper into a shared module and use it in `nativeReturnInterface` at the `floating && !type` branch. The type applies when every exit cell is a load from an exact private slot whose direct stores are all one of: FP of the same width, literals, or typed reloads. The existing typed-result precedence (`:488-497`) then replaces the integer root. The output of `source-results.ts` must stay byte-identical.
-  - **Tests:** `native-interface.test.ts`, O0-style callees:
-    - SysV (slot stored with an `fadd` result and a literal 0.0, xmm0 reloads it, eax a loop counter) → xmm0 f64;
-    - AAPCS64 (`ldr d0` from an sp slot, x0 not written) → v0 f64;
-    - Negative: an integer store into the slot keeps today's behavior;
-    - A caller fixture executes `double r = callee(...); return r;` through a frame slot.
-  - **Acceptance:**
-    - The three functions print `double matrix_variadic_call(uint32_t arg0, double arg1, double arg2)` with `return result;` / `return frame.local_30;`.
-    - No `unknown_value(… "call clobbers zmm0_low64")`.
-    - The PE signature must stay `(uint32_t, double, double)`. A forced-summary prototype showed an extra `uint64_t` rdx formal; if it appears, report it to S8 instead of patching it.
-    - Nothing else changes.
-  - **Depends on:** R3 (same files; land them one after the other).
-  - Evidence (2026-10-22): `createSlotTyper` (`reconstruction/source-slot-types.ts`, extracted unchanged from `source-results.ts`) is used by `nativeReturnInterface` (`reloadedSlotType`, the `floating && !type` branch; native-entry exposes `load_addresses`/`load_nodes`/`store_values`). The slot must be local (negative entry-SP offset) and the load must not be reachable after a frame address reached a call/unresolved memory (`StackSnapshot.escaped` at the load, flow-sensitive; `frame.escaped` is too coarse: it also trips on dead scratch registers at return and on the arm64 FPCR dead-end `unknown_effect`). stack-calls/12, reconstruction unchanged. OD lane `od-rm3-r4` vs `od-rm3-r3`: exactly the three `matrix_variadic_call` `-O0` texts (ELF/Mach-O/PE symbols) differ (+ `selectInnerLoop` from J1 merged in); ELF `double …`/`return result;`, Mach-O `return frame.local_30;`, 0 `physical_return`/`unknown_value`; coverage unchanged (194 partial/37 complete/6 failed). **PE `-O0` signature now `(uint32_t arg0, uint64_t arg1, double arg2, double arg3)`**: the extra rdx formal is the Win64 variadic path (`matrix_variadic(0, arg1)` leaves rdx = entry value on the `count == 0` branch); not patched, belongs to S8. Tests: `native-interface.test.ts` SysV/AAPCS64 slot accumulator → f64, negatives (integer store, literal-only slot, address-taken frame), caller executed in C and Python-like.
-
-### R5: A vector copy or fill temporary in the FP register is not a result
-
-- [x] **Problem:**
-  - `vdbePmaReaderClear` (`static void`, ends with `memset` of the reader) prints `physical_return(… "arm64:x0:0:64", address_4, "arm64:v0:0:64", 0, …)`. Here x0 is a leftover `vdbeIncrFree` result and v0 is the `movi v0.2d,#0` used by `stp q0,q0`.
-  - `matrix_aggregate` (ELF/PE `-O2`, both stripped) returns its struct through the hidden pointer. OD prints `rax` = the sret pointer echo plus the `zmm0` halves of a 16-byte `movups` copy. Ghidra prints `long *matrix_aggregate(...)` with `return param_2;`.
-  - **Root cause:**
-    - `selectSourcePrimaryResult` (`source-results.ts:748-778`) returns `explicit` when the untyped FP register is written after the integer register on every exit.
-    - `observedElsewhere` (`:409-458`) deliberately ignores stores, so the copy datum looks like a result.
-    - In the zero-fill case, constant folding breaks value identity. The link survives in instruction provenance: the `movi` id is shared by the exit cells and by every store datum.
-  - **Change:**
-    - Build two sets: SSA values that are, through transport, the datum of a ≥128-bit store; and the instruction ids in those data's provenance.
-    - The FP carrier is incidental when every exit leaf is one of: such a datum, a constant sharing such an instruction, or an unprojected or non-final call output.
-    - Then skip the `explicit` return and treat the FP state as `undefined` for the `incidental_result` gate.
-    - The integer register then decides. For the aggregate, rax equals entry rdi (Win64: rcx), which is an exact pointer result. Otherwise `incidental_result` gives `void`.
-  - **Soundness:** this is the `incidental_result` family: a presentation record plus the `abi_conformance` premise that callers read no FP result. The ≥128-bit restriction keeps scalar FP results that are also stored explicit.
-  - **Risk to measure:** an untyped vector-returning function that also stores the same vector. No corpus function has one.
-  - **Tests:** `source-results.test.ts`, executed against a memory oracle:
-    - AAPCS64 zero-fill → `void`;
-    - SysV sret echo with a 128-bit copy → `return p`;
-    - Win64 variant;
-    - Negatives: a 64-bit untyped d0 that is stored and returned stays explicit; a vector-typed carrier stays unchanged;
+    - `sqlite3WhereCodeOneLoopStart` gets text at 10M. Measured with C2 + C4a + text-only render: rendering finished at 8.14M, and only the evidence bound then failed.
+    - `sqlite3_str_vappendf` gets text [estimate: render starts at 7.61M and needs about 1.5M].
+    - Every other text is byte-identical unless its pool falls below T (list those).
     - The checked view is unchanged.
-  - **Acceptance:**
-    - `vdbePmaReaderClear` prints `void` with no `physical_return`.
-    - The four `matrix_aggregate` texts print `<T>* …(<T>* address, …)` ending `return address;`.
-    - Nothing else changes. The by-value struct parameter is S4's job.
-  - Evidence (2026-10-22): `selectSourcePrimaryResult` gains the named predicate `incidentalFloatingCarrier()` (checked before the untyped-FP `explicit` rule; records `incidental_result` + `abi_conformance` "callers read no floating-point result register"). Constants link to a stored datum only through the defining instruction of a _constant_ datum. OD lane `od-rm3-r5` vs `od-rm3-s1` (main): exactly the five acceptance texts differ (`vdbePmaReaderClear` → `void`, 4 × `matrix_aggregate` → `…_arg0_…* …(…* address, …)` / `return address;`; physical_return 1 → 0 each; texts with it 18 → 11 with R1); their checked views are byte-identical. Tests: `source-results.test.ts` AAPCS64 zero-fill (provenance-linked cells), SysV/Win64 128-bit copy executed in C and Python; 64-bit stored scalar stays explicit, vector-typed carrier stays the vector result. reconstruction/66.
+  - **Depends on:** C2. Calibrate after C4.
 
-### R6: An integer-built double in the FP register is a `double` result
+### C4: Remove superlinear and repeated work on large bodies
 
-- [x] **Problem.** `sqlite3Fp10Convert2` (`static double`) builds the double's bits in integer registers (`fmov d0, x8`; `movi v0.2d,#0` on early exits). There is no IEEE evidence, so OD prints `void` and 3 × `physical_return(… "arm64:v0:0:64", …)`.
-  - **Done (R6, proven):** `untypedScalarFloating()` in `selectSourcePrimaryResult`; full-tier OD lane changes only `sqlite3Fp10Convert2` (`double sqlite3Fp10Convert2(…)`, 3 → 0 `physical_return`); precision: fires on 0 of 250 sampled SQLite and 16 brotli functions, and on 2 of the 6 remaining SQLite functions declared `double` (`sqlite3Fp10Convert2`, `vdbeSorterGetReal`), 0 false positives.
-  - **Change:** in the branch that would return `explicit` (after R5's incidental check), choose `float` when all of the following hold:
-    1. On every exit, the FP cell walks to leaves that are not call outputs, loads, observed elsewhere or vector data; literals are neutral.
-    2. On every exit with a non-literal leaf, the upper FP cells are literal 0, i.e. a scalar `fmov`/`movq` write.
-    3. The non-literal exits agree on width: 64 gives `double`, 32 gives `float`.
-    4. At least one exit has a non-literal leaf.
-
-    Record `primary_result` with the reason "…written before an untyped scalar FP value consumed only by exits on every exit path", plus an `abi_conformance` requirement: "a scalar FP-bank result is IEEE; callers read no integer result". This mirrors the accepted rule that scalar FP-bank formals are IEEE (docs/CORE.md).
-
-  - **Mode decision:** proven if the precision check is clean, otherwise `likely`. Check that no full-tier function whose source returns a non-FP type gains `double`/`float`, and run the same comparison over the SQLite/brotli samples of `likely-precision`. Any false positive moves the rule behind `inference: "likely"` and `LIKELY_GATE`.
+- [ ] **Problem.** The mandatory floor exceeds 10M for `sqlite3Select` (≈11.65M) and `sqlite3Pragma` (≈14.0M), measured with summaries off at a 40M measurement budget. Optional stages also blow up with body size.
+  - **Change** (byte-identical by construction):
+    - (a) `nativeArgumentValues` (`src/service/analysis/native-arguments.ts:29-39, 85-97`) scans the whole IR per call. Build one per-IR index (assignments, stores, call register inputs by call id, terminator exit bindings, concat by operand tuple) once per caller loop in `nativeShapeTransfers` (`source-facts.ts:1305-1328`) and `functionTypeObjects` (`image-types.ts:317-342`), and pass it in.
+      - Measured: −0.56M on `Incrmerge`, −0.72M on `isDate`, up to −9M on `sqlite3Pragma` at 40M.
+      - `isDate`'s text changes only because the freed work lets the budget-dependent image-type merge finish. Report it.
+    - (b) `rank` (`src/presentation/index.ts:1107-1123`): return before the edge scan when `selection < 0` (about −0.2M on `sqlite3Pragma`).
+    - (c) `simplifySSA` (`src/analysis/values/index.ts:383-407`): after round 1, run `propagate`/`rewrite`/`propagateCopies`/`eliminateTrivialParameters` only over the cones the previous round changed, reaching the same fixpoint. Rounds 2..7 cost 1.2–1.8M on `sqlite3Select`/`sqlite3Pragma`.
+    - (d) Memoize `restructure` in `AttemptPlans`, keyed by the evaluated structuring conditions. `WhereCode` and `sqlite3Select` each ran 4 identical restructures.
+    - (e) Not in this item (would weaken checking): running `assertValidIR` only after the final simplify (0.6–0.95M per big request).
+  - **Soundness:** pure refactors, with no rule changes and no new records.
   - **Tests:**
-    - An AAPCS64 fixture with `movi #0` and `fmov d0, x8` exits → `double`. Executed results are bit-exact for NaN payloads, −0.0 and infinities.
-    - Negatives: the value is also stored or passed to a call; all exits are literals; the upper lane is non-zero; x0 is demanded.
-    - A 32-bit `fmov s0, w8` variant → `float`.
-  - **Acceptance:** `sqlite3Fp10Convert2` prints `double sqlite3Fp10Convert2(…)` with no `physical_return`; nothing else changes in the full tier.
-  - **Depends on:** R5.
-
-## S: `entry_sp`
-
-163 lines in 13 functions. Each fix is a proven-mode rewrite under an ABI premise recorded like G7's `frame_object`. None needs `likely`.
-
-A prototype of S1–S3 (unsound, measurement only) gave these results:
-
-- `createFunctionApi`: 18 → 0 lines;
-- SysV `matrix_variadic` `-O2`: 31 → 2 lines;
-- SysV `matrix_variadic` `-O0`: 38 → 2 lines.
-
-### S1: Incoming scalar stack arguments become formals by per-slot reach
-
-- [x] **Problem.** `createFunctionApi` has 11 source parameters; on AAPCS64, arguments 9–11 are on the caller's stack. OD reads `*(uint64_t *)((uintptr_t)entry_sp + 0/8/16)`. Ghidra prints `param_9..param_11`.
-  - **Done (S1):** `incomingFloor` in `expose()`, per-slot binding with `incoming_formal` / `incoming_arguments_private`; full-tier OD lane changes only `createFunctionApi` (18 → 0 `entry_sp`, `…, arg8, arg9, opaque_1* arg10`, negative slots as `frame.*`), checked views of the 13 `entry_sp` functions byte-identical; float/narrower slots not added (no corpus need).
-  - **Root cause:** `src/reconstruction/source-stack.ts:1394-1433` binds incoming loads to formals (via `incomingStack`, `source-planner.ts:1356-1377`) only when all of these hold:
-    - `!escaped`. But any unresolved call sets it (`:609-614`), and every callee summary here was cut by budget.
-    - No store through a non-stack pointer anywhere in the function (`:1409`).
-    - The per-load stack snapshot flags `aliased`/`escaped` are clear (`:1418-1419`).
-
-    These whole-function gates fail. The live entry SP then also disables the frame object (S2), so the 14 negative slots print as `entry_sp − k`.
-
-  - **Change** (source view only):
-    - `expose()` (`:501-515`) also records `incomingFloor`: the lowest floor of exposures with a base ≥ 0. Mixed-sign values and indexed or dynamic accesses with a base ≥ 0 count too.
-    - Bind an exact, nonvolatile, loads-only, non-overlapping incoming group when `!reachAll`, `group.end <= incomingFloor` (or there is no floor), and the facts are complete.
-    - Drop the `escaped`, unknown-store and snapshot-flag gates in the source view; keep them in the checked view.
-    - Optionally also accept float/double and narrower integers where `abi.classifyCall` places such a scalar. Reuse the IEEE retyping in `source-signature.ts:120-156`.
-  - **Soundness:** callees, caller-supplied, global, loaded and returned pointers cannot designate this activation's incoming argument storage. Only addresses derived from it can, and the floor excludes those. Record:
-    - `requireAbi('incoming_arguments_private', …)`;
-    - `presentation('incoming_formal', 'stack:<key>', …)`.
-  - **Tests** (`test/reconstruction/incoming-stack.test.ts`, IR builder, AAPCS64 and SysV):
-    - 9 (AAPCS64) or 7 (SysV) used parameters, an open call before the incoming loads and a store through argument 1. Assert no `entry_sp`, the formal count, and `execute()` equal to the oracle for 0, 2^64−1 and 2^63. The event trace shows the store and the call but no incoming loads.
-    - Negative: the incoming address is passed to the call, so the slot is not bound and a call oracle writing through it is observed.
+    - `test/analysis/values/values.test.ts`: incremental and full simplify reach the same SSA on builder IR with chained constants and phi rewrites (`execute()` oracles).
+    - `test/presentation/structuring.test.ts`: the layout is identical with and without the early exit.
+    - The existing source-facts argument tests pass.
   - **Acceptance:**
-    - `createFunctionApi` has 0 `entry_sp` and 11 formals (`…, arg8, arg9, <ptr> arg10`); its negative slots print as `frame.*` members.
-    - No other text gains `entry_sp`.
+    - Corpus texts are byte-identical, except where freed work changes budget-dependent optional results (each such text is listed).
+    - With C3, `sqlite3Select` and `sqlite3Pragma` get text at 10M [estimate: the gaps are 1.7M and 4.0M; (c) was not prototyped].
+  - **Expected effect:** functions with text up to 237 (with C1, C3); decompile time on large functions.
+
+## V: Return types
+
+### V1: Caller result-use evidence (correctness)
+
+- [ ] **Problem.** Four value-returning functions print `void` although callers in the image read the result:
+  - `sqlite3GetToken` (17 of 18 BL sites read w0/x0; OD's own `getConstraintToken` text reads it);
+  - `getConstraintToken` (11/11);
+  - `sqlite3BtreeOpen` (5/5);
+  - `sessionRetryConstraints` (2/2).
+
+  `rtreeInsertCell` (5/5 sites read) prints `unknown_result`.
+  - **Root cause:**
+    - `incidental_result` assumes that callers read no result and never checks. Its record says "no caller was scanned" (`source-planner.ts:1206-1220`).
+    - `function_return_demands` holds demand only from units the request happened to prepare (`source-facts.ts:2050-2072`, "do not turn a presentation request into an incoming-caller scan").
+    - The reference index is effectively empty at decompile time: `completeDiscovery` takes 49.7 s on SQLite and stays partial.
+  - **Change:**
+    1. New `src/analysis/calls/caller-sites.ts`: a per-image direct call-site index, built once and cached like `nativeCallIndex`.
+       - ARM64: a linear 4-byte sweep of executable sections for BL/B to a function entry, each site mapped to its containing function (no function → `unknown`).
+       - x86-64: the discovered reference index only.
+    2. Classify the result registers (x0/w0 and the FP carrier) after each site as `semantic`, `forwarded` (only to the caller's own return exit or tail), `dead` or `unknown`:
+       - use a caller unit already prepared in the request (`observeCallResultDemands(...).semantic`) when one exists;
+       - otherwise lift a bounded window from the return address: ≤ 64 instructions, following direct and conditional branches, stopping at a write of the root, a read, `ret`, a tail branch, an indirect branch or a call.
+    3. Add every `semantic` site's width to `function_return_demands` (`source-facts.ts:2050-2072`). Stop at the first semantic site; cap at 32 sites, smallest callers first.
+    4. `source-planner.ts:1561-1573`: when caller demand names the integer root and a tail's callee has no result types, type the tail result at the demanded width instead of `returnType = null`. Record `presentation('tail_result_width', …)` naming the demanding sites.
+  - **Soundness:** positive evidence only, with no new premise. Any subset of sites is valid. It removes a premise-based rewrite or binds a register that callers provably read. The reconstruction already honours demand (`test/reconstruction/source-results.test.ts:431`).
+  - **Tests:**
+    - `test/analysis/calls/caller-sites.test.ts`: sweep and window classifier on synthetic code: read, write-before-read, ret-forward, tail, jump table → `unknown`.
+    - A source-built fixture `test/service/analysis/caller-result-use-source.c` with `caller-result-use.test.ts`, following `test/service/likely-inference.test.ts`. A static `int f()` whose result a caller reads prints an integer result; a static void function stays `void`. Compile with `CLANG -O1 -g0`; never execute the analyzed binary.
+    - `source-results.test.ts`: a tail plus demand gives a typed result, executed in both dialects.
+  - **Acceptance:**
+    - The 5 functions above get integer results.
+    - None of the 42 void-source texts change.
     - The checked view is byte-identical.
+    - M1 value-source row 8/180/1 → 4/185/0 [estimate from the call-site scan].
+  - **Cost:** one sweep per image (about 300k words on SQLite), plus ≤ 32 windows of ≤ 64 instructions, run only where `incidental_result` would fire or a tail result is unresolved. Charged to the request; abstain when exhausted.
 
-### S2: The frame object coexists with live entry-SP addresses ≥ 0
+### V2: Closed-world caller consensus makes a function `void`
 
-- [x] **Problem.** `frame()` (`source-stack.ts:1720-1731, 1775-1783`) returns the entry-SP form for the _whole_ frame whenever any address at or above the entry SP is live. The `frame_object` validation record is then `verified` but unused. This accounts for 104 of the 163 lines (createFunctionApi, SysV variadics).
-  - **Done (S2):** object variant `entry`, `frame_object_beside_entry_sp` record (+ a `frame_object` premise for addresses ≥ 0 when escaped); full-tier OD lane (on main with S3) changes only the three SysV `matrix_variadic` texts (`entry_sp` lines 37 → 2, 26 → 2, 26 → 2; every negative access `frame.*`), no `struct { } frame;`, checked views of the 13 `entry_sp` functions byte-identical.
+- [ ] **Problem.** 19 void-source functions print a value or `unknown_result`. The body alone cannot tell `f(); }` from `return f();`. Mechanisms:
+  - a tail call into an in-image callee whose interface never carries `returns_void`: `codeOffset`, `sqlite3DropTrigger`, `pcache1RemoveFromHash`, `sqlite3RowidConstraint`, `analyzeDatabase`, …;
+  - a final call establishing the result: `verifyDbFile` (`sqlite3_log`), `fts5StructureWrite` (`sqlite3_free`, which OD prints as `void` on its own), `sqlite3AddDefaultValue`, …;
+  - a kept stored value: `fts3EvalAllocateReaders`.
+  - **Root cause:**
+    - `returns_void` comes only from library and ObjC contracts (`native-library-tails.ts:140`, `objc-messages.ts:432`). A tail gets `result_void` only from it (`source-planner.ts:710-715`), and the renderer prints `unknown_result` for any other non-void tail (`renderer.ts:8971-8983`, `:9001-9005`).
+    - `selectSourcePrimaryResult` refuses `incidental_result` whenever a tail exists (`source-results.ts:926-936`).
+    - A final call counts as establishing the result (`:484-489`, `:556-560`). Its projection exists only because the caller's own exit snapshot forwarded demand (`native-transfer.ts:489-504`).
+  - **What must be proven for function F** (no supplied signature, no indirect result):
+    - (a) F is not exported (export trie, dynamic symbols, PE exports);
+    - (b) no relocation, rebase, bind or chained fixup targets F's entry (`LoadedImage.relocations`), and no code materializes it (ARM64 ADR, ADRP+ADD/LDR; x86 RIP-relative LEA/MOV);
+    - (c) the site set is complete: on ARM64 the V1 sweep; on x86 only with a `complete` reference index; every site lies in a known function;
+    - (d) after every BL site, x0 and the FP carrier have no semantic demand:
+      - a `forwarded` site requires its caller to satisfy (a)–(d) recursively, depth ≤ 6, with SCC members assumed coinductively (`fts3EvalAllocateReaders` needs this);
+      - a B (tail) site requires the tail caller to satisfy (a)–(d);
+      - any `unknown` site → abstain;
+      - more than 64 sites, or 128 in a recursion → abstain.
   - **Change:**
-    - Extend the object variant of `SourceStackStorage` (`source-model.ts:226-234`) with `entry: Value | null`.
-    - When the frame object is verified and the entry SP is live, lay out the object from accesses with `end <= 0` (minus the return address) and taken negative addresses.
-    - Renderer (`printed` `:1650-1679`, `frameStorage` `:3992-4032`): offsets ≥ 0 keep `entry_sp + k`; negative offsets go through `frame.*`.
-    - `validate.ts:83-103` accepts retained accesses ≥ 0 only when `storage.entry` is set.
-    - Never emit an object with no members and no taken address; the prototype printed `struct { } frame;` for Darwin.
-    - Update `inference.ts:498-501` and `source-names.ts:958`.
-  - **Soundness:** G7's existing premise (`requireAbi('frame_object', …)`, `:1802-1807`). Frame addresses stay inside the frame object, which never reaches incoming bytes. Nothing is forwarded.
-  - **Tests** (`test/reconstruction/frame-object.test.ts`), per ABI:
-    - an escaped negative slot;
-    - an indexed negative base;
-    - entry SP+8 (AAPCS64: +0) stored into a negative slot and dereferenced later.
-
-    Negative offsets print as `frame.*`, and `entry_sp` appears only in ≥ 0 expressions. `execute()` gives the same values and the same event order as the checked view. Add a case with no negative accesses: no frame object.
-
+    - `source-facts.ts` publishes `function_result_use: { consensus: 'ignored', sites }`.
+    - The caller of `selectSourcePrimaryResult` in `source-planner.ts:1120-1151` returns `kind: 'none', void_like: 'caller_consensus'`.
+    - Every tail gets `result_void` (`:706-715`), and the tail exclusion (`source-results.ts:926-936`) does not apply to this rule.
+    - The `exit_scratch` handling (`reconstruction/index.ts:707-790`) moves x0 out of line, as for `incidental_result`.
+    - Record `presentation('caller_consensus', …, sites)` and `requireAbi('caller_consensus', …)` (Decision D1).
+    - Document the rule in docs/CORE.md next to `incidental_result`, and in docs/internals/calls-abi.md §3.
+  - **Soundness:** proven under the recorded closed-world premise (D1). Within the program, F's result is unobservable. This is stronger evidence than today's `incidental_result`, which scans nothing.
+  - **Tests:** `caller-result-use-source.c` cases, each executed against oracle stubs through the IR-builder path (`source-results.test.ts` with `function_result_use` supplied):
+    - `static void g()` ending in `return h();` with an int `h` and every caller discarding the result → `void`;
+    - the same with its address stored in a table → unchanged;
+    - an exported variant → unchanged;
+    - a recursive variant;
+    - an int function one caller reads → stays a value.
   - **Acceptance:**
-    - The SysV `matrix_variadic` texts (`-O0` `0x401d10`, `-O2` `0x401bd0`, stripped `sub@0x401bd0`) print every negative access as `frame.*`, with ≤ 4 `entry_sp` lines each.
-    - No `struct { } frame;` anywhere.
-    - The checked view is unchanged.
-  - **Depends on:** S1. Rebase onto J4 if J4 has landed: both touch `source-stack.ts`.
+    - 13 functions print `void` with `return;` and `f(...);`: `verifyDbFile`, `pcache1RemoveFromHash`, `vdbeSorterExtendFile`, `sqlite3AddDefaultValue`, `sqlite3CreateForeignKey`, `parserDoubleLinkSelect`, `sqlite3DropTrigger`, `generateSortTail`, `sqlite3RowidConstraint`, `analyzeDatabase`, `fts3EvalAllocateReaders`, `fts5StructureWrite`, brotli `PrintFileProcessingProgress`.
+    - Up to 4 more when windows resolve: `pagerUnlockAndRollback`, `sqlite3FreeIndex`, `sqlite3SelectPrep`, `codeOffset`.
+    - `sqlite3WhereExplainBloomFilter` (source `int`; both callers discard the result; Ghidra also prints `void`) becomes `void`. This is exact relative to the program; report it.
+    - The 17 voids that are right today are unchanged. The checked view is byte-identical.
+    - M1 void-source row 17/13/12 → 30–34 / 3–4 / 5–8.
+  - **Expected effect:** about 24 return-related wrong claims on these functions (upper bound): wrong claims −0.05 to −0.10 per function. Fewer tokens (`result =`, `call_result =`, `return x;`).
+  - **Depends on:** V1 (index and window classifier).
 
-### S3: Stack addresses read back from memory print through their load
+### V3: Void-like tails and final calls through callee summaries
 
-- [x] **Problem.** In the SysV and PE variadic texts, values are assigned to undeclared names (`value4 = …`, `address_5 = …`, `address_2 = address;`); the graders flagged these. Also, `entry_sp + 8` appears where the binary _reloads_ `va.overflow_arg_area`.
-  - **Done (S3):** source-view presentation map (analysis map minus retained-load results and values computed from them) feeds `stack_addresses`, liveness, inline and frame extent; a stored address ≥ 0 requires `entry_sp`; negative reloads are declared (no hiding rule); `assignmentText` assigns only declared variables (source view). Full-tier OD lane changes only the five SysV/PE variadic texts (`-O0 0x401d10`, `-O2 0x401bd0`, stripped `sub@0x401bd0`, PE `-O2 0x140001170`, stripped `sub@0x140001160`); the 13 `entry_sp` functions have no undeclared assignment target (test Parser); their checked views are byte-identical.
-  - **Root cause:**
-    - The stack plan seeds its address map from every value with a stack fact, including load results (`source-stack.ts:133-137`).
-    - The renderer prints such values as address constants (`renderer.ts:1650-1653`) and skips their declarations (`:8933`).
-    - But a retained load still prints as `name = …` (`:4610-4617`).
+- [ ] **Problem.** Exported or address-taken functions that tail-call or final-call a callee OD itself prints `void` still print `unknown_result` or a value: `sqlite3session_delete`, `cume_distValueFunc`, `jsonAppendRaw`. Callers also print `call_result = sqlite3_free(…)`, although `sqlite3_free` prints `void`.
+  - **Root cause:** a callee's void-likeness exists only in its own reconstruction, never in its native summary.
   - **Change:**
-    - Split the analysis address map from the presentation map in `planSourceStack`'s result. The analysis map keeps taint, escape and floors; the presentation map feeds `source.stack_addresses` and liveness (`reconstruction/index.ts:863, 942, 1219`).
-    - A retained load whose result is at offset ≥ 0 prints through its declared variable.
-    - A retained load at a negative offset is either hidden with `presentation('frame_reload_spelled_as_address', …)` or declared.
-    - General invariant: `assignmentText` never assigns to a name the declaration pass skipped.
-  - **Soundness:** a spelling choice between two expressions proven equal.
-  - **Tests:** an IR builder case stores SP+8 into a frame slot, reloads it and dereferences it in a loop. Assert:
-    - every assignment target is declared (`new Parser(text).symbols` from `test/emitters/c/support.ts`);
-    - no `entry_sp + 8` inside the loop;
-    - `execute()` is equal.
-
-    Repeat with a negative frame address.
-
-  - **Acceptance:** no assignment to an undeclared name in the 13 functions. With S2, the SysV `-O2` texts lose `entry_sp + 8` in their loop pre-headers.
-  - **Depends on:** S1 (land after it; pairs with S2).
-
-### S4: An incoming by-value aggregate becomes a struct formal
-
-- [x] **Problem.** `matrix_aggregate(aggregate input, u64 delta, double scale)` passes a 24-byte struct, which is SysV MEMORY class: it sits at entry SP+8..+32 and is modified in place. OD prints `*(uint64_t *)(entry_sp + 8) = …` (ELF `-O0` `0x401c40`, `-O2` `0x401b30`, stripped `sub@0x401b30`). Ghidra prints `in_stack_*` locals.
-  - **Done (S4):** `incoming_object` presentation + ABI premise, `frameLayout(…, 'above')`, planner `incomingObject` formal `stack_args` (last, `formal_stack_offsets` at the first incoming byte); full-tier OD lane changes only the three ELF texts (`entry_sp` lines 8/6/6 → 0, one `struct stack_args_… stack_args` formal each), Mach-O/PE cells unchanged (by reference, not incoming bytes), checked views byte-identical; `test/reconstruction/incoming-stack.test.ts` executes SysV `-O2`/`-O0`/escaped fixtures in both dialects against an independent oracle.
-  - **Root cause:**
-    - Formal binding accepts only loads of pointer-width integers without overlaps (`source-stack.ts:1404-1407`, `source-planner.ts:1360`).
-    - Slot promotion and the frame object are negative-only (`source-stack.ts:956-957`; `frameLayout` `:73, 79`).
-    - `validate.ts:83-96` rejects any retained non-negative access.
-  - **Change:**
-    - When retained accesses lie in the incoming area (`incoming_candidate`, plus the Win64 `shadow_space`), S1 did not bind them, and no exposure has a base ≥ 0, lay them out with `frameLayout` generalized by origin and direction. Members sit at their entry offsets.
-    - Create one source-only formal `stack_args` of struct type, appended last in `finalize` and recorded in `formal_stack_offsets`.
-    - Spelling: `stack_args.arg_8`, `&stack_args.arg_8`, `*(uint64_t *)&stack_args.arg_10`, with a preamble struct. Python-like: `stack_args: struct{…}`.
-    - `reconstruction/index.ts:1102` must not drop the signature for it.
-  - **Soundness:** nothing is forwarded. Record:
-    - `requireAbi('incoming_object', …)`: the sret pointer, globals, loaded pointers and unknown stores never designate the incoming area;
-    - `presentation('incoming_object', …)`.
-  - **Tests:** a SysV IR fixture with sret in `rdi`, `rsi`, `xmm0`, an add/increment/multiply at +8/+16/+24, and a 16-byte plus an 8-byte copy to `[rdi]`. `execute()` reproduces `{total+delta, count+1, weight*scale}` byte-exactly for wrapping `total`, `count = 0xffffffff` and NaN/−0.0 `weight`. Add an O0-style `lea`-based variant and a negative variant where the address escapes.
-  - **Acceptance:** the three texts have 0 `entry_sp` and one `struct stack_args_… stack_args` formal. The checked view is unchanged.
-  - **Depends on:** S2. The interpreter in `test/emitters/c/support.ts` needs by-value struct formals.
-
-### S5 (optional): `frameLayout` keeps scalar members under spanning accesses
-
-- [x] A wide access that exactly covers whole narrower clusters plus padding merges them into a byte array today (`uint8_t local_d8[8]`, `arg_10[8]`). Keep the narrower members and spell the wide access as a cast at the first member (`source-stack.ts:35-112`).
-  - Acceptance: the SysV `-O2` `matrix_variadic` and the `matrix_aggregate` texts get `uint32_t` members. `frame-object.test.ts` layout expectations are updated.
-  - Depends on: S4.
-  - **Done (S5):** `frameLayout` keeps the narrowest disjoint scalars of an overlap group as members when no wider access cuts one, with byte-array padding members over the uncovered span bytes and the wide access a cast at the member holding its first byte (a wide access may also start/end in padding: `uint8_t local_d8[4]; uint32_t local_d4;` under the 8-byte `va_list` init store). The full-tier OD lane changes only texts with such arrays (SysV `matrix_variadic`/`matrix_aggregate` and 20 SQLite/brotli/zlib functions), checked views and all coverage unchanged; layout, frame and incoming-object tests execute both dialects.
-
-### S6: Darwin and Win64 variadic functions print `...` and `va_start`
-
-- [x] **Problem.**
-  - **Done (S6):** `classifyVariadicArea` (`va_start` record, `variadic_convention` premise), `va` as the entry base, Win64 home stores hidden; full-tier OD lane changes only the six texts (0 `entry_sp`, `(uint32_t arg0, ...)` / `(uint32_t count, ...)`, PE `arg1..arg3` gone), checked views byte-identical; `test/reconstruction/variadic-source.test.ts` executes Mach-O and PE `fixture_variadic` (counts 0..9) and a Win64 IR fixture, with no rewrite for a missing home store or a direct use of `rdx`.
-  - Win64 `matrix_variadic` (`-O0` `0x140001320`, `-O2` `0x140001170`, stripped `sub@0x140001160`) spills `rdx`/`r8`/`r9` into the home area (`*(uint64_t *)(entry_sp + 16) = arg1; …`) and walks it from +16. Its signature shows the spilled registers as formals.
-  - Darwin (`-O0` `0x1000006b4`, `-O2` `0x1000004c4`, stripped `sub@0x1000004c4`) prints `double* entry_sp` as a formal and walks it.
-  - **Root cause:**
-    - `source-variadic.ts` handles only the caller side.
-    - Nothing recognizes the callee's `va_start` code.
-    - The planner makes every argument register a formal (`source-planner.ts:684-710`) and refuses declared variadic signatures (`:839`).
-    - The Win64 home area is classified `shadow_space` (`src/analysis/stack/index.ts:86-101`).
-  - **Change:**
-    - **Detection.** Let `a` be the lowest exposed incoming offset (S1's floor): Darwin 0 (or the end of the named stack formals), Win64 `8 + 8n` with 1 ≤ n ≤ 4. A value based at `a` must be dereferenced at non-constant offsets or escape, and no known-offset incoming access may lie below `a` except bound named formals. Win64 additionally needs, for each i in [n, 4), exactly one unconditional entry-region store of the entry value of the i-th integer argument register to home slot `8 + 8i`, before any other access to that area or any call, with no other use of those registers.
-    - **Rewrite:**
-      - the named formals only, followed by `...`;
-      - a source-only `va` value replacing the entry-SP base (`(uintptr_t)va + k`);
-      - the Win64 home stores hidden;
-      - a `va_list va; va_start(va, <last named>);` prologue (Python-like: `va = va_start(arg0)`);
-      - `va_list` is `char *` on both ABIs.
-  - **Soundness:** exact by the ABI definition of `va_start`. Record `requireAbi('variadic_convention', …)` and `presentation('va_start', …)`. If the base is only read at constant offsets, the function is not variadic: use S4 instead.
+    - `native-transfer.ts`: add `result_incidental?: true` to `NativeInterface`/`InferredCallee`. Compute it on complete callee units by evaluating the `incidentalInteger` classes over native SSA with _semantic_ caller demand only: forwarded demand from the requesting caller is circular, as for self-calls (`source-facts.ts:2052-2054`). Recurse through the callee's tails; SCCs are coinductive.
+    - Tails into such callees get `result_void`.
+    - `source-results.ts:926-936` allows incidental classification when every tail is `result_void`.
+    - `:558-560` does not count a final call into a `result_incidental` callee as establishing the result.
+    - Bump `NATIVE_SUMMARY_FORMAT`.
+  - **Soundness:** the same `incidental_result` premise, applied transitively. Extend the record's scope to list the callee ids. No new premise.
   - **Tests:**
-    - `fixtures/bin/macho-arm64-symbols` `fixture_variadic` (2 `entry_sp` lines today): assert `...`, no `entry_sp`, and `execute()` equal to the C oracle for counts 0..9 with doubles placed at entry SP.
-    - A Win64 IR fixture: the home stores are hidden and `execute()` returns the sum over registers and stack slots.
-    - Negative: a missing home store or a direct use of `rdx` means no rewrite.
-    - Add `va_list`/`va_start` to the test interpreter.
-  - **Acceptance:** the six texts have 0 `entry_sp` and signatures `(uint32_t arg0, ...)` / `(uint32_t count, ...)`; the PE `arg1..arg3` formals are gone.
-  - **Depends on:** S1, S2.
-
-### S7: SysV variadic functions print `...` and `va_start`
-
-- [x] **Problem.**
-  - **Done (S7):** `classifySysvVaStart` (`va_start` record listing the hidden stores, `variadic_convention` premise), `va_list` frame member `va`, dropped `al` guard; `fixture_variadic` (ELF) prints `(uint32_t count, ...)`, `va_start(frame.va, count)` and executes like the oracle for counts 0..12 in C and Python-like; the three SysV `matrix_variadic` texts have 0 `entry_sp` and `(uint32_t arg0, ...)`. A SysV IR fixture executes `va_arg` through `reg_save_area`; its negatives (missing xmm store, extra `rsi` use, call between footprint stores) keep the stores and the guard. Full-tier OD lane changes only the three texts; checked views unchanged. SysV `matrix_variadic` (`-O0` `0x401d10`, `-O2` `0x401bd0`, stripped `sub@0x401bd0`) prints 15 formals: `arg1..arg5`, `double arg6` and 7 × `uint128_t` (the register save area spills). It also prints `al` as `unknown_value("bits8_t", "non-argument entry register")` and the `va_list` initialization through `entry_sp`. Ghidra prints `double matrix_variadic(uint param_1)`.
-  - **Change:** match the exact footprint; if anything differs, do not rewrite.
-    - **Register save area** at frame offset R, 16-aligned. For i in [g, 6), one u64 store of the entry GPR i at R+8i (unconditional). For j in [f, 8), one 128-bit store of the entry xmm_j at R+48+16j, all inside one region guarded by `al != 0`.
-    - **`va_list`** at frame offset v: `gp_offset = 8g`, `fp_offset = 48+16f` (two u32 stores or one u64), `overflow_arg_area` = entry SP + 8 + s, `reg_save_area` = R.
-    - Every footprint store happens on every path before any other access to these areas, any call or any escape. The saved registers and `al` have no other use.
-  - **Rewrite:**
-    - the named formals followed by `...`;
-    - the footprint stores hidden and the empty guard dropped (check that structuring removes an `if` with an empty arm and a pure condition);
-    - `va_start(va, <last named>)` at the last footprint store;
-    - `va` as a `va_list` frame member, with fields spelled `va[0].gp_offset` / `fp_offset` / `overflow_arg_area` / `reg_save_area`;
-    - reloads of the overflow pointer print through S3.
-  - **Soundness:** SysV `va_start` lowering _is_ these stores. The `al` guard only matters if a caller violates the ABI. Record `requireAbi('variadic_convention', …)` and `presentation('va_start', …)` listing the absorbed stores.
-  - **Tests:** `fixtures/bin/elf-x86_64-symbols` `fixture_variadic` (24 `entry_sp` lines today):
-    - assert one named formal, `...`, and no `uint128_t` formals or `unknown_value("bits8_t"…)`;
-    - `execute()` against the oracle for counts 0..12, which forces the overflow path;
-    - Negatives: a missing xmm store, an extra use of `rsi`, a call between footprint stores. Each gives no rewrite and output identical to today's.
-  - **Acceptance:** the three texts have 0 `entry_sp` and the signature `(uint32_t arg0, ...)`.
-  - **Not done here:** `va_arg` recognition; Ghidra does not do it either.
-  - **Depends on:** S2, S3, S6 (shared `...`/`va` plumbing).
-
-### S8 (optional): Callers see a callee's variadic interface
-
-- [x] **Done (S8):** `nativeVariadicFootprint` (prepared unit, shared S6/S7 classification) publishes `NativeInterface.variadic`; source-view callers bind the named prefix and the anonymous arguments they provably set up (`variadic_call_arguments`, `variadic_call_convention`): all nine `matrix_variadic_call` texts print `matrix_variadic(2, …a, …b)` (ELF `-O2` regains `double arg1, arg2`, PE `-O0` loses the `rdx` formal); SQLite `sqlite3ParseUri` prints its `sqlite3_mprintf` actuals; executed SysV/Win64/Darwin caller fixtures in `native-interface.test.ts`; checked views unchanged.
-      Publish the S6/S7 footprint as a `NativeInterface` field: `variadic: {named_integer, named_vector, named_stack_bytes}` (`src/service/analysis/source-facts.ts:541-616`, native summaries). Bump `stack-calls` and `NATIVE_SUMMARY_FORMAT`.
-  - Effect: call sites print the variadic arguments (`matrix_variadic(2, a, b)`), and `matrix_variadic_call` `-O2` keeps its double parameters `a`, `b`, which R3 does not restore.
-  - Depends on: S6, S7, R3.
-
-### S9 (optional): Declared signatures with stack, variadic or hidden-result parameters
-
-- [x] `source-planner.ts:835-840` refuses variadic and `hidden_result` declarations, and `bind` refuses stack locations (`:142`). With S1, S4, S6 and S7, a declared stack parameter can bind to an incoming formal or object member, and a declared `...` can drive S6/S7. No corpus function needs it. Without it, a DWARF signature with stack parameters re-creates `entry_sp`, and `reconstruction/index.ts:1102` drops the signature.
-  - **Done (S9):** source view only; `planSource(…, extended)` accepts the function's own declaration with scalar stack parameters (bound through S1's `incomingStack`), one by-value aggregate (the S4 incoming object, declared name and position), a hidden result (first formal `result`, `T* f(T* result, …)` on SysV/Win64, `void` on Darwin) and `...` (named registers and first anonymous offset must equal the S6/S7 footprint); `declared_signature` record; unconfirmed parts (live entry SP other than the declared `va`, no footprint) replan without them, byte-identical to the output without standing. IR tests execute both dialects: Darwin 10 parameters (2 on the stack), `f(n, ...)` on Darwin/Win64/SysV, SysV sret + aggregate and Darwin sret, and contradicting declarations (an undeclared slot, `f(n, m, ...)`) identical to the refused output. ELF cells carry no DWARF; full-tier OD lane: 0 of 232 texts changed vs main (`od-rm3-s5b`).
-
-## J: `indirect_exit`
-
-The relative x86 jump-table shape (`lea; movslq; add; jmp *reg`) and the compressed ARM64 shape (`adr; ldr[bh]; add …, lsl #2; br`) are already proved; `sqlite3GetToken` prints a `switch`. CONTINUE.md's "relative jump table unproven" is wrong. Every failure comes from where the proof chain starts, or from which functions discovery knows, not from the table encoding.
-
-A whole-image instrumented run on sqlite3-arm64 found 21 tables proved and 291 distinct unresolved `br`: 9 compressed tables and about 282 indirect tail calls.
-
-### J1: Re-prove jump tables on settled chains
-
-- [x] **Problem.** `selectInnerLoop` (`0x1000bc1e4`) prints `if (value7 <= 12) return indirect_exit(0x1000bc594 + ((uint64_t)data_100132d3e[value7] << 2), …)`. Its graph holds 253 of the function's 639 instructions, so the case bodies are lost. Ghidra prints the `switch`.
-  - **Done (J1):** `selectInnerLoop` proves the table at branch `0x1000bc590` (13 targets, guard exact), holds 639 instructions and prints `void selectInnerLoop(…)` with a `switch (value7)` (case 1 shares the out-of-range exit) and no `indirect_exit`; SQLite image-wide proved tables 21 → 22 (none lost); the full-tier OD lane changes only that text.
-  - **Root cause:**
-    - `proveJumpTable` (`src/analysis/discovery/jump-tables.ts:205-702`) runs once, when the branch is first decoded, on the predecessor map decoded so far (`discovery/index.ts:542-566`).
-    - Per-graph validation (`:788-883`) only re-checks the recorded chain. When a chain member later gains predecessors, the table is rejected for good (`:877-880`).
-    - A fresh proof on the final chain succeeds: 13 targets, table `0x100132d3e`.
-  - **Change:**
-    - After every `drain()`, including the drains the sweep triggers, re-prove in VA order every unconditional indirect branch whose chain context changed: a member gained a predecessor or became a seed, or the root gained instructions. Replace or drop the table entry, enqueue new targets, and drain until stable.
-    - In per-graph validation, when the recorded chain fails, re-prove with the graph's predecessors and `is_entry`. Accept the result only if the chain is single-entry, every target is inside the function, and the targets are a subset of the current ones. The subset rule keeps validation removal-only, so it terminates.
-  - **Tests:** `test/analysis/jump-tables.test.ts`, synthetic ARM64. Entry `b L1`; at `L1`: `sub w8,w0,#1; cmp w8,#2; b.hi out; adr; ldrb; add …, lsl #2; br`, with one case branching back to `L1`. The table resolves (3 targets, guard exact) and the case bodies are members. Negative: with the guard before `L1`, the table stays unresolved and the graph `partial`.
+    - `source-results.test.ts`: a tail into a void-like callee gives `void`; a tail into a value callee is unchanged. Executed in both dialects.
+    - `test/service/analysis/native-summary.test.ts`: the flag is set for a void-like callee and not set for `return f()` with a value `f`.
   - **Acceptance:**
-    - `selectInnerLoop` has the table at `0x1000bc590` (13 targets), prints a `switch`, has no `indirect_exit`, and holds ≥ 600 instructions.
-    - SQLite: proved tables go from 21 to ≥ 22, and none is lost.
-    - Matrix and brotli texts are byte-identical except where a table newly resolves.
-    - Fix CONTINUE.md's note and `docs/internals/discovery.md` (proofs are re-run on the final predecessors).
+    - `cume_distValueFunc` and `jsonAppendRaw` print `void`, and `sqlite3session_delete` too if `sqlite3_free`'s summary is complete.
+    - Overlaps V2 on 4–6 functions.
+    - Checked view byte-identical.
+    - Final void-source row about 35–37 of 42 [estimate].
+  - **Depends on:** V2. Shares `native-transfer.ts`/`native-worklist.ts` with T4/T5.
 
-### J2: Register facts at the chain start
+## K: Call sites
 
-- [x] **Problem.** In `jsonTranslateTextToBlob` (`0x10008b404`), the table base `x24` is set before the parser loop and survives `bl` calls (callee-saved). The straight-line prover sees it as an opaque symbol. The same holds for `sqlite3ExprCodeTarget`, `sqlite3ExprDataType`, `strftimeFunc`, `re_sql_func` (whose case blocks become 14 spurious functions) and `sqlite3_str_vappendf`. `sqlite3Fts5ExprNew` needs a "known zero-extended" fact for an index guarded on `w8` and loaded through `x8`.
-  - **Done (J2):** `jsonTranslateTextToBlob` proves table `0x100132882` (59 entries, fact `x24` = const across 2 `bl`s), holds 822 instructions and prints `switch ((uint8_t)value1)` with no `indirect_exit`; SQLite image-wide proved tables 22 → 29 (7 from facts: the six named plus `jsonTranslateTextToBlob`), 78 fewer swept candidates, no table target is a function entry, only `yy_reduce` unresolved; a reconstruction validator gap (self-carried recombined whole) fixed on the way, which also restores `sqlite3PagerSavepoint`.
+### K1: Darwin variadic stack arguments across tail calls and joined slots
+
+- [ ] **Problem.** 35 Darwin variadic sites with a literal format, plus at least 8 with a variable format, print their anonymous arguments as frame stores: `frame.local_70 = (uintptr_t)address_3; sqlite3ErrorMsg(address, "no such trigger: %S");`. Those slots keep 17 frame structs alive. The callee's S8 footprint is present even when the CLI says "cut by budget", so budget is not the blocker (measured at 4× and 10×).
+  - **Root cause** (instrumented `planVariadicStackArguments`, `src/reconstruction/source-variadic.ts:30-293`):
+    - (R1a) every indirect tail exit counts as a boundary that reads the slot (`:175-181`, `:253-262`), although at a tail call SP is back at the entry SP;
+    - (R1c) a slot written on several branches has no single owner (`:220-237`);
+    - (R1b) any escaped frame address aborts the function (K7);
+    - (R1d) a later ambiguous callee may read the slot. This one is correct and conservative.
   - **Change:**
-    - Add an optional `entry_state` to the proof input, mapping a register to a constant or to "zero-extended from k bits". `read()` (`jump-tables.ts:233-242`) seeds roots from it.
-    - When the straight-line proof fails, compute facts only for the roots it needs: a forward must-dataflow over the root's decoded members, including proved-table edges.
-      - Lattice: ⊥ / const / zext k / ⊤.
-      - Transfer: reuse the prover's exact evaluators, factored into a stepper. A 32-bit write gives `zext 32`.
-      - Kills: x86 from the exact `payload.registers`. ARM64 from any register operand plus writeback, with an explicit kill-all list (PAC/AUT hints, SVC, anything without a payload). Calls kill every register not in the new `DiscoveryInput.preserved_registers`, filled from the image's `AbiProfile.preserved` (`service/queries/graphs.ts:104-112`, `prepare.ts:77-83, 214-222`). Without that input, calls kill everything (today's behavior).
-    - Re-derive the facts on the final graph, and keep the table only if the targets are the same or a subset.
-    - Record the defining instruction and every crossed call in the table's evidence (rule text names the ABI); optionally add `entry_facts` to `ResolvedJumpTable` (`core/contracts.ts:100`).
-  - **Soundness:** call preservation is the ABI contract SSA already applies in proven mode (docs/internals/ssa-values.md). The facts hold on every decoded path, including the table's own edges.
+    1. In the other-boundary check, skip a boundary whose snapshot SP is an exact stack offset ≥ `start + owner.size`.
+    2. Resolve a slot whose byte facts merge at the call block's entry with `sourceStackArgumentParts` (`source-stack-arguments.ts:35-53`), as `bindStack` does. The argument becomes the shared block-parameter value, and every per-edge store is `consumed`. Each store still meets the existing per-store conditions.
+  - **Soundness:** no new premise. Part 1 follows from the recorded `darwin_variadic_stack_arguments` premise: a tail call's SP is the caller's entry SP, and the callee's arguments lie at or above it. Part 2 reuses the existing join proof. The `variadic_stack_arguments` records stay.
+  - **Tests:** `test/reconstruction/variadic-source.test.ts`, IR builder:
+    - (a) a call, then an epilogue and a tail branch: the argument binds and `execute()` matches the oracle;
+    - (b) a slot written on two branches: the argument is the phi, both stores are consumed, and both paths match;
+    - (c) negative: a later ambiguous same-frame callee still blocks.
+  - **Acceptance:**
+    - Part 1 measured: `sqlite3DropTrigger` prints `sqlite3ErrorMsg(address, "no such trigger: %S", address_3);` and loses its frame struct. `sqlite3RowidConstraint` prints `sqlite3MPrintf(address_2, "%s.%s", …)` without a frame. `parserDoubleLinkSelect` loses its frame. `sqlite3CreateForeignKey` binds 2/2 sites.
+    - Part 2: `verifyDbFile` (needs K7 as well), `selectInnerLoop`, `generateSortTail`.
+    - Every other text is byte-identical. Checked view unchanged.
+
+### K2: Consume outgoing stores that a bound stack argument already shows
+
+- [ ] **Problem.** 33 stores in 10 functions (17 in brotli `main`) print the value and pass it again as the call's argument: `frame.local_2b0 = …; fprintf(stream_3, "corrupt input [%s]\n", …same…)`, `frame.local_88 = arg9; … sqlite3CreateFunc(…, arg8, arg9, …)`.
+  - **Root cause:** only `planVariadicStackArguments` consumes stores (`reconstruction/index.ts:286-302`). Format-rule closures (`bindStack`, `source-planner.ts:566-573`) and callee stack parameters (`:386-390`) bind the value but leave the store.
+  - **Change:**
+    - Factor the slot-eligibility checks out of `planVariadicStackArguments` into one helper.
+    - For every call whose projection bound a stack location through `bindStack`, mark the owning stores consumed under the same conditions: one exact store per slot (or a K1 join), unread, invisible at other boundaries, not hidden, private or a save.
+    - Record `presentation('stack_argument_store', …)`.
+  - **Soundness:** the value already appears as the argument. Under the premise the binding already records, the store's only observer is that call.
   - **Tests:**
-    - (a) a base in a callee-saved register, set before a loop that contains a `bl`, resolves with `preserved_registers`;
-    - (b) the base redefined on one back edge does not resolve;
-    - (c) (a) without `preserved_registers` does not resolve;
-    - (d) a `w`-guarded index loaded via `x` resolves when its only definition is a 32-bit write, but not after a 64-bit `ldr`;
-    - (e) the x86 `lea r14,[rip+T]` hoisted variant resolves;
-    - (f) `paciasp` or `svc` in the loop kills the facts.
+    - `variadic-source.test.ts`: Darwin `printf("%d %d", a, b)` with a closed format; the stores are gone and `execute()` matches.
+    - `test/reconstruction/stack-storage.test.ts`: a 9-argument call's stack-parameter store is consumed.
+    - Negative: a slot re-read after the call keeps its store.
   - **Acceptance:**
-    - `jsonTranslateTextToBlob` resolves (table `0x100132882`, 59 entries), prints a `switch` on the byte, and holds ≥ 800 instructions.
-    - SQLite: the six tables above resolve (≥ 28 proved), and `re_sql_func`'s case blocks are no longer functions.
-    - Only `yy_reduce` (348 entries > `MAX_JUMP_TABLE_ENTRIES = 256`) stays unresolved; see Decisions.
-  - **Depends on:** J1. The two share one `discovery` bump if they land together.
+    - The 33 lines disappear, in brotli `main`, `sqlite3Fts3Incrmerge`, `createFunctionApi`, `fts5FlushSecureDelete`, `sqlite3_rtree_query_callback`, `rename*Func`, `PrintFileProcessingProgress`, `sqlite3BtreeOpen` and ELF `-O0` `matrix_variadic`.
+    - Frame members that held only those slots disappear.
+    - Checked view unchanged.
+  - **Expected effect:** tokens −1.5k to −2k [estimate]; QA tokens (brotli `main`).
+  - **Depends on:** K1 (same files).
 
-### J3: Candidate functions at tail-jump targets
+### K3: Print the fixed prefix of an established variadic library contract
 
-- [x] **Problem.** In the stripped llvm-clang23 `-O2` cells, `matrix_switch` (ELF `0x401aa0`, PE `0x140001040`) is reached only by the entry point's tail `jmp` with the index fixed at 2.
-  - **Done (J3):** both stripped cells list `0x401aa0` / `0x140001040` and none of the 10 case blocks. Their texts print `uint64_t fn_function(uint32_t arg0, uint64_t arg1, uint64_t arg2)` with a 10-case `switch`, byte-identical to each other and in body to the symbol-bearing text; the entries print `return sub_401aa0(2, 7, 9);` / `return sub_140001040(2, 7, 9);`. In the full-tier OD lane only those two texts change. One-shot image-wide discovery promotes nothing in SQLite, brotli or any Mach-O or symbol-bearing cell.
-  - Discovery absorbs it into the entry function: there is no symbol, no `.eh_frame`, and a leaf has no `.pdata`.
-  - In the entry function the index is a constant, so the table does not prove, and the sweep turns the 10 case blocks into candidate functions.
-  - `decompile --address va:0x401aa0` returns the _entry_ function, which is why OD prints `void fn_function() { return indirect_exit(0x401ada, …); }`.
-  - The symbol-bearing cells have identical bytes and print a `switch`.
-  - **Change:** after the seeded drain and before the sweep (`discovery/index.ts:736-741`), and in image-wide or continuation mode only, seed a `candidate` function at the target T of an unconditional direct jump J in root R when all of these hold:
-    1. T is not a seed or an object address.
-    2. T lies before R's entry, or at or after the next seed above it.
-    3. The SP at J equals R's entry SP, by an SP-delta must-dataflow (new `stack-delta.ts`, x86 and ARM64).
-    4. Every decoded edge into T is such a jump.
-
-    Evidence: `derive('unconditional jump at entry stack depth to code outside the root body', …)`. Then J1 proves T's table, and R's jump becomes a direct `tail_call`.
-
-  - **Soundness:** a function boundary is a presentation choice; the `tail_call` edge models the transfer exactly. This reverses the documented non-goal "no promotion of branch targets to seeds", so update `docs/internals/discovery.md` with these guards.
-  - **Tests** (`test/analysis/discovery.test.ts`, synthetic):
-    - (a) `mov edi,2; jmp T` with T before the entry → T becomes a candidate with a complete graph, and the entry has a `tail_call`;
-    - (b) a backward jump inside the root's own range → no seed;
-    - (c) `push rbp; jmp T` → no seed;
-    - (d) T also reached by a `jcc` → no seed and no conflict;
-    - (e) ARM64 `ldp x29,x30,[sp],#16; b T` → seed.
-  - **Acceptance:**
-    - In both stripped cells, `functions` lists `0x401aa0` / `0x140001040` and none of the case-block addresses.
-    - `decompile` at those addresses prints `(uint32_t, uint64_t, uint64_t)` and a 10-case `switch` plus default, like the symbol-bearing cells.
-    - The entry functions print a direct tail call.
-    - Mach-O and all symbol-bearing cells are unchanged.
-  - **Depends on:** J1.
-
-### J4: Indirect tail calls in the source view
-
-- [x] **Problem.** Done (J4): `sqlite3_result_pointer` prints `return ((… (*)(uint64_t, ...))arg3)(arg1);` and `pcache1Shrink` `((void (*)(uint64_t, ...))data_100168d80)(value0); return;` (frame-save route, `indirect_tail_call` abi_conformance), 0 `indirect_exit` in both; checked views and every other full-tier text unchanged; `test/reconstruction/indirect-tails.test.ts` executes both dialects with a stub target.
-  - `sqlite3_result_pointer` (`0x100042080`, the inlined `invokeValueDestructor`) prints `return indirect_exit(arg3, "Indirect branch target is unresolved", …)` for `br x3` after a full epilogue. Ghidra prints `(*UNRECOVERED_JUMPTABLE)(param_2); return;`.
-  - `pcache1Shrink` (`0x1000ecae0`) does the same with `br x1`, where `x1` is loaded from the global `xMutexLeave` slot `data_100168d80`.
-  - About 282 of SQLite's unresolved `br` instructions are such tail calls, including frameless leaves like `memtraceRoundup`.
+- [ ] **Problem.** brotli `PrintBytes` and brotli `main` (5 sites) print `fprintf(...)` with no arguments at all, plus dead `__stderrp;` statements. Ghidra prints `_fprintf(pFVar2,pcVar3)`. These cause 3 wrong claims ("fprintf arguments are elided").
   - **Root cause:**
-    - Neither lifter marks an indirect branch as a tail call (`arm64/index.ts:286-293`, `x86_64/index.ts:316-320`).
-    - `tails` are built only for direct targets with a callee summary (`source-planner.ts:616-653`).
-  - **Change** (reconstruction and renderer, source view only; the checked view keeps `indirect_exit`):
-    - New `src/reconstruction/source-tails.ts` `classifyIndirectTails`. A candidate is an `indirect` exit without a table where the exit stack snapshot has SP = entry SP (`analysis/stack/index.ts:891-893`).
-    - Exclude targets whose expression cone (≤ 128 nodes, loads are leaves) contains a constant in an executable range. These are switch-like and keep `indirect_exit`.
-    - Return-location proof:
-      - ARM64: `x30` at the exit is either the entry `x30`, or a reload of a slot that qualifies as a frame save with this exit included. For that, extract the frame-save qualification at `source-stack.ts:1004-1222` into a helper that takes an explicit exit list, and use it from both places.
-      - x86-64: no store overlaps [entry SP, entry SP+8), the frame does not escape, and there is no unknown-address store.
-    - The frame-save route records the existing `abi_conformance` requirement.
-    - Accepted exits get `presentation('indirect_tail_call', …)` and a `TailProjection` with `target: null` plus the target value (`source-model.ts`).
-    - Arguments: bind the ABI argument-register prefix from `block.register_exit`, as for indirect calls, with the list open. The producer of the indirect-call prefix was not located; start from `src/service/analysis/source-facts.ts`.
-    - `planSourceStack` treats these exits like tail calls.
-    - Renderer (`renderer.ts:8268-8310`): use the indirect-call `functionPointer` spelling (`:4385-4396, 4509-4535`). Print `call; return;` when the function's return projection is void, otherwise `return call`.
-  - **Soundness:** with SP = entry SP and the return location proved to hold the entry return address, the branch is observationally a call of the target by our caller. The interface stays open and the target's effects unknown.
-  - **Tests:** IR-built like `test/reconstruction/frame-saves.test.ts`, executed with a stub target:
-    - (a) an ARM64 frame + call + restore + `br x3` becomes a value-target tail that forwards the result and passes x0;
-    - (b) x30 overwritten → no tail;
-    - (c) SP not restored → no tail;
-    - (d) target = `adr` + table entry → no tail;
-    - (e) a frame address passed to the inner call → no tail;
-    - (f) x86 `add rsp,8; jmp rax` → tail, and a store to [entry SP] → no tail;
-    - (g) checked view unchanged.
+    - A contract is rendered only when `layout.state === 'complete'` and the argument count equals the declared count (`source-planner.ts:544-557`).
+    - The fallback needs an `InferredCallee`, but `observePreparedCallInterfaces` skips calls with an established contract (`src/analysis/calls/observed.ts:55-59`).
+    - The format rule rightly refuses to close here: the candidate formats `"%d B"` and `"%0.3f KiB"` need different types (`src/service/analysis/source-variadic.ts:364-379`).
+  - **Change:**
+    - In `source-planner.ts`, after the complete-contract branch (`:553-636`): when `declaration.variadic` and no rule signature closed the call, bind each fixed parameter through `bind(...)` at the contract's register locations, and bind the declared result.
+    - Project the call as `inferred` with `argument_list_complete: false`, so the header states open arity.
+    - Record `presentation('library_fixed_prefix', …)`.
+  - **Soundness:** the contract is established and non-conflicting, and the fixed locations are exactly the ABI classification. The anonymous tail stays open.
+  - **Tests:**
+    - `test/service/analysis/source-variadic.test.ts`: `"%d B"` vs `"%0.3f KiB"` gives no closing signature.
+    - `variadic-source.test.ts` (or a new `library-variadic-prefix.test.ts`): a phi of two `FILE*` loads and two literal formats feeding `fprintf` prints `fprintf(stream, format)`. `execute()` with a stub `fprintf` matches on both paths.
   - **Acceptance:**
-    - `sqlite3_result_pointer` prints `((void (*)(uint64_t, ...))arg3)(arg1); return;` (or the `return` form) with no `indirect_exit`.
-    - `pcache1Shrink` prints a function-pointer tail call through `data_100168d80` and records `abi_conformance`.
-    - Both checked views are unchanged.
-    - `selectInnerLoop` / `jsonTranslateTextToBlob` before J1/J2 keep `indirect_exit` (SP ≠ entry SP, code-address cone).
-  - **Independent** of J1–J3. Rebase with S2: both touch `source-stack.ts`.
+    - `PrintBytes` prints `stream = __stderrp; … fprintf(stream, format)` with no dead `__stderrp;` statements (measured).
+    - The 4 brotli `main` sites change the same way.
+    - Everything else byte-identical. Checked view unchanged.
 
-## Expected end state (prototype-backed where noted)
+### K4: String literals from tail-exit arguments and partly constant phis
 
-| artifact          | full tier now           | after the items                                                                                                                                                                                    |
-| ----------------- | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `physical_return` | 34 calls, 18 functions  | 0. Prototype of R1–R6: only the 18 targets plus `fts3EvalTestExpr` and `fts5ParseSetColset` changed, both toward their source types. `fts3EvalAllocateReaders` keeps a spurious `uint32_t` result. |
-| `entry_sp`        | 163 lines, 13 functions | 0 expected. Prototype of S1–S3: `createFunctionApi` 18 → 0, SysV variadic 38/31 → 2. S4, S6 and S7 not prototyped.                                                                                 |
-| `indirect_exit`   | 6 functions             | 0 expected in the corpus. Probes: tables proved for J1/J2; J3 seed by analysis; J4 not prototyped. Image-wide, `yy_reduce` remains.                                                                |
+- [ ] **Problem.** 78 addresses of `__cstring` strings print as hex (71 non-empty) in 16 functions: brotli `main` 27, `isDate` 23, `codeOffset` `0x100153ba2` where Ghidra prints `"OFFSET"`. Ghidra spells 65 of the 71 as literals.
+  - **Root cause:** a literal needs a `SourceAddress.string` fact, and only addresses in the candidate set of `sourceAddresses` (`source-facts.ts:663-902`) get one.
+    - (a) Tail-exit register constants are never candidates. Only calls are (`:834-876`).
+    - (b) The 32-bit-cell concat/phi rule drops every constant when any edge is non-constant (`:772-811`, `:789-790`).
+  - **Change:**
+    - (a) Tile the constant cells of each `indirect`-terminator block's exit `register_states` into whole pointer-width constants, as for call `register_candidates`.
+    - (b) Run `constantCandidates` (`src/service/analysis/source-variadic.ts:108-212`: bounded at ≤ 8 values, through phis, selects and pure ops) on each pointer-width concat or phi, and on each tail-exit and call argument. Add every member as a candidate.
+    - A candidate only _allows_ a fact. `recoverDataAddress` still requires immutable, terminated, section-bounded bytes, and every printed literal keeps its `string_literal` record.
+  - **Soundness:** proven. A constant on an edge is that value on that path.
+  - **Tests:**
+    - `test/emitters/c/source-literals.test.ts`: a tail call with a literal argument prints the literal, and a phi of {literal, loaded value} prints the literal on the constant edge.
+    - `test/analysis/strings.test.ts`: per-edge constants are candidates.
+  - **Acceptance:**
+    - Measured on 10 functions: 70 → 41 hex addresses (`isDate` 23→0, `fts5UnicodeCreate` 3→0, `codeOffset` prints `"OFFSET"`, `parserDoubleLinkSelect` 1→0).
+    - With `constantCandidates`, also `sqlite3_result_error_code` and brotli `main` [estimate].
+    - Checked view: report any added `data_address(...)` wrappers.
+  - **Expected effect:** comprehension and QA in `isDate`, brotli `main`, `codeOffset`, `sqlite3_result_error_code`.
 
-## Decisions recorded with this roadmap
+### K5: Writable import slots are program storage; interior addresses are named after their symbol
 
-- **R6 (untyped scalar FP result):** proven mode only if the precision check is clean, otherwise `likely`. The item decides from its own measurement.
-- **J3:** reversing discovery's "no promotion of branch targets to seeds" is accepted with the four guards above. A boundary is presentation; the transfer stays exact.
-- **Not in scope:**
-  - `yy_reduce`'s 348-entry table. It needs `MAX_JUMP_TABLE_ENTRIES` above 256 (`discovery/index.ts:29`, mirrored in target recovery). That is a structural cap, not the work budget; raise it only by an explicit decision.
-  - Hiding outgoing-argument stores to budget-cut callees (`createFunctionApi`'s `frame.local_88/80/90`). This needs closed callee interfaces or `likely` arity.
-  - `va_arg` recognition.
-  - The `__unknown_effect` functions (unlifted encodings such as `INS_asimdins_IR_r` and `USHL_asimdsame_only`), a G9-style follow-up.
+- [ ] **Problem:**
+  - **Soundness bug.** Three calls through SQLite's writable `aSyscall[i].pCurrent` print as calls to `fstat`, `stat` and `fcntl` (`verifyDbFile`: `value0 = (uintptr_t)fstat; ((uint64_t (*)(…))value0)(…)`; `unixSync`). SQLite's `unixSetSystemCall` rewrites those slots.
+  - **Naming.** 212 `data_1001…` names are interior addresses of named Mach-O symbols: `_sqlite3Config` 156, `_sqlite3BuiltinFunctions` 22, `_pcache1_g` 22, … They include the 49 mutex-method calls the grader misread in 4 claims ("invokes a cleanup trigger through data_100168d70").
+  - **Root cause:**
+    - `recoverImportBindings` (`src/analysis/strings/source-data.ts:511-592`) marks every bound slot as an import binding, without a section or segment check. `planGlobals` (`src/emitters/source-globals.ts:147-177`) then folds the load under the premise "only the dynamic linker writes a binding slot" (`source-model.ts:148-151`).
+    - Mach-O nlist symbols have no size (`src/loaders/macho/metadata.ts:69`), so `buildSymbolIndex` gives them the unit range `[a, a+1)` (`source-data.ts:173-178`), and interior addresses fall back to `data_<hex>` (`source-globals.ts:113-116`).
+  - **Change:**
+    - (a) Keep a slot as an import binding only when only the loader writes it: Mach-O `S_NON_LAZY_SYMBOL_POINTERS`/`__got`/`__auth_got` or a read-only-after-fixup segment (`__DATA_CONST`, `SG_READ_ONLY`), ELF `PT_GNU_RELRO`, the PE IAT. A bind in writable program data stays plain storage; its load prints as a load, with an optional `/* initially fstat */` declaration comment.
+    - (b) Name a data address with no covering symbol relative to the nearest preceding object symbol in the same section, when no other symbol or data record starts in between: `sqlite3Config_0x80` with `/* sqlite3Config+0x80 */`. The extent stays unknown. Record `presentation('symbol_relative_name', …)`.
+  - **Soundness:** (a) removes an unsound fold; the checked view already prints the load. (b) is exact address arithmetic and claims no extent or type.
+  - **Tests:**
+    - `test/analysis/import-bindings.test.ts`: a bind inside `__DATA,__data` is not an import slot; a `__got` bind is.
+    - `test/emitters/c/source-globals.test.ts`: an interior address of a size-less symbol is named after it.
+    - An executed C oracle in which the slot is rewritten at run time.
+  - **Acceptance:**
+    - `verifyDbFile` and `unixSync` load the `aSyscall` slot and call through it.
+    - 20 functions rename `data_1001…` to `sqlite3Config_0x…`, `pcache1_g_0x…` and so on.
+    - The brotli `__stderrp` texts are byte-identical.
+    - Declare the checked view's `data_address("…")` name changes.
+
+### K6: Call spelling: no `...` in open-arity casts; tail arguments printed like ordinary arguments
+
+- [ ] **Problem:**
+  - 77 function-pointer casts spell open arity as `(T (*)(A, B, ...))`, which in C declares a variadic prototype. This caused 4 wrong claims (`matrix_callback` ×2, `sub@0x100000450`, `sub@0x1400010f0`).
+  - 46 `(uintptr_t)` casts on tail-call arguments in 21 functions: `return sqlite3SrcListDelete((uintptr_t)address_2, (uintptr_t)address_1)`, where `address_1` is a declared pointer.
+  - **Root cause:**
+    - `functionPointer` (`renderer.ts:4690-4727`, `:4709-4710`) appends `...` for open arity, where direct calls state open arity in the header note (`:4574-4582`).
+    - Tail arguments print through `valueLiteral`/`value` (`:8425-8428`, `:8519-8522`) instead of `sourceCall`'s per-argument routine (`:4441-4454`).
+  - **Change:**
+    - Keep `...` only for a declared variadic signature. Add an open indirect call to the header's open-arity note (for example `indirect call at 0x…`).
+    - Extract the per-argument routine and use it for tail arguments.
+    - Update the `function_pointer_call` record texts (`:4570`, `:8420`).
+  - **Soundness:** presentation only. The printed arguments fill exactly the cast's named positions, so the executed C passes the same registers.
+  - **Tests:**
+    - `test/emitters/c/function-pointer-calls.test.ts` (new): an open indirect call prints without `...` plus a header note, and `execute()` matches the oracle callback.
+    - `test/reconstruction/indirect-tails.test.ts`: no `(uintptr_t)` on a declared pointer local.
+  - **Acceptance:** the 77 casts lose `, ...`, and the 46 tail arguments lose `(uintptr_t)`. Nothing else changes.
+
+### K7: Escaped frame addresses bound the variadic aliasing floor
+
+- [ ] **Problem.** One escaped frame address anywhere (`fstat(fd, &buf)`) disables variadic binding for the whole function: `source-variadic.ts:70-97` aborts on any stored or register-held stack address (10 of 19 affected functions).
+  - **Change:**
+    - Do not abort on an exact `stack`/`stack_fragment` escape. Record the lowest escaped offset as `escapeFloor`, and admit only slots with `start + size ≤ escapeFloor`.
+    - Keep aborting on `dynamic_stack` and on missing snapshots.
+    - Record `requireAbi('escaped_frame_floor', …)`: a frame address handed to a callee or stored designates bytes at or above itself.
+  - **Soundness:** proven under the new `escaped_frame_floor` premise (D5, accepted). `frame_object` does not cover it.
+  - **Tests:** `variadic-source.test.ts`: a callee receiving `&local` above the slot binds; one receiving an address at or below it does not.
+  - **Acceptance** (measured):
+    - `fts3DestroyMethod` prints all 11 `fts3DbExec` arguments and loses 11 frame members (this removes the grader's "%s that no argument supplies" claim).
+    - `unixSync` prints its `sqlite3_log` arguments.
+  - **Depends on:** K1.
+
+## F: Floating point
+
+### F1: FP-environment epoch webs: coinductive acceptance and mark-based unobserved epochs
+
+- [ ] **Problem.** In functions with a call inside a loop, every FPCR guard, failure effect, `unknown_exit("Unsupported FPCR environment")` and `fp_*` helper stays printed. `rtreeInsertCell` has 19 `requirement_predicate` guards and 3 `unknown_value("uint32_t", "call clobbers fpcr")` (lexical tokens 6,360 vs Ghidra's 3,144). Undeclared `value0 = unknown_value("bits32_t", "FPCR environment");` assignments in `sqlite3_result_double` and `cume_distValueFunc` do not compile.
+  - **Root cause:**
+    - `sourceFpPresentation` returns `unchanged` unless every guard's epoch is assumed. `assumedEpoch` is inductive and rejects cycles (`src/reconstruction/source-fp.ts:146-160`, `:149`), and a loop with a call makes the FPCR loop phi depend on itself.
+    - `unobserved` (`:209-238`) is a reference count that never releases a cycle, and it marks only call outputs (`:234`).
+    - `renderer.ts:5884-5894` prints copies into a phi whose class is hidden.
+  - **Change:**
+    1. Replace `assumedEpoch` with a greatest fixpoint over the bitcast/phi transport web: a member is accepted iff every non-member parent is an entry or call-clobber epoch and every member parent is accepted. Charge `context.checkpoint` per edge.
+    2. Replace the reference count with a mark pass: values reachable from any use other than an omitted guard condition are observed, and the rest of the released web is unobserved, including phi destinations and entry bindings.
+    3. `printedCopies` skips copies whose destination is unobserved.
+  - **Soundness:** proven, with no new premise. A phi or bitcast only transports its inputs' values. Records:
+    - `fp_environment_guard` gains the accepted transport ids;
+    - a new `fp_unobserved_epoch` lists the hidden copies and definitions.
+    - Checked view byte-identical (verified on `rtreeInsertCell`).
+  - **Tests:** `test/emitters/c/source-fp.test.ts`, both ABIs and both dialects:
+    - IR-builder loops with a call in the body and guards before and after it, executed against `execute()`. No `requirement_predicate`, `unknown_value` or undeclared identifier; compile with clang as `source-fp-native.test.ts:195` does.
+    - Negatives: an explicit FPCR write inside the loop, or a web with one non-epoch input, keeps the guards.
+    - An entry/call phi consumed only by a guard prints nothing.
+  - **Acceptance** (measured):
+    - `rtreeInsertCell` loses all guards, FPCR effects and exits, placeholders and `fp_*` helpers (6,360 → 5,335 tokens).
+    - `sqlite3_result_double` (123 → 114) and `cume_distValueFunc` (182 → 173) lose the dangling assignments.
+    - The other 52 FP-note texts are byte-identical.
+    - After A1, `isDate` loses all 27 guards and 8 placeholders (simulated: 18,789 → 15,338 tokens).
+
+### F2: ABI premise: calls preserve the FP control state, except known environment writers
+
+- [ ] **Problem.**
+  - Darwin arm64 clobbers FPCR at every call (`src/abi/darwin-arm64/index.ts:310-337`), which creates an epoch per call, phi webs and placeholders. `"arm64:fpcr:0:32"` appears in 64 printed boundary lists.
+  - SysV and Win64 already preserve the MXCSR control bits (`sysv-amd64/index.ts:293-302`, `windows-x64/index.ts:64-73`), but they make no exception for `fesetround`/`_controlfp`. A call to one of them is ignored on every target.
+  - **Change:**
+    1. Darwin: remove FPCR from `CLOBBERS.registers`.
+    2. Add an ABI-profile field `environment_writer_clobbers` (FPCR, or MXCSR[6:16]). Apply it where the call target becomes known, before SSA cell construction (import-stub resolution / `src/analysis/calls/index.ts`), to:
+       - fenv.h writers: `fesetround`, `fesetenv`, `feupdateenv`, `feholdexcept`, `fesetexceptflag`, `feenableexcept`, `fedisableexcept`;
+       - MSVC: `_controlfp`, `_control87`, `_controlfp_s`, `__control87_2`, `_set_controlfp`, `_fpreset`;
+       - BSD: `fpsetround`, `fpsetmask`;
+       - local callees whose summary shows exit FPCR ≠ entry FPCR.
+    3. Record `requireAbi('fp_environment_preserved', [call ids], …)` for unknown, indirect and non-writer targets.
+    4. Source FP treats writer-call epochs as not assumed, so their guards stay.
+  - **Soundness:**
+    - AAPCS64 §6.1.2: the FPCR control fields change only through specific support functions.
+    - SysV psABI: the MXCSR control bits are callee-saved.
+    - Microsoft x64: MXCSR[6:15] is nonvolatile.
+    - The rule tightens soundness for fenv writers on x86.
+    - **The checked view changes** (intended; D2): FPCR call-clobber values disappear.
+  - **Tests:**
+    - The ABI profile tests: clobber sets.
+    - `source-fp.test.ts`: a `fesetround` import call between two FP operations keeps the guard after it (both dialects, all three ABIs); an ordinary import preserves the epoch.
+  - **Acceptance:**
+    - Source texts identical to F1 + F4 for `rtreeInsertCell`, `sqlite3_result_double` and `cume_distValueFunc` (measured).
+    - Boundary lists lose `arm64:fpcr`.
+    - Review and declare the checked-view diff.
+  - **Cost:** +2.2% work on `rtreeInsertCell`, +5.7k on `isDate`. Pay it back in the same change; `isDate` is at 9.79M.
+  - **Depends on:** F1.
+
+### F3: The source view drops the FP-environment note; the premise is recorded
+
+- [ ] **Problem.** 55 functions print `/* assumes nearest-even rounding and masked FP traps (requirement_…) */` (4,730 comment bytes). 12 of them have no FP operation at all, only a callee that requires it (`sqlite3_finalize`, `fts3DestroyMethod`, …). The note causes 3–4 wrong claims ("source has no such comment") and appears in 14 noise reasons. The FP requirement propagates through callee summaries (`source-requirements.ts:338-340`, `source-facts.ts:623-628, 1437-1441`), so fuller summaries spread the note further: +40 texts at 10× budget.
+  - **Change** (`renderer.ts:8823-8843`, source view):
+    - Print no note. Record `validation.requireAbi('fp_default_environment', [function id], …)` whenever an `fp_environment` requirement exists.
+    - Map omitted-guard provenance (`mapSites`, `:8797-8811`) to the signature span.
+    - `emission.requirements` is unchanged; the checked view keeps its `/* Requirement … */` line.
+    - Update docs/CORE.md (`:367-368`, `:1223-1225`).
+  - **Soundness:** a language premise of the same class as `frame_object`. C11 7.6.1p2: code compiled with `FENV_ACCESS` off (the default) that runs under non-default modes has undefined behaviour, so emitted C without `#pragma STDC FENV_ACCESS ON` already presumes the default modes.
+  - **Tests:** `source-fp.test.ts`, `source-fp-native.test.ts`, Python-like:
+    - no note in the text;
+    - `local_validation` contains the record;
+    - `requirements` lists every site;
+    - mappings point into the signature;
+    - checked view byte-identical.
+  - **Acceptance:** the 55 texts lose exactly the trailing signature comment. No other change.
+  - **Expected effect:** Claude tokens geomean about −0.03 [estimate]; wrong claims −3 to −4; noise on about 13 functions. Lexical tokens are unchanged.
+
+### F4: Native FP where NaN-freedom is provable; value-preserving conversion spelling
+
+- [ ] **Problem:**
+  - `fp_mul(64, cast_unsigned_to_float("ieee64_t", "bits64_t", arg0), 9.3e-10)` in brotli `PrintBytes` (×3);
+  - `fp_div(…cast_unsigned_to_float…, 1000000.0)` in `PrintFileProcessingProgress`;
+  - `cast_signed_to_float` in `cume_distValueFunc` and `rtreeInsertCell`;
+  - `(double)(int32_t)arg0 / (double)(int64_t)arg1` in 9 `matrix_mixed` cells, with about 9 wrong claims "converted through int64_t".
+
+  The grader reads `fp_mul(64, …)` as a call with a constant 64.
+  - **Root cause:**
+    - The payload gate (`source-fp.ts:297-365`, `:404-408`) treats every value that reaches a call argument, a store or an integer consumer as NaN-payload sensitive, including int→float conversions and finite arithmetic, which cannot produce a NaN.
+    - `expressions.ts:938-943` always casts the operand to the IR conversion's source width and signedness.
+  - **Change:**
+    - (a) Int→float conversions are NaN-free candidates whatever their sensitivity.
+    - (b) A bounded, memoized magnitude pass over FP values:
+      - literals give `|c|`;
+      - W-bit conversions give `2^(W-1)` / `2^W`;
+      - add/sub/mul, and division by a finite nonzero literal, combine the operand bounds with a rounding margin;
+      - a phi gives the max; cycles are unbounded.
+
+      An operation whose operands are bounded below the format maximum and that has no invalid case is NaN-free.
+
+    - (c) Print `(double)narrow` when the IR operand is `zero_extend` of an unsigned narrower value (signed or unsigned conversion) or `sign_extend` of a signed narrower one. Decide from the IR expression, not from the printed C type.
+    - Records: `fp_nan_free` (subjects and bounds); extend `fp_native_operations` for (c).
+  - **Soundness:** an 8–64-bit integer converts to a finite IEEE value. Finite add/sub/mul round to a finite value or ±inf, never NaN, so the IR's canonical-NaN rule is never exercised. A conversion depends only on the mathematical integer.
+  - **Tests:** `test/emitters/c/source-fp-native.test.ts`:
+    - u64→f64 times a literal, stored to memory: `execute()` and clang, both dialects;
+    - negatives: an argument-valued operand stays `fp_mul`, division by a variable stays `fp_div`, and a bound overflow stays a helper;
+    - zero-extended u16/u32 values ≥ 2^31 and ≥ 2^15.
+  - **Acceptance** (measured):
+    - `PrintBytes` prints `(double)arg0 * 9.313225746154785e-10` (168 → 145 tokens).
+    - `PrintFileProcessingProgress` prints `(double)(value2 - value1) / 1000000.0`.
+    - The 9 `matrix_mixed` cells print `(double)arg0 / (double)arg1`.
+    - All else identical; checked view unchanged.
+  - **Depends on:** F1 (same file).
+
+### F5: NaN payloads are unobserved
+
+- [ ] After F1 and F4, 11 helpers remain:
+  - 9× `fp_mul` in the `matrix_aggregate` cells, stored to caller memory (source `input.weight *= scale`);
+  - one `fp_add` (ELF `-O0` `matrix_variadic`);
+  - one `fp_div` (`cume_distValueFunc`).
+
+  They cause about 8 wrong claims ("fp_mul call / constant 64") and "fp_mul helper" noise on 5 cells. Removing them needs the existing `fp_native_operations` premise ("source floating results are consumed as values, not inspected for arithmetic NaN payloads") extended to stores and call arguments. IEEE 754 leaves payload propagation as a "should", and C Annex F does not specify payloads. The IR's canonical NaN (`src/ir/semantics.ts:14-15`) is itself not hardware-exact (ARM FPCR.DN=0, x86 `0xfff8…`).
+  - **Change:** `source-fp.ts:321, 331` stop marking stores and call arguments as payload-sensitive under `requireAbi('fp_nan_payload_unobserved', …)` (D6, accepted). Extend the `fp_native_operations` record text.
+  - **Tests:** `test/emitters/c/source-fp-native.test.ts`: a possibly-NaN product stored to caller memory and one passed to a call print as operators. Oracles compare NaN results modulo payload and every other result bit-exact, in both dialects.
+  - **Acceptance** (measured): all 11 become operators; the `matrix_aggregate` cells print `address->field_0x10_f = arg2 * value0` (or the member's name). Checked view unchanged.
+  - **Depends on:** F1, F4.
+
+## A: ARM64 lifting and frames
+
+### A1: Unlifted SIMD&FP data-processing encodings get a bounded effect
+
+- [ ] **Problem.** `isDate`, `unicodeNext` and `sqlite3VdbeDisplayComment` print their callee-saved saves as stores (`frame.local_a0 = unknown_value("bits64_t", "non-argument entry register");`, 46 lines). They also lose every FP presentation and frame promotion. They are the three costliest SIMD users in the corpus: `isDate` is 18,789 tokens vs Ghidra's 6,521.
+  - **Root cause:**
+    - The unlifted encodings `FMADD_D_floatdp3`, `FCVTZS_asisdmisc_R`, `FCCMP_D_floatccmp`, `INS_asimdins_*`, `USHL_asimdsame_only`, `XTN_asimdmisc_N` and `UZP1_asimdperm_only` fall back to `unknownClobbers` (`src/lifters/arm64/semantics.ts:58-76`, `index.ts:339-347`). That clobber set covers x0–x30, **SP**, v0–v31, **FPCR** and all memory.
+    - `source-stack.ts:1098-1101` treats any `unknown_effect` as a frame escape, so the save elision never runs: there is no `frame_save` record in these functions.
+    - `source-fp.ts:121-127` aborts FP presentation on an FPCR output.
+  - **Change:**
+    1. Lifter catch path: derive the bound from the decoded encoding class, never from assembly text. When an `_`-separated segment of `payload.canonical_encoding` starts with `asimd`, `asisd`, `float` or `crypto` (but not `asisdls`, the SIMD loads and stores) and the instruction falls through, emit `block.unknown(reason, …)` with:
+       - registers: V0–V31, plus GP `Rd` for to-general forms (`*_float2int`, `UMOV_*`, `SMOV_*`) when Rd ≠ 31;
+       - flags: NZCV and FPSR;
+       - memory: `none`;
+       - no SP and no FPCR.
+
+       The diagnostic and coverage reason stay unchanged.
+
+    2. `source-stack.ts:1098`: an `unknown_effect` with `clobbers.memory === 'none'` exposes nothing.
+  - **Soundness:** an ISA fact. The A64 "Data Processing – Scalar Floating-Point and Advanced SIMD" group never accesses memory or names SP (register 31 is ZR). It writes only Vd, GP Rd in the to-general forms, NZCV (FCMP/FCCMP) and FPSR, and it reads FPCR without writing it. No presentation record is needed. **The checked view changes** for these three functions (intended; D2; `isDate` checked 273,167 → 238,427 bytes).
+  - **Tests:**
+    - `test/lifters/arm64/simd-move.test.ts`: an unsupported SIMD encoding keeps SP, x19–x28 and memory.
+    - IR builder: a store before and a load after a `memory: 'none'` effect gives the stored value.
+    - `test/reconstruction/frame-saves.test.ts`: a save is elided across a memory-free unknown effect; an `unknown_read_write` effect still exposes the frame.
+    - Emitted C/Python against oracles.
+  - **Acceptance** (measured):
+    - `sqlite3VdbeDisplayComment` 2,296 → 1,618 tokens, with no save lines and no `unknown_value`.
+    - `isDate` 18,789 → 10,934 tokens (gotos 96 → 56, `requirement_predicate` 27 → 0, `fp_*` 9 → 0).
+    - All other texts byte-identical.
+  - **Depends on:** C1, without which `isDate` fails with the edge-copy invariant. F1 for the remaining FP guards.
+
+### A2: Lift A64 single-lane SIMD loads and stores (`ST1`/`LD1`, `asisdlso`/`asisdlsop`)
+
+- [ ] **Problem.** After A1, `unicodeNext` keeps its 14 save lines and an exposed frame, because `ST1_asisdlsop_S1_i1s` (`st1 {v.s}[i], [xn], #4`) is a real store that A1 must not bound.
+  - **Change:** in `ArmSemantics.execute()`, lift the single-lane forms from the structured operands, never from operand text:
+    - the memory operand gives base, writeback (`post`/`none`), `access_bits` and register offset;
+    - the vector operand gives the lane;
+    - ST1 stores `extract(V[t], lane*esize, esize)` little-endian; LD1 inserts into V[t];
+    - post-index writeback adds `access_bits/8` or Xm, and SP may be the base.
+
+    Multi-register forms (`asisdlse`/`asisdlsep`) stay unlifted.
+
+  - **Soundness:** exact ISA semantics.
+  - **Tests:** `test/lifters/arm64/semantics.test.ts`: ST1/LD1 lane with immediate and register post-index, an SP base and every element size, `execute()` against byte oracles.
+  - **Acceptance:** `unicodeNext` prints no `non-argument entry register` and no `__unknown_effect`, and has `frame_save` records (about −400 to −500 tokens [estimate]). Its checked view changes (intended). Other texts byte-identical.
+  - **Depends on:** A1.
+
+### A3: Escaped slots bounded by a frame save print as independent locals
+
+- [ ] **Problem.** 67 texts declare a `_Alignas(16) struct { … } frame;`. That costs 3,420 declaration tokens, 155 pads and 2,292 `frame.` prefixes, and the judges cite the frame in 30 noise losses. Small functions that pass one local's address to a callee print a padded object: `getConstraintToken` prints `struct { uint8_t pad_40[12]; uint32_t local_34; uint8_t pad_30[48]; } frame;` for `&frame.local_34`.
+  - **Root cause:** `frame()`/`frameLayout` (`source-stack.ts:2423-2531`, `:66-316`) treat the whole escaped region up to the entry SP as one object. The existing `frame_save` premise (`:1579`) says that a frame address handed to a callee designates its own object and never a save slot, so an escaped object below a save slot ends at that slot. `frame()` does not use this.
+  - **Change** (source view, `!reachAll`, entry SP not live):
+    1. Each escaped or indexed base at or above `reachFloor` defines a region running to the lowest proven save slot above it (`saveBytes`), or to the entry SP. Overlapping regions merge.
+    2. A region that is exactly one `frameLayout` member, with no other access, taken address or indexed base inside it except at its start, becomes `FrameMember.independent` (`source-model.ts:298-312`).
+    3. The renderer (`:9136-9177`) declares it on its own (`uint32_t local_34;`), prints `&local_34`, and omits the struct when no non-independent member is left.
+    4. When every byte from the lowest save slot to the entry SP is a hidden save byte, end the object at that save slot. This drops the trailing pad.
+    5. Records: `presentation('escaped_slot_object', …)` and `presentation('frame_object_save_area', …)`, with `requireAbi('frame_object_base')` and `requireAbi('frame_save')` on their subjects.
+  - **Soundness:** proven under existing premises (`frame_object_base`, `frame_save`). Objects are contiguous. Memory operations are unchanged, so the checked view is untouched.
+  - **Tests:** `test/reconstruction/frame-object.test.ts`:
+    - an escaped slot directly below the save area is an independent local;
+    - negatives: a gap byte, two members in the region, an interior or indexed address, a live entry SP;
+    - a callee oracle writes through the pointer, and the result equals the IR interpretation.
+
+    `frame-saves.test.ts`: the trimmed object never covers a byte that is not hidden.
+
+  - **Acceptance:**
+    - `getConstraintToken`, `sqlite3Fp10Convert2`, `sqlite3session_delete`, `stat4ValueFromExpr`, `fts5CreateTokenizer`, `filterHash` and `jsonAfterEditSizeAdjust` print no frame struct.
+    - `fts3DestroyMethod` and `unixSync` print `local_24` outside it.
+    - About 30 more frame structs lose their tail pad.
+    - Checked view byte-identical.
+  - **Expected effect:** about −0.4k tokens [estimate]; noise in 9 small functions, 8 of which lost the noise dimension. After K1/K2 and closed callee arities, 22 more functions lose the struct entirely: in 22 functions an open-arity call's possible argument area is the only reason the struct exists.
+
+## E: Expressions
+
+### E1: Rematerialize constant-offset derived pointers; print byte-pointer sums without `uintptr_t`
+
+- [ ] **Problem.** The texts contain 202 temporaries of the form `x = (T*)((uintptr_t)b ± k)` and 436 dereferences `*(T *)((uintptr_t)x + k)`. Example: `sqlite3_collation_needed16` prints `address_1 = (uint8_t*)((uintptr_t)address + 0x190); *(uint64_t *)address_1 = 0; *(uint64_t *)((uintptr_t)address_1 + 8) = arg2;` (an ARM64 `stp` with a computed base). Ghidra prints `*(undefined8 *)(param_1 + 400)`.
+  - **Root cause:**
+    - The renderer repeats `x ± k` only inside one reader statement (`src/emitters/source-inlining.ts:585-616`, gate at `:616`).
+    - `memberAccess` builds fields only through inline bases (`renderer.ts:3146`).
+    - Derived pointers are `void *`/`uint8_t*` (`pointers.ts:409-412`, `renderer.ts:2833-2847`).
+    - C-like code always round-trips byte pointers through `uintptr_t` (`renderer.ts:1844-1855`, `:4280`), contrary to the `byteAddress` doc (`:2833-2835`).
+  - **Change:**
+    - (a) In `planSourceInlining`, a pointer-width `leaf ± const` whose every use is a load/store address (directly, or through other such candidates), with at most 8 uses, becomes a repeated site anchored at its first use. The leaf is a printed, non-inline, non-stack variable. Record `address_rematerialization` next to `repeated_operation`.
+    - (b) The raw-address printer reassociates constant chains `(b + k1) + k2 → b + (k1+k2)`.
+    - (c) In C-like `sourceStorage` and pointer assignments, a byte-pointer base prints `*(T *)(p + k)` and `q = p + k`. Record `byte_pointer_sum`.
+  - **Soundness:** presentation only. The rematerialized expression is modular arithmetic on an immutable SSA value. `VariableLiveness.leaves` already counts each occurrence as a read at its reader. (c) rests on the premise that `typed_index` subscripts already accept.
+  - **Tests:**
+    - `test/emitters/c/source-inlining.test.ts`: `p + 0x190` stored at +0 and +8 in two statements, then the base reassigned. Assert no temporary, field spelling, and `execute()` equal for aliasing and fault memories.
+    - `source-structs.test.ts`: the member prints through the base.
+    - `source-typed-index.test.ts`: byte-pointer sums.
+    - Python-like execution.
+  - **Acceptance:**
+    - (a) measured: −2,543 tokens, geomean 1.337 → 1.323, 38 functions changed, none worse, all states and work unchanged.
+    - `sqlite3_collation_needed16` prints `address->field_0x190 = 0; address->field_0x198 = arg2;`.
+    - `sqlite3PagerSavepoint` prints `A->field_0x1e0 = 0;` (−439 tokens).
+    - `vdbePmaReaderClear` prints `+ 64`, not `+ 48 + 16`.
+    - (c) about −0.6k more [estimate].
+    - Checked view unchanged.
+
+### E2: A formal is a scalar-element pointer only when its accesses are array-shaped
+
+- [ ] **Problem.** Struct pointers print as `uint64_t*` with constant subscripts: `stmtClose(uint64_t* address) … address[2]`, brotli `InitDecoder` `address[41]`, `PrintFileProcessingProgress` `address[59]`. This causes 6 wrong claims in 4 functions ("takes a uint64_t array pointer"). 20 formals use only non-zero constant subscripts.
+  - **Root cause:** `formal_pointer` (`src/reconstruction/source-signature.ts:744-783`) checks only element width and kind. `scalarArray`'s contiguity gate (`src/emitters/source-structs.ts:132-182`) is not applied to formals.
+  - **Change:**
+    - Record per-root constant displacements (`:617-626`). Grant `formal_pointer` only when the formal is indexed or stepped, or its constant offsets are contiguous from 0. Otherwise keep the analysis structure (or a byte pointer).
+    - Print declared scalar-pointer members as `*p->field_0x48` instead of `(uint64_t)*(uint64_t *)(uintptr_t)p->field_0x48`.
+  - **Soundness:** spelling only. Extend the record text with "array-shaped lineage".
+  - **Tests:** `test/emitters/c/formals.test.ts`:
+    - +0x10 only → not `uint64_t*`;
+    - +0, +8, +16 → `uint64_t*`;
+    - indexed by `i*8` → `uint64_t*`;
+    - `execute()` equality.
+  - **Acceptance:** `stmtClose` prints `address->field_0x10` (measured); `InitDecoder` `address->field_0x148`; real arrays (`matrix_*` loops, `crc32_z`, `adler32_z`) are unchanged.
+  - **Expected effect:** +499 tokens in 24 functions (measured: typedef and struct lines). This is less after P2. Judge E1 and E2 together.
+  - **Depends on:** E1.
+
+### E3: Recombine 64-bit cells from call outputs, range-folded groups and narrowed halves
+
+- [ ] **Problem.** 259 reassemblies `x | ((uint64_t)y << 32)` and 56 split pairs in 17 functions: `isDate` alone has 166 lines (`value16 | ((uint64_t)value17 << 32)` for one pointer). `matrix_multi_exit` ELF/PE `-O2` returns `value0 | ((uint64_t)value1 << 32)`, which the grader read as a "packed low/high pair" (6 wrong claims). The source returns `sum ^ i`.
+  - **Root cause** (instrumented `recombineSourceCells`, `src/reconstruction/source-cells.ts`):
+    - (1) a range-folded group accepts only constant edges (`:216`, `:319`): `multi_exit`'s high sum cell is folded inside the loop;
+    - (2) the per-cell register outputs of one call or unknown effect never form a joint source (`:222-303`, reasons compared per cell `:243-256`): 58 + 52 + 76 `isDate` rejections;
+    - (3) a narrowed 32-bit low half is not recognized as a slice of the whole (`:71-72`);
+    - (4) vector groups require identical partitions across blocks.
+  - **Change:**
+    - (1) A folded group accepts `value`, `zero_extend` and `group` edges when every folded cell's constant equals the edge slice (re-checked with `validation.check('bitvector', …)` or citing the range proof).
+    - (2) A new edge source kind `outputs` for one instruction's write of one root: the whole result value when the projection binds it, otherwise one whole `call clobbers <root>` unknown. One reason per root, also in boundary printing.
+    - (3) A BDD-checked normalization: `trunc_n(a op b)` equals `trunc_n(W)` for add, sub, mul, and, or, xor and shl when `W = ext(a) op ext(b)` exists.
+    - (4) Optional: coarser vector partitions.
+    - Each change keeps and extends `register_cell_recombination`.
+  - **Soundness:** (1) the existing interval proof; (2) structural; (3) a bit-vector identity.
+  - **Tests:** `source-cells.test.ts`, `source-loop-cells.test.ts` and `sqlite-cell-constants.test.ts` (the constant `0x100132f08` as one literal):
+    - a loop sum with a range-folded high cell;
+    - a phi fed by a call's x0 cells;
+    - a phi fed by a call's clobbered v0 cells;
+    - executed in both dialects, including `multi_exit`'s overflow path.
+  - **Acceptance:** `matrix_multi_exit` ELF/PE `-O2` prints one 64-bit accumulator; `isDate` has no `<< 32` reassembly of a pointer. Checked view byte-identical.
+  - **Expected effect:** about −2.8k tokens [estimate]; 6 wrong claims.
+  - **Cost:** watch `isDate`'s work (9.79M).
+
+### E4: Choose signed or narrow local types by conversion cost
+
+- [ ] **Problem.** Locals are declared `uint32_t` 736 times and `int32_t` 8 times. The texts hold 397 signed tests such as `(int32_t)x >= 1`, 236 chains such as `(uint64_t)(int32_t)x`, and 80 `(uint32_t)valueN ==` on 64-bit locals that are only read low. Judges read `count` as unsigned or cite "machine-level sign-extension arithmetic".
+  - **Root cause:** signed and narrow spellings exist only for formals (`signedConsumer`, `formal_low_slice`, `source-signature.ts:715-725, 829-888`). A local declared signed converts back at each use (`renderer.ts:1841-1842`).
+  - **Change:**
+    - A planner next to `planLocalTypes` (`src/emitters/source-local-types.ts`) for integer partitions of 8, 16 and 32 bits, plus 64 → low slice.
+    - Count the conversions each spelling prints:
+      - cheap when signed: signed compare, sign extension, `ashr`, `sdiv`/`srem`;
+      - need `(uintN_t)` to stay UB-free when signed: `add`/`sub`/`mul`/`shl`;
+      - cheap when unsigned: unsigned compare, zero extension, `lshr`, `udiv`.
+
+      Choose `intN_t` when strictly cheaper. Declare a 64-bit local whose uses are all low-slice reads narrow.
+
+    - Hook into `chooseLocalTypes` (`renderer.ts:7453`) with record `local_integer_spelling`.
+  - **Soundness:** presentation only. Every use still prints its exact conversion, and signed arithmetic is never left unconverted.
+  - **Tests:** `test/emitters/c/source-local-types.test.ts` and `source-width.test.ts`:
+    - a loop counter with a signed `i < n` and `i + 1`, executed across the INT_MAX wrap;
+    - a 64-bit call-result local read only as `(uint32_t)`.
+  - **Acceptance:**
+    - `sqlite3DropTrigger` prints `int32_t count; … if (count >= 1)`.
+    - `btreeOverwriteContent` has no `(int32_t)value0 <= arg3`.
+    - No text where conversions increase. Checked view unchanged.
+  - **Expected effect:** −0.75k to −1.2k tokens in about 55 functions [estimate].
+
+### E5: Fold the bitfield-move aliases (SXTB/SXTH/SXTW, SBFIZ/UBFIZ, SBFX)
+
+- [ ] **Problem.** 25 sign-fill selects such as `((x >> 0x1f) & 1 ? 0xffffffffffffffff : 0) & 0xffffffff00000000) | (x & 0xffffffff)` and 5 rotate-as-shift idioms in 15 functions, each 15–35 tokens. Judges cite `btreeOverwriteContent`, `openStatTable` and `fts3MatchinfoLcsCb`.
+  - **Root cause:** the generic SBFM/UBFM lowering (`src/lifters/arm64/semantics.ts:332-353`). `foldShiftIdiom` (`src/reconstruction/source-shifts.ts:121-171`) folds only masks equal to the whole non-wrapped part.
+  - **Change:** in `foldShiftIdiom` or a sibling rule in `EXPRESSION_RULES` (`source-rules.ts:632-652`), with masks equal to the field exactly:
+    - (i) `(select(bit_s(x), ~0, 0) & ~mask(s+1)) | (x & mask(s+1))` → `sign_extend(trunc_{s+1}(x))`;
+    - (ii) `ror(x, w-k) & (mask(n) << k)` with k+n ≤ w → `zero_extend(trunc_n(x)) << k`;
+    - (iii) the combination of both.
+
+    Extend the `shift_idiom` record.
+
+  - **Soundness:** bit-exact identities, proof class `own` with boundary tests (or BDD).
+  - **Tests:** `test/reconstruction/source-shifts.test.ts`: lifted SXTW, `SBFIZ #5, #32`, UBFIZ and SXTB, executed for inputs with bit 31 set.
+  - **Acceptance:** `btreeOverwriteContent` prints `(uint64_t)(int32_t)count`; `fts3MatchinfoLcsCb` prints `arg2 + ((uint64_t)(int32_t)arg1 << 5)`. Nothing changes outside the 15 functions.
+
+### E6: Move proven non-faulting reloads across loads
+
+- [ ] **Problem.** `-O0` `matrix_alias` (Mach-O, ELF, PE) prints `value0 = *address; *address_1 = *address_1 ^ value0; value1 = *address; return value1 + *address_1;`. Both judges call these "redundant temporaries". There are about 12 such sites in the corpus.
+  - **Root cause:** `source-inlining.ts:449-468` refuses to move a load across any intervening independent load (the fault-order premise, `:90-101`), even when the moved load's exact address was just accessed.
+  - **Change:**
+    - A load whose exact address range was accessed on every path from a dominating access, with no call, unknown effect or volatile access in between, may move across non-volatile loads (never across stores or calls).
+    - Record `nonfaulting_load_order` and `requireAbi('nonfaulting_reload', …)` (D7, accepted).
+  - **Tests:** `source-inlining.test.ts`: aliasing memories (a == b), and a fault memory where the first access faults.
+  - **Acceptance:** `matrix_alias` `-O0` prints `*address = *address + arg2; *address_1 = *address_1 ^ *address; return *address + *address_1;`.
+  - **Depends on:** E1 (same file).
+
+## P: Preamble and comments
+
+### P1: Table contents policy and extent soundness
+
+- [ ] **Problem.** Inlined tables cost 15.6k lexical tokens, 7.6% of OD's total. 87% of that is six 256-byte maps repeated across 38 functions, which no judge asked for and which no QA answer uses: the four table-backed QA questions are 0/3 for OD today. One declaration is wrong: `unicodeNext` prints `static const uint8_t sqlite3Utf8Trans1[3979]` (source: 64 entries), followed by 192 bytes of neighbouring opcode-name strings.
+  - **Root cause:**
+    - `TABLE_FULL_BYTES = 512n` and `TABLE_PREFIX_BYTES = 256` (`renderer.ts:209-210`).
+    - `tableContents` (`:3866-3956`) takes `span_bound` (the distance to the next symbol, "a bound, not a size", `source-model.ts:139-142`) as the extent (`:3887-3890`).
+    - `maximum()` (`src/emitters/source-tables.ts:42-63`) cannot bound `x − c`.
+  - **Change:**
+    1. A symbol size (`byte_length`) stays an extent. `span_bound` only caps the accessed range:
+       - `total = reach` when `reach ≤ span_bound/size`;
+       - otherwise the extent is not established and the table prints as `name[] = {` + first row + `/* ... further elements not shown */`.
+
+       The note keeps `VA 0x…, read-only; N elements` and drops the basis words.
+
+    2. Print a table in full only up to `TABLE_FULL_BYTES = 64`. Otherwise print one 16-byte row plus `/* ... N more */`, with the declared `[N]` when the extent is established; `TABLE_PREFIX_BYTES = 16`. Lower `TABLE_BYTES_READ` (`source-facts.ts:655`) to 64. Python-like follows through the `memory_view` form.
+    3. Optional: `maximum()` learns that `x − c` with `x ≤ m` (a u8 load or a dominating `x ≥ c`) is `≤ m − c`. With it, `Utf8Trans1` becomes `[64]` and prints in full.
+    4. Record `presentation('table_extent', …)`: an extent is claimed only from a symbol size or a bounded access range.
+  - **Soundness:** the bytes shown are exact. The printed length is a symbol size or a proven access range, never a neighbour distance. The test interpreter never reads printed contents (`test/emitters/c/support.ts:357, 478-488`).
+  - **Tests:** `test/emitters/c/data-symbols.test.ts` (update "large tables show a bounded prefix"):
+    - `span_bound` with an unbounded reach prints `[]` and 16 elements, in both dialects;
+    - a bounded reach prints its reach;
+    - the 64 B boundary (u8, u32, u64);
+    - `execute()` against `tableFixture` with masked and unmasked indices.
+  - **Acceptance:**
+    - Exactly the 38 table functions change.
+    - `aHardLimit` (60 B), `aType` (64 B), `statemap` and `aAscii` change only in the note.
+    - No `[3979]`.
+    - Checked view identical on all 232.
+  - **Expected effect** (measured on the stored texts): lexical sum 205,686 → 192,009; geomean 1.337 → 1.272; Claude geomean about 1.42 [estimate]; QA tokens on `sqlite3_incomplete`, `sqlite3_stricmp`, `sqlite3_strnicmp` and `renameColumnFunc`.
+
+### P2: Struct bodies without pad members in the inline text
+
+- [ ] **Problem.** Struct bodies cost 7,200 tokens, and 482 of their 1,382 members (35%) are `uint8_t pad_0xOFF[N];`. Every real member name already carries its offset (`field_0x14`). Judges cite pads in 28 reasons.
+  - **Root cause:** `structureBodies` (`renderer.ts:3369-3435`) emits a pad for every gap (`:3407`, `:3418`), because the same lines feed `emission.structures`/`types.h` (`:9350-9355`).
+  - **Change:**
+    - `structureBodies(compact)`: for `options.structures === 'inline'`, omit pads (`struct X { uint32_t field_0x4; opaque_1* field_0x28; };`). For `external` (export/`types.h`, `src/cli/export.ts:468-478`), keep today's text.
+    - Keep `__attribute__((packed))` iff the exact layout is packed.
+    - Record `presentation('compact_struct_members', …)` with the omitted gaps.
+    - `test/emitters/c/support.ts` `structBody` reads offsets from `field_0x<hex>` names when no pad precedes them (and keeps the pad path for external text).
+  - **Soundness:** presentation. The emitter never claimed complete layouts (`image-types.ts:42`).
+  - **Tests:** `test/emitters/c/source-structs.test.ts` (inline vs external; pads in `emission.structures`); one test per dialect for `address->field_0x14` with a gap before it, with equal `execute()` results.
+  - **Acceptance:** the 99 functions with bodies change. Everything else, including `types.h`, `emission.structures` and the checked view, is byte-identical.
+  - **Expected effect:** −2,892 lexical tokens, geomean −0.024 (measured on texts).
+
+### P3: Header comment diet
+
+- [ ] **Problem.** OD prints 33.5 KB of comments against Ghidra's 1.3 KB, and the Claude tokenizer counts them.
+  - **Change** (one emitter change each):
+    1. Drop the bare `/* partial */` before struct bodies (183 lines; `renderer.ts:3424-3431`). Keep `/* conflicts with X, Y */`, and drop the `partial; N fns;` prefix.
+    2. Table notes drop the basis words (with P1).
+    3. Shorten `open arity (calls show proven args only): …` to `open arity (proven args only): …`. The callee list stays: it is the roadmap 2 G7 replacement for inline `, ...`. The interpreter regex `test/emitters/c/support.ts:349` accepts any parenthetical.
+    4. Drop `/* import from libSystem.B.dylib */`; keep `/* used as a value; prototype unknown */`.
+    5. The FP note is F3's job.
+
+    Update docs/CORE.md (`:66`, `:1173`).
+
+  - **Tests:** update `source-structs.test.ts:379, 487` and `source-c-support.test.ts:352`. The Python-like `# open arity (…)` wording follows C.
+  - **Acceptance:** only comment bytes change (about −14.5 KB); lexical metrics byte-identical; checked view identical.
+  - **Expected effect:** Claude geomean about −0.015 [estimate].
+  - **Depends on:** P2 (same function).
+
+### P4: Struct class names without another function's name
+
+- [ ] **Problem.** 250 of 418 struct names are `<fn>_arg<N>_<hash>` (`sqlite3VdbeAddOp3_arg0_e84e`, `setSectorSize_arg0_f48_f0_2620`), 1,190 occurrences and 34.5 KB. 141 of them name a function other than the one printed, which the judge called "misleading sqlite3DbFree_arg1 type name".
+  - **Root cause:** `src/analysis/types/image-types.ts:395-452` names a class after its first anchor.
+  - **Change:**
+    - Function texts print `struct_<6hex>` (already used for 146 classes; `source-structs.ts:241`).
+    - `ImageTypeClass.name` keeps the anchor for metadata, and `types`/`types.h` print it as a comment (`/* first seen: setSectorSize arg0 */`).
+    - Both dialects change.
+  - **Tests:** `test/analysis/types/image-types.test.ts`, `test/emitters/c/source-structs.test.ts`, `test/reconstruction/image-types-source.test.ts`, the docs/CORE.md image-type section.
+  - **Acceptance:** only struct names change; lexical tokens unchanged.
+  - **Expected effect:** Claude tokens −9.3k, geomean about −0.035 [estimate].
+
+## L: Loops
+
+### L1: A loop header's one statement prints inside the test
+
+- [ ] **Problem.** A loop header that prints any statement cannot become `while (c)`. 13 measured loops print `while (true) { x = e; if (!c) break; … }` where Ghidra prints a tested loop. Examples: the `sqlite3ParseUri` scan; the `sqlite3BtreeOpen` pointer chase.
+  - **Root cause:** `planLoopForms` accepts a chain stage only when `facts.silent(first)` (`src/emitters/source-control.ts:1436`), and a head test only when `facts.silent(head)` (`:1455`). The comma-operand machinery already exists for later short-circuit operands (`commaOperand` `renderer.ts:6574-6586`, `operandTerm` `:6685-6719`, carriers `:7686-7706`), and `commaOperands` is computed for every block.
+  - **Change:**
+    - `LoopFacts` gains `comma(block)` (a non-silent header whose `commaOperands` entry is one statement) and `carrier(block)`.
+    - `choose` accepts them for the first chain stage and the single head test, and tries the do-while bottom test first when the header is comma-only. Without that order, `matrix_multi_exit` regressed.
+    - The renderer records `loopCommaTests`, `region()` skips the statement, and the header text comes from `operandTerm`. Factor `ifHead`'s mapping loop (`:6951-6966`) into `mapHeaded`.
+    - `acceptFor`/`acceptStatementFor` count the comma statement's operands as test reads (`:5550`, `:5590`).
+    - Print chained negations with `NEGATED_PREDICATE` (`:6023-6027`).
+    - Record `loop_comma_condition`.
+  - **Soundness:** pure restructuring. The statement still runs once per header entry, immediately before the test, and the comma operator is a sequence point. Python-like uses only the direct walrus form.
+  - **Tests:** `test/emitters/c/source-control.test.ts`, executed for n = 0, 1, 3 in C and Python-like:
+    - a pointer chase;
+    - a two-stage scan;
+    - a carrier;
+    - a loop with both a header test and a valid bottom test, which must stay do-while.
+  - **Acceptance** (measured):
+    - `while (true)` 217 → 203, tested loops 220 → 234, `break` 340 → 321, `for` 18 → 19; gotos unchanged; tokens −122.
+    - 10 texts change (`openDatabase` becomes a `for`); 103 other loop texts are byte-identical.
+
+### L2: Restate do-while tests over the copy source and loop-invariant bounds
+
+- [ ] **Problem.** 16 do-while candidates fail because `rebase` fails (`source-control.ts:1533`):
+  - `(uint32_t)value45 + 16 == 0x15b0` after `value45 = value45 + 16` (`adler32_z` `-O2` ×4 cells);
+  - `(uint64_t)arg2 - 1 == index` after `index = 1 + index` (`matrix_callback` `-O2` ×4).
+  - **Root cause:** `restateTest` (`renderer.ts:8031-8186`) requires a constant bound (`:8056-8059`) and a non-inline leaf (`:8074-8080`).
+  - **Change:**
+    - (1) A test on the repeat copy's source value (through bitcast, truncate or zero-extend) becomes the same predicate over the destination.
+    - (2) For eq/ne against a bound B not written in the loop, `x == B` after `x ← x + c` becomes `x == B + c` (mod 2^w), folding `B + c` when `B = y − c`.
+    - Both are re-proved by `validateBitvectorCandidate` (`:8155-8169`) and recorded as `loop_test_restatement`. Ordered compares stay excluded.
+  - **Tests:** `source-control.test.ts`, next to the existing restatement test (about `:191`), executed.
+  - **Acceptance:** `adler32_z` `-O2` (ELF, Mach-O, PE) and `matrix_callback` `-O2` print `do {…} while (…)`; −8 to −12 `while (true)` [estimate].
+  - **Depends on:** L1.
+
+### L3: `for` loops over `-O0` promoted stack-slot induction variables
+
+- [ ] **Problem.** 8 `-O0` loops (`matrix_callback` ×3, `matrix_multi_exit` ×3, `matrix_variadic` PE/Mach-O) print `index = 0; while (index < n) { …; index = index + 1; }`. Ghidra prints `for`, and the judge cites "ghidra has a clean for-loop".
+  - **Root cause:** the step and init are `store`s to a promoted private local. `trailingStatement` accepts only `assign`/`load` (`renderer.ts:5644`), and `acceptStatementFor` identifies the variable by `step.result` (`:5587`).
+  - **Change:** accept a trailing store into a promoted, non-escaped, non-punned local when:
+    - the test reads a load of it;
+    - there is no other store to it in the loop;
+    - the init is the entry block's trailing store.
+
+    Escaped frame members stay excluded. Extend the `for_loop` record.
+
+  - **Tests:** `source-control.test.ts`: an `-O0`-style IR executed for n = 0, 1, 3; negative: a second store in the loop.
+  - **Acceptance:** those 8 texts print `for (index = 0; index < argN; index = index + 1)`. Nothing else changes.
+  - **Depends on:** L1 (`acceptStatementFor`).
+
+### L4: Rotate loop-carried copies so bottom tests become do-while
+
+- [ ] **Problem.** 34 loops are do-while candidates rejected only because the repeat copies are live on exit (`source-control.ts:1529`). 29 loops end with "test, then pure var-to-var copies": `sqlite3BtreeOpen`, `pcache1RemoveFromHash`, `renameColumnFunc` ×4, `renameTableFunc` ×3, … Ghidra prints all of them as do-while, with the copy at the loop top.
+  - **Root cause:** the header phi `x = φ(x0, y)` is resolved by a copy `x = y` on the repeat edge, after the test (`partitionVariables` `source-control.ts:448-461`, `edgeCopies` `:676-703`).
+  - **Change:**
+    - Only for loops whose bottom test is the sole repeat edge and whose only blocker is live-on-exit copies of a loop-defined `y`:
+      - partition the header phi as a pseudo-value that coalesces with `y` (they do not interfere);
+      - emit a header-start copy `x = p`, which makes the repeat edge copy-free.
+    - Record `loop_copy_rotation`. The parallel-copy validator accepts the header-start copy, either as a synthetic assign or as a rule that equal copies of all incoming edges may print once at block start.
+  - **Soundness:** copy placement in SSA, with no premise. Checked view unchanged.
+  - **Tests:** `source-control.test.ts`, executed:
+    - a list walk whose last node is used after the loop;
+    - a countdown whose pre-decrement value is used after;
+    - negative: `y` live into the header from outside.
+  - **Acceptance:** the list walks in `sqlite3BtreeOpen`, `pcache1RemoveFromHash`, `renameColumnFunc` and `renameTableFunc` print do-while; about −30 `while (true)` and −30 `break` [estimate]. Only entry-copy names change elsewhere in those functions.
+  - **Cost:** partition changes can rename variables, so restrict the rotation to candidates. Charge it like the optional partition work (≤ 1/8 of the remaining work).
+  - **Depends on:** L1, L2.
+
+## T: Time and summary bookkeeping
+
+### T1: Incremental hash of the dependency ledger
+
+- [ ] **Problem.** `fingerprint(readset)` (`source-facts.ts:1817-1837`, inside the dependency loop at `:1786`) rebuilds and hashes the whole append-only ledger (about 10.9k reads) for every context-specialized dependency: 11.0 s of profile plus GC.
+  - **Change:**
+    - `src/core/identity.ts`: an append-only canonical hasher that produces exactly `fingerprint({version: 1, complete: true, reads})` for a growing array, with `canonicalIdentity` per element (no second format).
+    - `src/project/cache/dependencies.ts`: `AnalysisDependencyCollector.readsetFingerprint(readset)` absorbs only new reads. `finish()` snapshots are prefixes (`:410-415`). Fall back to the full hash for foreign readsets.
+  - **Soundness:** speed only. The evidence text and every id derived from it are byte-identical (prototype: 30 live calls compared, 0 mismatches).
+  - **Tests:** dependency tests: the incremental fingerprint equals `fingerprint(readset)` for ledgers grown in steps, after `replay`/`replayTrace`, for the empty ledger and for a foreign readset.
+  - **Acceptance:** all odbench texts, states and evidence byte-identical; work within noise.
+  - **Expected effect:** SQLite decompiles 123.6 → 107.3 s (measured).
+
+### T2: Charge-exact reuse and an explicit `limited` flag
+
+- [ ] **Problem.** Charged work depends on history:
+  - `_sqlite3Initialize` charges 275,857 at its first preparation and 278,384 in 46 later ones;
+  - `_sqlite3_config` charges 333,203, 294,349 or 246,292 depending on the load;
+  - about 21 SQLite functions differ in work between two runs of one build.
+
+  This contradicts docs/internals/project-cache.md §5. It also blocks T3 and T6, and makes the benchmark's work column unstable.
+  - **Root cause:** not found yet. One candidate: the silent `nativeVariadicFootprint` catch (`native-prepare.ts:434-445`) swallows a resource limit without a reason. The unit then still counts as `reusablePreparation`, which would also be a soundness hole.
+  - **Change:**
+    - First find the cause, with an instrumented copy that logs fn, work, kind and allowance per unit load.
+    - Add `limited: boolean` to `PreparedNativeUnit` (set at `native-prepare.ts:306, 400, 426` and in the variadic catch). The retention predicates use it instead of free-text reasons.
+    - Fix whatever makes the charge allowance-dependent, or record the correct `entry.allowance`.
+  - **Tests:** a history-independence test: prepare one unit through `nativeUnitLoader` under allowances A < B < C in every order, and assert the same unit, charged work and reads. Add a regression test for `limited`.
+  - **Acceptance:** two full odbench runs of one build give identical work counts. Any text change (a previously mis-cached unit) is listed.
+
+### T3: Retain prepared units whose reasons do not depend on the budget
+
+- [ ] **Problem.** Units whose only reason is "unresolved control flow" are never kept (any indirect call in the body sets it), so hub callees are prepared again in every request: `sqlite3Initialize` 30–46 times, `sqlite3Malloc` 30, `sqlite3_free` 50, `sqlite3Realloc` 13, … In total 580 repeat preparations.
+  - **Root cause:** `reusablePreparation` (`source-facts.ts:1125-1126`) requires `!unit.reasons.length`, and so does the persisted schema (`native-summaries.ts:88`). The documented contract (`:1101-1110`) needs only "hit no limit".
+  - **Change:**
+    - Split the predicate:
+      - retention (in-process and persisted): `!budget_truncated && !limited && analysis complete`;
+      - the request-local `admit` (`:1675-1681`, `:1770`): keeps the old predicate, so evidence citation stays byte-identical.
+    - Allow non-budget reasons in the persisted rows and bump `NATIVE_SUMMARY_FORMAT`.
+    - Document the rule in docs/internals/project-cache.md §4.
+  - **Tests:**
+    - `test/service/analysis/native-summary-persistence.test.ts`: a unit with an unresolved indirect call is persisted and served with unchanged output and equal work.
+    - `test/service/analysis/request-determinism.test.ts`: cold vs warm order gives identical texts and work.
+    - The store schema test.
+  - **Acceptance:** texts byte-identical (prototype: 0 of 129 changed); work identical after T2.
+  - **Expected effect:** SQLite −6 to −7 s on top of T1 (measured).
+  - **Depends on:** T2.
+
+### T4: Do not load effects-only native dependencies
+
+- [ ] **Problem.** About 26% of callee-load work on SQLite (34.7M of 134.8M) goes to deferred loads that no unobserved entry argument reaches. They change 1 of 114 texts, and they still make 22 requests `partial(budget)`.
+  - **Root cause:** `native-worklist.ts:211-212, 366-373, 482-489` schedules every dependency of every loaded unit, and `:724-765` propagates the reasons of all of them.
+  - **Change:**
+    - Classify each dependency edge of a loaded unit:
+      - _argument-reaching_ (existing);
+      - _result-forwarding_: the call's result reaches a return exit or tail (`demand_index`/`nativeReturnInterface`);
+      - _shape-transferring_: a `nativeShapeTransfers` candidate;
+      - _effects-only_: everything else.
+    - Schedule only the first three. An effects-only callee stays `unresolved()` for that call and contributes no reason.
+    - The selected function's own direct dependencies stay demanded.
+    - Update docs/internals/calls-abi.md §4.
+  - **Soundness:** an unloaded callee's interface is `unresolved()`, which the caller already treats conservatively. Callee effects are never summarized.
+  - **Tests:**
+    - `test/service/analysis/native-worklist.test.ts`: on a synthetic graph, an effects-only callee is not loaded, while result and shape callees are.
+    - `native-summary.test.ts` with `native-summary-source.c`: a helper that logs after computing its result keeps its closed arity and result type (execute against the oracle).
+    - `request-determinism.test.ts`.
+  - **Acceptance:**
+    - SQLite and brotli texts byte-identical. `createFunctionApi` must keep `uint8_t* address_1` through the shape edge.
+    - `partial(budget)` drops by up to 22.
+  - **Expected effect** (measured, upper bound with all deferred loads skipped): SQLite work −9.3%, time −7%.
+
+### T5: Budget labels name the fact that is actually missing
+
+- [ ] **Problem.** 60 SQLite functions are `partial(budget)` with the caveat "callee summaries cut by budget: …". At 10× budget, 53 are still labelled. The real blocker is usually an unresolved indirect call (`sqlite3Realloc` → `xRealloc`) or nothing the text uses.
+  - **Change:**
+    - Propagate reasons per fact: arity along argument-reaching edges, result along result-forwarding edges, shapes along shape edges (T4's classification).
+    - `source-facts.ts:1869-1881` emits `callee_partial` with the fact kind and splits budget from non-budget leaves. `resource_limit` only when a budget leaf blocks a fact the call site lacks.
+    - `src/core/diagnostic-summary.ts:61-97` prints for example "open arity: sqlite3VdbeAddOp3 (unresolved indirect call in sqlite3Realloc)".
+  - **Soundness:** diagnostics only.
+  - **Tests:** `native-worklist.test.ts` (per-fact propagation); `test/core/diagnostic-summary.test.ts`.
+  - **Acceptance:** texts and checked view byte-identical; budget-labelled states 62 → about 38–40 [estimate].
+  - **Depends on:** T4.
+
+### T6: Memoize the allowance-independent prefix of unit preparation
+
+- [ ] **Problem.** 75 repeat preparations of units that hit a limit, 67 of them `_sqlite3_str_vappendf` (reached by about 60% of SQLite requests through `sqlite3_log`/`sqlite3MPrintf`). Each redoes graph + lift + SSA, which is 446 of 790 ms when the types/stack stage hits the limit.
+  - **Change:**
+    - Split `prepareNativeUnit` (`native-prepare.ts`) after SSA into `prepareNativePrefix` (graph, lift, `boundIR`, entry prefix, SSA construct + simplify + verify) and the allowance-dependent rest.
+    - `nativeUnitLoader` keeps prefix entries in the same LRU. A hit replays exactly the recorded charges and reads (the `fits`/`traceCharges`/`replayTrace` discipline, `source-facts.ts:1231-1267`) and requires the SSA limit to be ≥ the recorded SSA work. If SSA itself hit its limit, reuse only graph + lift.
+  - **Soundness:** a completed SSA preparation within limit L returns the same IR for every L' ≥ its work (`ssa/budget.ts:23-33`; the same argument the unit cache relies on).
+  - **Tests:** through `nativeUnitLoader`, a prefix hit and the cold path give equal IR, charged work and reads, under allowances above and below the recorded SSA work, in both limit modes.
+  - **Acceptance:** texts, states and work byte-identical.
+  - **Expected effect:** SQLite −9 to −13 s [estimate].
+  - **Depends on:** T2, T3.
+
+### T7: Constant-factor bundle
+
+- [ ] **Change** (all four are output-neutral):
+  1. `verifyIR` identity checks: precompiled `^entity_[0-9a-f]{64}$` / `^evidence_[0-9a-f]{64}$` tests instead of zod `safeParse` per id (`src/ir/verify.ts:228, 253, 254, 582`). Measured −1.6 s.
+  2. `analysis/stack/index.ts` `combine`/`join`/`union` (`:135-170`): fast paths for equal, empty and single lists, and a merge of two sorted unique lists. 5.7 s self in the profile.
+  3. Do not re-validate and re-encode the result just built in the same process (`validateComputation`, `src/project/cache/index.ts:150`, 5.1 s; `delivery`): parse once, as the result-hit path does.
+  4. Take `native_summaries` persistence and the per-request artifact `fsync` / `synchronous=FULL` commit (`publishArtifact`, store `:1325`, about 8 s) off the request's critical path. Summaries already never fail a request. Agree the flush points with docs/internals/project-cache.md ("durable before acknowledged" covers job state).
+  - **Tests:**
+    - an equivalence test of the fast predicates against the zod schemas over generated ids;
+    - the existing validation, stack and store tests;
+    - a crash-after-acknowledge test for the deferred flush.
+  - **Acceptance:** byte-identical texts and artifacts (ids and timestamps aside); validators are as strict as before.
+  - **Expected effect:** −8 to −12 s on SQLite [estimate; only part 1 measured].
+
+### T8: Prepare and persist native units at open
+
+- [ ] **Problem.** Native-unit preparation is 32.5% of the decompile CPU on SQLite. Even with T3 and T6, every process prepares its 499 distinct units on first use, inside requests (about 16 s). Units above size 8,192 are not persisted, because encoding them costs more than preparing them (docs/PERFORMANCE.md "Persistent analysis cache"). Parallel workers (T9, `export --jobs`) therefore cannot share them.
+  - **Change:**
+    1. A unit payload format whose encode plus decode is cheaper than preparation at every size (measure decode time against preparation time on SQLite's units). Remove the 8,192 persist bound once that holds.
+    2. An image job at open, after import and indexing, in the CLI, API, MCP and the odbench lane. It prepares the generic native unit of every function in the index, callees first, in parallel worker processes, each under the largest allowance a request load can receive (`native-worklist.ts:270-306`). Retention follows T3; a limited unit keeps only T6's prefix. Results go into the project's persisted unit store.
+    3. The job has its own work budget, is reported as open time (M2 `open_job_ms`), can be cancelled, and never fails the open. Context-specialized units stay per request.
+    4. Requests read the store through the existing `nativeUnitLoader` reuse path: exact charge replay, and reuse only when the replayed charge fits the request's allowance.
+  - **Soundness:** a retained unit is a pure function of the image revision, component identities and the function. Reuse replays its exact charge (T2), so texts and per-request work are identical whether the job ran, ran partly or did not run.
+  - **Tests:**
+    - `test/service/analysis/request-determinism.test.ts`: decompiling with and without the open job gives identical texts and work.
+    - Persistence round trip of a large unit.
+    - A cancelled open job leaves a usable project.
+  - **Acceptance:**
+    - odbench full tier: every text and per-function work identical to the lane before T8.
+    - SQLite decompile time after open drops by about 15–25 s [estimate].
+    - Open time and peak RSS are reported (SQLite: about 290M work, about 15–25 s on 8 workers [estimate]).
+  - **Depends on:** T2, T3, T6, M2.
+
+### T9: Parallel request workers that share the unit store
+
+- [ ] **Problem.** Batches decompile one function at a time: the odbench lane, MCP batches. `export --jobs N` runs N workers on clonefile copies with no shared artifacts or units, rebuilding them per worker at about 1.2 GB RSS each. A project allows one running job (docs/internals/project-cache.md "Concurrency ceilings").
+  - **Change:**
+    - A request pool of N workers over one opened project. The T8 unit store and the image indexes are shared read-only. Results are published through the owning process, which stays the single writer.
+    - The odbench lane `--jobs N` (default chosen from the M2 measurement, for example min(4, cores/2)) and `export --jobs` use this pool instead of clonefile copies.
+    - Document the per-worker memory budget.
+  - **Soundness:** requests are independent, because a request's work and output never depend on process history (T2). Publication order does not change artifacts.
+  - **Tests:** texts and work identical for 1 and 4 workers; `export` with `--jobs 1` and `--jobs 4` writes byte-identical files.
+  - **Acceptance:**
+    - odbench full tier: texts and per-function work identical for `--jobs 1` and `--jobs 4`.
+    - Decompile time after open ≤ 1.25× Ghidra's whole run on every binary and in total: SQLite ≤ 48 s, brotli ≤ 4.9 s.
+    - The first 10 SQLite functions after open finish within 5 s.
+    - Peak RSS reported.
+  - **Depends on:** T8, M2.
+
+## Expected end state
+
+Projections combine measured prototypes with the estimates above. Overlaps (for example `isDate` in A1, F1, E3 and C2) are counted once.
+
+| row                                        | now                       | after this roadmap                                                                               | Ghidra             | flips                   |
+| ------------------------------------------ | ------------------------- | ------------------------------------------------------------------------------------------------ | ------------------ | ----------------------- |
+| functions with text                        | 232                       | 235 (C1 measured, C3 WhereCode measured), 237 with C4 [estimate]                                 | 237                | yes, if C4 lands        |
+| lexical tokens (geomean)                   | 1.337                     | ≈ 1.20 (P1 1.272 and P1+P2 1.249 measured on texts; E1 −0.014 measured)                          | 1                  | not a goal (D9)         |
+| Claude tokens (geomean)                    | 1.477                     | ≈ 1.28–1.30 [estimate]                                                                           | 1                  | not a goal (D9)         |
+| readability noise dimension                | 0.383                     | up (artifacts, pads, typedef noise, FP helpers and saves removed) [not projected]                | —                  | expected                |
+| comprehension coverage                     | −0.057 vs Ghidra          | ≥ 0 [estimate]                                                                                   | —                  | expected                |
+| wrong claims per function                  | 2.67                      | ≈ 2.22–2.32 (upper-bound sum over items, F5 included: about 78 claims) [estimate]                | 2.26               | close                   |
+| return types (M1)                          | void 17/42, value 180/189 | void 35–37/42, value 184–185/189 [estimate]                                                      | 40, 172/186        | void close, value ahead |
+| QA tokens per correct answer               | 4,785                     | ≈ 3,800–4,000 [estimate; brotli `main` is half of OD's QA tokens]                                | 3,528              | not a goal (D9)         |
+| decompile after open vs Ghidra's whole run | SQLite 3.1×, total 1.6×   | one worker: T1–T7 ≈ 75–85 s, with T8 ≈ 60–70 s; T9 with 4 workers ≈ 15–25 s on SQLite [estimate] | 1 (target ≤ 1.25×) | expected with T9        |
+| `partial(budget)` states                   | 62                        | ≈ 38                                                                                             | —                  | —                       |
+
+## Decisions
+
+### Taken (confirmed 2026-10-22)
+
+- **D1, closed-world `caller_consensus` premise (V2).** "No code outside the image transfers control to F (not exported, address never materialized, every direct branch to F enumerated), and callers read results only in the ABI result registers." It is stronger evidence than the existing `incidental_result` premise, which scans no caller. It is recorded with `requireAbi`, and x0 keeps its exact exit value in exit metadata and in the checked view.
+- **D2, intentional checked-view changes for A1 and F2.** A1 makes the IR effect of unlifted SIMD&FP instructions exact per ISA. F2 aligns Darwin with the SysV/Win64 modelling of FP control state and fixes fenv writers on every target. Each item declares and reviews its checked diff.
+- **D3, presentation policy.** P1 prints tables in full up to 64 B, otherwise one 16-byte row. P2 omits pads only inline. P4 prints class names as `struct_<hash>` in function texts. The anchored names and full layouts stay in `types`/`export`.
+- **D4, budget accounting.** C3 reallocates the request's own 10M (tail reserve, text-first render), which is not raising the budget. A per-unit allowance outside the request counts as raising and is not allowed. The open-time job of T8 is not a request: it runs under its own budget, its cost is reported as open time, and a request that reuses one of its units replays the unit's exact charge, so request work does not depend on whether the job ran.
+- **D5, `escaped_frame_floor` premise (K7).** "A frame address handed to a callee or stored designates bytes at or above itself." C guarantees this only when the escaped address is an object base, which OD does not prove; the premise is recorded with `requireAbi` on every binding that uses it.
+- **D6, `fp_nan_payload_unobserved` premise (F5).** `fp_native_operations` extends to stores and call arguments: NaN payloads are unspecified (IEEE 754 "should", C Annex F), and the IR's canonical NaN is not hardware-exact either.
+- **D7, `nonfaulting_reload` premise (E6).** A successful access to [a, a+w) implies that a later read of it does not fault, absent an intervening call, unknown effect or volatile access.
+- **D8, speed target.** Opening a binary may take longer than Ghidra's import and analysis; open time is reported but not targeted. After open, the decompile time of a binary's corpus functions must stay within 1.25× of Ghidra's whole run on the same binary (import, analysis and decompiles; `cold_ms` in the Ghidra lane), per binary and in total. On SQLite that means ≤ 48 s for the 114 functions, and the first 10 functions within 5 s. The open-time job and batch decompiles may use several cores (T8, T9); a single request stays single-threaded and deterministic.
+- **D9, token rows are not a goal.** Lexical tokens, Claude tokens and QA tokens per correct answer are reported but not targeted. Items that reduce tokens are kept for their readability, noise and comprehension value; a change is never accepted for its token saving alone if it removes information a reader uses.
+
+## Not in scope
+
+- **More callee-summary budget, or an image-wide summary pass to change texts.** Measured: neither fixes the text artifacts (see "Ruled out by measurement"). T8's open-time pass is for speed only and leaves texts and request work unchanged.
+- **A Ghidra-style void heuristic, or "each escaped base is its own object".** These can only be `likely`, so they do not move odbench.
+- **Library prototypes as escaped-object extents.** `int *` does not bound accesses, and `struct stat` is opaque in the catalog. **Callee-summary extent facts** (to split the 20 multi-member escaped regions, 133 members) need a new summary fact, and most receivers are SQLite internals that are budget-cut or callback-forwarded.
+- **Lifting FMADD/FMSUB, scalar FCVTZS and FCCMP as IR operations.** A1 with F1 already unblocks `isDate`.
+- **Multi-statement comma loop headers.** Ghidra refuses them too.
+- **Exit and follow choice for multi-exit loops (127 loops), and sinking identical edge copies into joins.** OD prints 376 gotos right after an assignment vs Ghidra's 225. Both need a goto cost model. They are the next control-flow candidates once L1–L4 are measured.
+- **Dropping `(uint32_t)call_result` casts (225 sites).** Re-measure after V1–V3: the width comes from forwarded result demand.
+- **Folding single-use `call_result_N`.** Memory effects sit between the call and the use in 25 of 25 sampled cases.
+- **`yy_reduce`'s 348-entry table, and `va_arg` recognition.** Carried over from roadmap 3.
+- **Struct-by-value returns for the AAPCS64 x8 indirect result** (Darwin `matrix_aggregate`). The current form is exact and matches Ghidra.
 
 ## Measurement
 
@@ -522,25 +1155,26 @@ Every item is measured with odbench on the full tier, from a worktree with a bui
 ```sh
 bun run build
 /Users/df0/Documents/projects/od-wt/heavy.sh bun run bench run od --label <item> --repo <worktree> --tier full
-bun run bench all --label <item> --base od-head --tier full        # judged against Ghidra and against head
-grep -c 'physical_return\|entry_sp\|indirect_exit' .odbench/lanes/od-<item>/texts/<acceptance file>.c
+bun run bench all --label <item> --base od-rm3-final --tier full     # judged against Ghidra and against the base
+bun run bench report --lanes od-<item>,od-rm3-final,source --tier full
 ```
 
 Report per item:
 
-- the artifact count before and after for the acceptance functions;
-- the set of texts that differ from `od-head` (it must equal the expected set);
-- readability against head and against Ghidra on the changed functions;
-- comprehension and its paired delta;
-- the work of brotli `main`, `whereLoopAddBtreeIndex` and the changed functions (M1).
+- the acceptance texts, before and after;
+- the set of texts that differ from the base (it must equal the expected set);
+- the M1 rows;
+- readability against the base and against Ghidra on the changed functions;
+- comprehension and wrong claims on the changed functions;
+- the work of brotli `main`, `isDate`, `sqlite3Fts3Incrmerge` and the changed functions.
 
-A per-item judge run on the full tier costs on the order of $0.10–0.50 (only changed texts are judged).
+Only changed texts are judged, which costs about $0.10–0.50 per item. Speed items (T, C4) also report the M2 rows from a run started on an idle host (load average below half the cores; the lane warns otherwise), with `--repeat 2`.
 
-The corpus is a development set. Claims of generalisation need a new sealed suite (docs/PERFORMANCE.md "sealing rule").
+The roadmap result is measured once, after the last merge. It uses `--comprehension-samples 3` for the OD and Ghidra lanes, because single-sample comprehension has a CI of about ±0.1, and `--repeat 2` to check determinism and the work column (after T2). The corpus is a development set; claims of generalisation need a new sealed suite (docs/PERFORMANCE.md "sealing rule").
 
 ## Definition of done for each item
 
-- The listed acceptance functions change as stated, every other full-tier text stays byte-identical (or each other change is explained and goes toward the source), and the checked view is unchanged unless the item says otherwise.
+- The listed acceptance functions change as stated. Every other full-tier text stays byte-identical, or each other change is listed and goes toward the source. The checked view is unchanged unless the item says otherwise.
 - Semantic tests in the named files: behavior through the IR builder and `execute()` of emitted C and Python against oracles, not text snapshots. Run `bun run typecheck`, `bun run test:unit` and `bun run test:integration`.
-- Validation records and ABI requirements as named; component versions bumped at merge time.
-- Docs updated with exercised evidence only: docs/CORE.md (result rules, stack presentation, helper vocabulary), the relevant docs/internals pages, and a docs/PERFORMANCE.md entry with the odbench numbers. Tick the box here with a one-line evidence note.
+- Validation records and ABI requirements as named. Component versions are bumped at merge time.
+- Docs are updated with exercised evidence only: docs/CORE.md (rules, premises, helper vocabulary), the relevant docs/internals pages, and a docs/PERFORMANCE.md entry with the odbench numbers. Tick the box here with a one-line evidence note.
