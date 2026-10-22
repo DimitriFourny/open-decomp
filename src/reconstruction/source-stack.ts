@@ -310,6 +310,21 @@ export function planSourceStack(
     // Every byte at or above `reachFloor` may be reached; `reachAll` records an
     // escape without a lower bound (unknown effects, unbounded arithmetic).
     reachFloor: bigint | undefined,
+    // Source view (S1): the lowest floor among exposures that can designate
+    // incoming argument storage, i.e. whose known bases include an offset >= 0
+    // (mixed-sign phis and spill/reload sources included), whose bases are
+    // unknown, or whose floor itself lies at or above the entry SP. Exposures
+    // here are call arguments and open-call argument registers, stored and
+    // returned addresses, indirect-exit arguments, and the address operands of
+    // indexed or dynamic loads and stores. Every incoming byte below it is
+    // reached by no address derived from this activation's incoming area;
+    // callers, callees, globals and loaded or returned pointers cannot designate
+    // it under the `incoming_arguments_private` premise. Undefined: no such
+    // exposure. Unbounded exposures set `reachAll` instead. Incoming slots
+    // wholly below it are entry values for the whole activation when only
+    // loaded (incoming formals); later items (frame object, reloaded stack
+    // addresses, by-value aggregates, va_start) use the same bound.
+    incomingFloor: bigint | undefined,
     reachAll = false;
   const exposedOffsets = new Set<bigint>();
   // Known frame offsets of every address a tainted value is derived from (cell
@@ -510,7 +525,14 @@ export function planSourceStack(
     }
     const floor = floors.get(value.id)!;
     if (floor === null) reachAll = true;
-    else if (reachFloor === undefined || floor < reachFloor) reachFloor = floor;
+    else {
+      if (reachFloor === undefined || floor < reachFloor) reachFloor = floor;
+      if (
+        (bases === null || floor >= 0n || bases.some((offset) => offset >= 0n)) &&
+        (incomingFloor === undefined || floor < incomingFloor)
+      )
+        incomingFloor = floor;
+    }
     return bases;
   };
   // Source view: frame offsets that dynamically indexed accesses derive from.
@@ -1392,21 +1414,32 @@ export function planSourceStack(
     locals = new Map<string, SourceLocal>();
   const saves: FrameSaves = { stores: saveStores, reloads: saveReloads, bytes: saveBytes };
   // An unchanged incoming slot is entry storage supplied by the caller, not a
-  // byte array allocated by this function. Bind only exact, nonescaping accesses
-  // to proven ABI scalar slots; partial/overlapping or modified storage retains
-  // its ordered memory representation until a richer storage model is available.
-  if (!escaped && facts?.state === 'complete')
+  // byte array allocated by this function. Bind only exact, loads-only,
+  // nonoverlapping accesses to proven ABI scalar slots; partial/overlapping or
+  // modified storage retains its ordered memory representation until a richer
+  // storage model is available. The checked view requires a nonescaping frame,
+  // no store through an unknown address and clear per-load alias facts. The
+  // source view decides per slot (S1): no unbounded escape, and the slot lies
+  // wholly below `incomingFloor`, so no address derived from the incoming area
+  // reaches it; under `incoming_arguments_private` nothing else can.
+  const incomingPrivate = `Incoming stack argument storage belongs to this activation for its whole lifetime: callers, callees, globals, unknown stores and loaded or returned pointers never designate it; only addresses this function derives from its own incoming area can${incomingFloor === undefined ? ', and none escapes or indexes memory' : `, and those that escape or index memory reach only bytes at or above the lowest offset they can take (here ${incomingFloor})`}. Each slot presented as a formal lies wholly below that bound, is only loaded, and so holds its entry value at every load. Original loads remain in the checked view.`;
+  if (
+    (view === 'source' ? !reachAll : !escaped) &&
+    facts?.state === 'complete' &&
+    (view === 'source' ||
+      !memory.some((node) => node.kind === 'store' && !addresses.has(node.address.id)))
+  )
     for (const group of groups.values()) {
       const first = group[0]!;
       if (
         classifyStackRegion(input.source!.abi, first.offset, first.end - first.offset) !==
           'incoming_candidate' ||
+        (view === 'source' && incomingFloor !== undefined && first.end > incomingFloor) ||
         group.some((access) => access.node.kind !== 'load' || access.node.access.volatile) ||
         accesses.some(
           (access) =>
             access.key !== first.key && access.offset < first.end && access.end > first.offset,
-        ) ||
-        memory.some((node) => node.kind === 'store' && !addresses.has(node.address.id))
+        )
       )
         continue;
       const loads = group.map((access) => access.node as Extract<Instruction, { kind: 'load' }>);
@@ -1415,8 +1448,8 @@ export function planSourceStack(
           (node) =>
             !sameType(node.result.type, loads[0]!.result.type) ||
             node.access.endian !== input.source!.abi.layout.endian ||
-            facts?.snapshots.get(node.id)?.aliased ||
-            facts?.snapshots.get(node.id)?.escaped,
+            (view !== 'source' &&
+              (facts?.snapshots.get(node.id)?.aliased || facts?.snapshots.get(node.id)?.escaped)),
         )
       )
         continue;
@@ -1426,6 +1459,20 @@ export function planSourceStack(
         loads.map((node) => node.result),
       );
       if (!value) continue;
+      if (view === 'source') {
+        const subjects = loads.slice(0, 64).map((node) => node.id);
+        // An unused incoming value is no formal: finalize keeps live ones only.
+        if (
+          !validation.presentation(
+            'incoming_formal',
+            `stack:${first.key}`,
+            'exact nonvolatile nonoverlapping ABI stack-parameter slot at or above the entry SP, only loaded, all loads of one type; wholly below the lowest offset any escaping or indexing address derived from the incoming area can take; no unbounded frame escape or unknown effect; every load reads the entry value and prints as the incoming formal',
+            subjects,
+          )
+        )
+          continue;
+        validation.requireAbi('incoming_arguments_private', subjects, incomingPrivate);
+      }
       for (const node of loads) {
         hidden.add(node.id);
         alias(node.result, { kind: 'cast', op: 'bitcast', value });
