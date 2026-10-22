@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
+import { openBinary, type BinarySession } from '../../../src/api/index.js';
 import { createOperationContext } from '../../../src/core/index.js';
 import { constructSSA } from '../../../src/analysis/ssa/index.js';
 import { assertValidIR, evaluateIR, integer, type Expression } from '../../../src/ir/index.js';
@@ -9,6 +13,9 @@ import {
   specializeNativeSSA,
 } from '../../../src/service/analysis/native-context.js';
 import { builder, register, returned } from '../../ir/support.js';
+import { acknowledgeRequirements, emittedFormals, execute } from '../../emitters/c/support.js';
+import { nativeOracleSkip } from '../../support/host-tools.js';
+import { compileContextResultFixture } from './native-context-result-fixture.js';
 
 const first = register('arg0', 64, 0, 'replace_root', 'arg0');
 const second = register('arg1', 64, 0, 'replace_root', 'arg1');
@@ -133,3 +140,67 @@ test('context assumptions seed only the invocation, not a backedge to the origin
   assertValidIR(view);
   assert.deepEqual(returned(evaluateIR(view, { registers: new Map([[first.root, 0n]]) })), [3n]);
 });
+
+// Analyze the assembled fixture only; both dialects run in the source oracle
+// with a stub callee, never the analyzed image.
+test(
+  'tail calls to the count 0 and count 2 contexts of one double callee return double',
+  { skip: nativeOracleSkip(), timeout: 120000 },
+  async (t) => {
+    const root = await mkdtemp(join(tmpdir(), 'native-context-result-'));
+    const session: BinarySession = await openBinary(await compileContextResultFixture(root), {
+      cachePath: join(root, 'cache'),
+    });
+    t.after(async () => {
+      await session.close();
+      await rm(root, { recursive: true, force: true });
+    });
+    const f64 = (value: number): bigint => {
+      const bytes = new DataView(new ArrayBuffer(8));
+      bytes.setFloat64(0, value, true);
+      return bytes.getBigUint64(0, true);
+    };
+    for (const emitter of ['c-like', 'python-like'] as const) {
+      const result = await session.decompile({ name: 'r3_call' }, { emitter });
+      assert.ok('data' in result && result.data.delivery === 'inline');
+      const emission = result.data.emission;
+      assert.match(
+        emission.text,
+        emitter === 'c-like' ? /^double r3_call\(/m : /^def r3_call\(.*\) -> double:/m,
+        emission.text,
+      );
+      assert.doesNotMatch(emission.text, /physical_return|ABI scratch/, emission.text);
+      const formals = emittedFormals(emission);
+      assert.equal(formals.length, 2, emission.text);
+      for (const count of [0n, 1n, 2n, 0x80000000n, 0xffffffffn]) {
+        const calls: (readonly bigint[])[] = [];
+        const observed = execute(
+          emission,
+          new Map([
+            [formals[0]!.statement_id, count],
+            [formals[1]!.statement_id, 0x5000n],
+          ]),
+          new Map(),
+          0n,
+          new Map(),
+          new Map(),
+          new Map([
+            [
+              'r3_sum',
+              (args) => {
+                calls.push(args);
+                return f64(Number(args[0]) + 0.25);
+              },
+            ],
+          ]),
+          acknowledgeRequirements(emission),
+        );
+        // The count 0 context reads no values pointer; count 2 forwards it.
+        // Both results are the callee's double.
+        const zero = count === 0n;
+        assert.deepEqual(calls, [zero ? [0n] : [2n, 0x5000n]]);
+        assert.deepEqual(observed.values, [f64(zero ? 0.25 : 2.25)], emission.text);
+      }
+    }
+  },
+);
