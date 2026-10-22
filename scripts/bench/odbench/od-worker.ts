@@ -9,6 +9,7 @@ import { appendFileSync, readFileSync } from 'node:fs';
 import { performance } from 'node:perf_hooks';
 import type * as Api from '../../../src/api/index.js';
 import type { OdWorkerLine, OdWorkerRequest } from './lane-od.js';
+import type { FunctionWork } from './types.js';
 
 const request = JSON.parse(readFileSync(process.argv[2] ?? '', 'utf8')) as OdWorkerRequest;
 
@@ -24,20 +25,40 @@ interface Interpreted {
   state: 'complete' | 'partial' | 'failed';
   reason: string | null;
   text: string | null;
+  work: FunctionWork | null;
 }
 
 function interpret(result: Api.ToolResult<'function_decompile'>): Interpreted {
   if ('data' in result) {
     if (result.data.delivery !== 'inline')
-      return { state: 'failed', reason: 'decompilation artifact was not materialized', text: null };
+      return {
+        state: 'failed',
+        reason: 'decompilation artifact was not materialized',
+        text: null,
+        work: null,
+      };
     const text = result.data.emission.text;
+    const work =
+      result.data.work === undefined
+        ? null
+        : { consumed: result.data.work, limit: result.budget.work };
     return result.state === 'partial'
-      ? { state: 'partial', reason: result.reason, text }
-      : { state: 'complete', reason: null, text };
+      ? { state: 'partial', reason: result.reason, text, work }
+      : { state: 'complete', reason: null, text, work };
   }
   if ('error' in result)
-    return { state: 'failed', reason: `${result.error.code}: ${result.error.message}`, text: null };
-  return { state: 'failed', reason: `unexpected result state ${result.state}`, text: null };
+    return {
+      state: 'failed',
+      reason: `${result.error.code}: ${result.error.message}`,
+      text: null,
+      work: null,
+    };
+  return {
+    state: 'failed',
+    reason: `unexpected result state ${result.state}`,
+    text: null,
+    work: null,
+  };
 }
 
 const suffix =
@@ -73,7 +94,7 @@ async function main(): Promise<void> {
         );
       } catch (error) {
         notFound = error instanceof Error && error.name === 'FunctionSelectionError';
-        outcome = { state: 'failed', reason: message(error), text: null };
+        outcome = { state: 'failed', reason: message(error), text: null, work: null };
       }
       const ms = performance.now() - callStarted;
       decompileTotal += ms;
@@ -84,6 +105,7 @@ async function main(): Promise<void> {
         reason: outcome.reason,
         ms,
         text: outcome.text,
+        work: outcome.work,
       });
       const detail = notFound
         ? 'not_found'

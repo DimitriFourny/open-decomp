@@ -409,6 +409,8 @@ function delivery(
   result: StoredDecompilation,
   artifact: Artifact,
   cache: 'hit' | 'computed',
+  /** Work the request charged up to delivery; reported, never stored or part of identity. */
+  work: number | undefined,
   limit: number,
   preference: 'auto' | 'artifact',
   /** `result` is a stored, schema-validated inline result: wrapping it in a handle needs no
@@ -419,7 +421,7 @@ function delivery(
   const wrapped = {
     ...result,
     artifacts: [handle],
-    data: { ...result.data, cache },
+    data: { ...result.data, cache, ...(work === undefined ? {} : { work }) },
   };
   const inline = validated
     ? (wrapped as ToolResult<'function_decompile'>)
@@ -468,6 +470,7 @@ export async function runCachedDecompilation(
       payload.result,
       existing,
       'hit',
+      (context.root ?? context).consumedWork?.(),
       limit,
       input.delivery ?? 'auto',
       true,
@@ -567,6 +570,7 @@ export async function runCachedDecompilation(
     computation.result,
     provisional,
     reused ? 'hit' : 'computed',
+    (context.root ?? context).consumedWork?.(),
     limit,
     input.delivery ?? 'auto',
   );
