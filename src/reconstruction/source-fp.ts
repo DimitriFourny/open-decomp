@@ -1,5 +1,5 @@
 import type { OperationContext, RegisterDescriptor } from '../core/index.js';
-import { expressionOperands, type Expression, type Value } from '../ir/index.js';
+import { bitWidth, expressionOperands, type Expression, type Value } from '../ir/index.js';
 import type { ControlArm, Region } from '../presentation/index.js';
 import type { Reconstruction } from './model.js';
 import { sourceRequirementPredicates } from './source-requirements.js';
@@ -470,7 +470,125 @@ export function sourceFpPresentation(
       ?.filter((item) => item.kind === 'fp_environment')
       .flatMap((item) => item.sites.flatMap((site) => site.subject_ids)),
   );
-  const candidates: [string, Expression][] = [];
+  // Magnitude bounds: a finite bound B proves a value is a finite IEEE number
+  // with |v| <= B, never a NaN; Infinity is no bound. Literals give |c|, W-bit
+  // integer conversions 2^(W-1) (signed) or 2^W (unsigned); arithmetic combines
+  // its operands' bounds, widened by MARGIN (the operation's own rounding,
+  // relative error at most 2^-24, plus the binary64 rounding of the bound
+  // itself); a phi or select takes the maximum. Memoized; a value reached again
+  // while its own bound is pending (a cycle) and entry state are unbounded.
+  const FORMAT_MAXIMUM: Partial<Record<number, number>> = {
+    32: 3.4028234663852886e38,
+    64: Number.MAX_VALUE,
+  };
+  const MARGIN = 1 + 2 ** -20;
+  const entries = new Set([
+    ...program.parameters.map((value) => value.id),
+    ...program.blocks.get(program.function.entry)!.register_entry.map(({ value }) => value.id),
+  ]);
+  const ieee = new DataView(new ArrayBuffer(8));
+  /** The exact IEEE value of a constant, through same-width bitcasts. */
+  const literalOf = (value: Value): number | undefined => {
+    const bits = bitWidth(value.type);
+    for (let depth = 0; depth < 16; depth++) {
+      const expression = program.expressions.get(value.id);
+      if (expression?.kind === 'constant') {
+        if (bits === 32) {
+          ieee.setUint32(0, Number(BigInt.asUintN(32, expression.bits)));
+          return ieee.getFloat32(0);
+        }
+        if (bits !== 64) return undefined;
+        ieee.setBigUint64(0, BigInt.asUintN(64, expression.bits));
+        return ieee.getFloat64(0);
+      }
+      if (
+        expression?.kind !== 'cast' ||
+        expression.op !== 'bitcast' ||
+        bitWidth(expression.value.type) !== bits
+      )
+        return undefined;
+      value = expression.value;
+    }
+    return undefined;
+  };
+  const bounds = new Map<string, number>();
+  const bound = (value: Value, depth = 0): number => {
+    const known = bounds.get(value.id);
+    if (known !== undefined) return known;
+    const bits = bitWidth(value.type),
+      maximum = FORMAT_MAXIMUM[bits];
+    if (
+      maximum === undefined ||
+      value.type.kind === 'vector' ||
+      depth > 64 ||
+      entries.has(value.id)
+    )
+      return Infinity;
+    context.checkpoint(1);
+    bounds.set(value.id, Infinity);
+    const next = (operand: Value): number =>
+      bitWidth(operand.type) === bits ? bound(operand, depth + 1) : Infinity;
+    const expression = program.expressions.get(value.id);
+    let result = Infinity;
+    if (expression?.kind === 'constant') {
+      const literal = literalOf(value);
+      if (literal !== undefined && Number.isFinite(literal)) result = Math.abs(literal);
+    } else if (expression?.kind === 'cast') {
+      if (expression.op === 'bitcast') result = next(expression.value);
+      else if (expression.op === 'signed_to_float')
+        result = 2 ** (bitWidth(expression.value.type) - 1);
+      else if (expression.op === 'unsigned_to_float') result = 2 ** bitWidth(expression.value.type);
+      else if (expression.op === 'float_convert')
+        result = bound(expression.value, depth + 1) * MARGIN;
+    } else if (expression?.kind === 'float') {
+      const left = next(expression.left);
+      if (expression.op === 'div') {
+        const divisor = literalOf(expression.right);
+        if (divisor !== undefined && divisor !== 0 && Number.isFinite(divisor))
+          result = (left / Math.abs(divisor)) * MARGIN;
+      } else {
+        const right = next(expression.right);
+        result = (expression.op === 'mul' ? left * right : left + right) * MARGIN;
+      }
+    } else if (expression?.kind === 'float_unary' && expression.op !== 'sqrt')
+      result = next(expression.value);
+    else if (expression?.kind === 'select')
+      result = Math.max(next(expression.when_true), next(expression.when_false));
+    // A phi holds one of its incoming copies.
+    const sources = incoming.get(value.id);
+    if (sources && (!expression || Number.isFinite(result))) {
+      if (!expression) result = 0;
+      for (const source of sources) {
+        const copied = program.values.get(source);
+        result = Math.max(result, copied ? next(copied) : Infinity);
+        if (!Number.isFinite(result)) break;
+      }
+    }
+    if (!(result < maximum)) result = Infinity;
+    bounds.set(value.id, result);
+    return result;
+  };
+  /** The operand bounds of an operation that cannot produce a NaN: every
+   * operand is finite and the operation has no invalid case (int-to-float
+   * conversions; add/sub/mul; division by a finite nonzero literal; format
+   * conversion), otherwise undefined. */
+  const nanFree = (expression: Expression): number[] | undefined => {
+    if (expression.kind === 'cast') {
+      if (expression.op === 'signed_to_float') return [2 ** (bitWidth(expression.value.type) - 1)];
+      if (expression.op === 'unsigned_to_float') return [2 ** bitWidth(expression.value.type)];
+      if (expression.op !== 'float_convert') return undefined;
+      const operand = bound(expression.value);
+      return Number.isFinite(operand) ? [operand] : undefined;
+    }
+    if (expression.kind !== 'float') return undefined;
+    const operands = [bound(expression.left), bound(expression.right)];
+    if (!operands.every(Number.isFinite)) return undefined;
+    if (expression.op !== 'div') return operands;
+    const divisor = literalOf(expression.right);
+    return divisor !== undefined && divisor !== 0 ? operands : undefined;
+  };
+  const candidates: [string, Expression][] = [],
+    nanFreeSubjects: [string, number[]][] = [];
   for (const [id, expression] of program.expressions) {
     context.checkpoint(1);
     if (
@@ -499,31 +617,51 @@ export function sourceFpPresentation(
         );
       });
     if (!sites.has(id) && !derived) continue;
+    const arithmetic =
+      (expression.kind === 'float' && ['add', 'sub', 'mul', 'div'].includes(expression.op)) ||
+      (expression.kind === 'float_unary' && expression.op === 'sqrt') ||
+      (expression.kind === 'cast' &&
+        ['signed_to_float', 'unsigned_to_float', 'float_convert'].includes(expression.op));
     if (
       payloadFree(expression) ||
       // Negation and absolute value only change the sign bit, payload included.
       (expression.kind === 'float_unary' && expression.op !== 'sqrt') ||
-      (!sensitive.has(id) &&
-        ((expression.kind === 'float' && ['add', 'sub', 'mul', 'div'].includes(expression.op)) ||
-          (expression.kind === 'float_unary' && expression.op === 'sqrt') ||
-          (expression.kind === 'cast' &&
-            ['signed_to_float', 'unsigned_to_float', 'float_convert'].includes(expression.op))))
+      (!sensitive.has(id) && arithmetic)
     )
       candidates.push([id, expression]);
+    else if (arithmetic) {
+      // A payload-sensitive consumer cannot tell an operation that never
+      // produces a NaN from its native C spelling.
+      const operands = nanFree(expression);
+      if (operands) nanFreeSubjects.push([id, operands]);
+    }
   }
+  if (
+    nanFreeSubjects.length &&
+    validation.presentation(
+      'fp_nan_free',
+      program.function.id,
+      'payload-sensitive IEEE operations that never produce a NaN: integer-to-float conversion (any 8- to 128-bit integer converts to a finite value or, for 2^128 in binary32, infinity); add, sub, mul, division by a finite nonzero literal and format conversion of operands with a finite magnitude bound (literal |c|, W-bit conversion 2^(W-1)/2^W, arithmetic combined with a rounding margin, phi/select maximum; cycles and entry values unbounded) round to a finite value or infinity, never NaN, so no canonical-NaN rule applies',
+      nanFreeSubjects.map(([id]) => id),
+      nanFreeSubjects
+        .map(([id, operands]) => `${id}: |operands| <= ${operands.join(', ')}`)
+        .join('; '),
+    )
+  )
+    for (const [id] of nanFreeSubjects) candidates.push([id, program.expressions.get(id)!]);
   if (
     candidates.length &&
     validation.presentation(
       'fp_native_operations',
       program.function.id,
-      'typed IEEE scalar operations (arithmetic, negation, absolute value, square root, comparisons, integer/float conversions) and exact finite literals under recorded per-site default environment; no payload-sensitive arithmetic consumers; fused and exceptional-dialect operations, vector operations and Python binary32/division/square-root/float-to-integer retain helpers',
+      'typed IEEE scalar operations (arithmetic, negation, absolute value, square root, comparisons, integer/float conversions) and exact finite literals under recorded per-site default environment; no payload-sensitive arithmetic consumers except of operations that never produce a NaN (fp_nan_free); an integer-to-float conversion of a zero-extended unsigned or sign-extended signed narrower integer spells that narrower operand (the same mathematical integer); fused and exceptional-dialect operations, vector operations and Python binary32/division/square-root/float-to-integer retain helpers',
       candidates.map(([id]) => id).slice(0, 64),
     )
   ) {
     validation.requireAbi(
       'fp_native_operations',
       [program.function.id],
-      'Native C arithmetic follows IEC 60559, including infinities and NaNs, in IEEE binary32/binary64 with no excess precision, no fast-math and FP contraction disabled (-ffp-contract=off). Negation and absolute value change only the sign bit; float-to-integer conversion truncates toward zero and, as in the IR, is undefined for NaN, infinities and out-of-range values. Source floating results are consumed as values, not inspected for arithmetic NaN payloads; local payload-sensitive consumers retain helpers. The recorded fp_environment requirement applies at every operation, including after calls.',
+      'Native C arithmetic follows IEC 60559, including infinities and NaNs, in IEEE binary32/binary64 with no excess precision, no fast-math and FP contraction disabled (-ffp-contract=off). Negation and absolute value change only the sign bit; float-to-integer conversion truncates toward zero and, as in the IR, is undefined for NaN, infinities and out-of-range values. Source floating results are consumed as values, not inspected for arithmetic NaN payloads; local payload-sensitive consumers retain helpers unless the operation never produces a NaN. The recorded fp_environment requirement applies at every operation, including after calls.',
     );
     for (const [, expression] of candidates) expressions.add(expression);
   }

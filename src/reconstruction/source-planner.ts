@@ -17,6 +17,7 @@ import {
   sameType,
   type DataType,
   type Expression,
+  type Instruction,
   type RegisterBinding,
   type Value,
 } from '../ir/index.js';
@@ -1753,6 +1754,7 @@ export function planSource(
   const environmentWriters = new Set(
     evidence.callees.flatMap((callee) => (callee.fp_environment_writer ? [callee.call_id] : [])),
   );
+  const registerOutputs = new Map<string, readonly RegisterBinding[]>();
   const presentation: SourcePresentation = {
     ...(environmentWriters.size ? { fp_environment_writers: environmentWriters } : {}),
     inferred: !functionSignature,
@@ -1779,6 +1781,7 @@ export function planSource(
     call_results: callResults,
     value_origins: valueOrigins,
     definitions,
+    register_outputs: registerOutputs,
     formal_stack_offsets: formalStackOffsets,
     ...(declaredExtension?.hidden ? { hidden_result: declaredExtension.hidden } : {}),
   };
@@ -1802,6 +1805,32 @@ export function planSource(
     forcedInline,
     alias,
     make,
+    /** Source view (E3): one whole output replaces the cells of a root that a
+     * call or unknown effect writes; a call's projection lists it too. */
+    outputs(
+      node: Extract<Instruction, { kind: 'call' | 'unknown_effect' }>,
+      bindings: readonly RegisterBinding[],
+    ): void {
+      registerOutputs.set(node.id, bindings);
+      const projection = node.kind === 'call' ? calls.get(node.id) : undefined;
+      if (!projection) return;
+      const replaced = new Set(
+        node.register_outputs
+          .filter((binding) => !bindings.includes(binding))
+          .map(({ value }) => value.id),
+      );
+      const added = bindings.filter((binding) => !node.register_outputs.includes(binding));
+      calls.set(node.id, {
+        ...projection,
+        outputs: projection.outputs.flatMap((binding) =>
+          !replaced.has(binding.value.id)
+            ? [binding]
+            : binding.register.offset_bits === 0
+              ? added.filter(({ register }) => register.root === binding.register.root)
+              : [],
+        ),
+      });
+    },
     entryStack(): Value {
       if (!entryParameter) {
         entryParameter = make(
