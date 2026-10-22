@@ -881,7 +881,7 @@ Files that several items touch:
 
 ### P4: Struct class names without another function's name
 
-- [ ] **Problem.** 250 of 418 struct names are `<fn>_arg<N>_<hash>` (`sqlite3VdbeAddOp3_arg0_e84e`, `setSectorSize_arg0_f48_f0_2620`), 1,190 occurrences and 34.5 KB. 141 of them name a function other than the one printed, which the judge called "misleading sqlite3DbFree_arg1 type name".
+- [x] **Problem.** 250 of 418 struct names are `<fn>_arg<N>_<hash>` (`sqlite3VdbeAddOp3_arg0_e84e`, `setSectorSize_arg0_f48_f0_2620`), 1,190 occurrences and 34.5 KB. 141 of them name a function other than the one printed, which the judge called "misleading sqlite3DbFree_arg1 type name".
   - **Root cause:** `src/analysis/types/image-types.ts:395-452` names a class after its first anchor.
   - **Change:**
     - Function texts print `struct_<6hex>` (already used for 146 classes; `source-structs.ts:241`).
@@ -890,6 +890,7 @@ Files that several items touch:
   - **Tests:** `test/analysis/types/image-types.test.ts`, `test/emitters/c/source-structs.test.ts`, `test/reconstruction/image-types-source.test.ts`, the docs/CORE.md image-type section.
   - **Acceptance:** only struct names change; lexical tokens unchanged.
   - **Expected effect:** Claude tokens −9.3k, geomean about −0.035 [estimate].
+  - **Done (`wt/rm4-p4`):** OD lane: 97 of 237 texts change, every one only by struct identifiers (identical after renaming; lexical token counts unchanged); `<fn>_arg<N>_` struct names 219 (1,109 occurrences) → 0, and `_ret`/`_obj`/`_local`/`_alloc` names → `struct_<hex>` too (368 names before and after); checked view unchanged on the 4 sampled functions; versions types/16, reconstruction/79, emitters 85.
 
 ## L: Loops
 
