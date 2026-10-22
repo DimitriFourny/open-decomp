@@ -466,7 +466,8 @@ for (const variant of ['missing_xmm', 'rsi_use', 'call_between'] as const)
     );
     for (const language of ['c-like', 'python-like'] as const) {
       const output = emit(fixture.ir, fixture.extra, language).emission;
-      assert.doesNotMatch(output.text, /\.\.\.\)|va_start|\.va\b/, output.text);
+      // No `...` formal list (an open-arity call may print `f(...)`), no va_start.
+      assert.doesNotMatch(output.text, /\w+, \.\.\.\)|va_start|\.va\b/, output.text);
       // The 128-bit vector saves still print.
       assert.match(output.text, /uint128_t/, output.text);
     }
