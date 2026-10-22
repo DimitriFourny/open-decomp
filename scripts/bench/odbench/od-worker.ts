@@ -8,8 +8,9 @@
 import { appendFileSync, readFileSync } from 'node:fs';
 import { performance } from 'node:perf_hooks';
 import type * as Api from '../../../src/api/index.js';
+import { digestDiagnostics } from './diagnostics.js';
 import type { OdWorkerLine, OdWorkerRequest } from './lane-od.js';
-import type { FunctionWork } from './types.js';
+import type { FunctionDiagnostic, FunctionWork } from './types.js';
 
 const request = JSON.parse(readFileSync(process.argv[2] ?? '', 'utf8')) as OdWorkerRequest;
 
@@ -26,9 +27,12 @@ interface Interpreted {
   reason: string | null;
   text: string | null;
   work: FunctionWork | null;
+  /** Distinct diagnostics of the result envelope (every state carries them). */
+  diagnostics: FunctionDiagnostic[];
 }
 
 function interpret(result: Api.ToolResult<'function_decompile'>): Interpreted {
+  const diagnostics = digestDiagnostics(result.diagnostics);
   if ('data' in result) {
     if (result.data.delivery !== 'inline')
       return {
@@ -36,6 +40,7 @@ function interpret(result: Api.ToolResult<'function_decompile'>): Interpreted {
         reason: 'decompilation artifact was not materialized',
         text: null,
         work: null,
+        diagnostics,
       };
     const text = result.data.emission.text;
     const work =
@@ -43,8 +48,8 @@ function interpret(result: Api.ToolResult<'function_decompile'>): Interpreted {
         ? null
         : { consumed: result.data.work, limit: result.budget.work };
     return result.state === 'partial'
-      ? { state: 'partial', reason: result.reason, text, work }
-      : { state: 'complete', reason: null, text, work };
+      ? { state: 'partial', reason: result.reason, text, work, diagnostics }
+      : { state: 'complete', reason: null, text, work, diagnostics };
   }
   if ('error' in result) {
     // A work-limit failure has no result envelope; its diagnostic reports the count at which
@@ -59,6 +64,7 @@ function interpret(result: Api.ToolResult<'function_decompile'>): Interpreted {
       reason: `${result.error.code}: ${result.error.message}`,
       text: null,
       work,
+      diagnostics,
     };
   }
   return {
@@ -66,6 +72,7 @@ function interpret(result: Api.ToolResult<'function_decompile'>): Interpreted {
     reason: `unexpected result state ${result.state}`,
     text: null,
     work: null,
+    diagnostics,
   };
 }
 
@@ -102,7 +109,13 @@ async function main(): Promise<void> {
         );
       } catch (error) {
         notFound = error instanceof Error && error.name === 'FunctionSelectionError';
-        outcome = { state: 'failed', reason: message(error), text: null, work: null };
+        outcome = {
+          state: 'failed',
+          reason: message(error),
+          text: null,
+          work: null,
+          diagnostics: [],
+        };
       }
       const ms = performance.now() - callStarted;
       decompileTotal += ms;
@@ -114,6 +127,7 @@ async function main(): Promise<void> {
         ms,
         text: outcome.text,
         work: outcome.work,
+        diagnostics: outcome.diagnostics,
       });
       const detail = notFound
         ? 'not_found'

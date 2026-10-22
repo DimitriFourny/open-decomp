@@ -139,7 +139,7 @@ Files that several items touch:
 
 ## M1: Signature and diagnostic rows in odbench
 
-- [ ] **Problem.** The largest excess wrong-claim class (return types) does not appear in the report. Comprehension is one sample per function, so its noise is about ±0.1. The OD lane does not record diagnostics, so this investigation needed throwaway census scripts for cut callees, partial reasons, unsupported encodings and open arity.
+- [x] **Problem.** The largest excess wrong-claim class (return types) does not appear in the report. Comprehension is one sample per function, so its noise is about ±0.1. The OD lane does not record diagnostics, so this investigation needed throwaway census scripts for cut callees, partial reasons, unsupported encodings and open arity.
   - **Change** (`scripts/bench/odbench/`):
     - `od-worker.ts`/`lane-od.ts`: record per function the diagnostics (code plus first sentence, deduplicated) in `lane.json`. This is not part of text identity.
     - New `signature.ts` with a tolerant C definition reader for the three lane styles: OD (preamble, one-line signatures), Ghidra (signature line, then `{`) and source (macros such as `SQLITE_API`, multi-line parameters, `KEEP`). The report gains a "signature vs source" table per lane:
@@ -151,6 +151,7 @@ Files that several items touch:
     - `bun run bench report --lanes od-rm3-final,source --tier full` re-renders from the caches, with no model call.
     - It shows OD void-source 17/13/12 (void/value/unknown) and value-source 8/180/1 (±1 for parser differences, explained).
     - Texts and judgments are unchanged.
+  - **Done (evidence).** `bench report --lanes od-rm3-final,source --tier full` re-renders from the caches with no model call: void-source 17/13/12, value-source 9/180/1 (the prototype's 8 omitted the stripped `sub@0x10000041c` `KEEP aggregate` function, which the reader matches by taking the text's last definition; 232 paired, not 231), Ghidra 40/2/0 and 14/176/0. Embedded-assignment conditions count 41 in OD (casts before the group and arithmetic operators after it included; the prototype's 46 was not reproduced by any variant tried: the only `if`/`while` lines with an assignment group that this counter skips are 6 comma conditions, which stay in `comma_conditions`), 17 in the source, 0 in Ghidra. `bench run od --label rm4-m1`: 232 texts byte-identical to `od-rm3-final`, state/reason/sha unchanged, 237 functions with `diagnostics` (202 with at least one).
 
 ## M2: Speed rows that match the D8 target
 
@@ -881,7 +882,7 @@ Files that several items touch:
 
 ### P4: Struct class names without another function's name
 
-- [ ] **Problem.** 250 of 418 struct names are `<fn>_arg<N>_<hash>` (`sqlite3VdbeAddOp3_arg0_e84e`, `setSectorSize_arg0_f48_f0_2620`), 1,190 occurrences and 34.5 KB. 141 of them name a function other than the one printed, which the judge called "misleading sqlite3DbFree_arg1 type name".
+- [x] **Problem.** 250 of 418 struct names are `<fn>_arg<N>_<hash>` (`sqlite3VdbeAddOp3_arg0_e84e`, `setSectorSize_arg0_f48_f0_2620`), 1,190 occurrences and 34.5 KB. 141 of them name a function other than the one printed, which the judge called "misleading sqlite3DbFree_arg1 type name".
   - **Root cause:** `src/analysis/types/image-types.ts:395-452` names a class after its first anchor.
   - **Change:**
     - Function texts print `struct_<6hex>` (already used for 146 classes; `source-structs.ts:241`).
@@ -890,6 +891,7 @@ Files that several items touch:
   - **Tests:** `test/analysis/types/image-types.test.ts`, `test/emitters/c/source-structs.test.ts`, `test/reconstruction/image-types-source.test.ts`, the docs/CORE.md image-type section.
   - **Acceptance:** only struct names change; lexical tokens unchanged.
   - **Expected effect:** Claude tokens −9.3k, geomean about −0.035 [estimate].
+  - **Done (`wt/rm4-p4`):** OD lane: 97 of 237 texts change, every one only by struct identifiers (identical after renaming; lexical token counts unchanged); `<fn>_arg<N>_` struct names 219 (1,109 occurrences) → 0, and `_ret`/`_obj`/`_local`/`_alloc` names → `struct_<hex>` too (368 names before and after); checked view unchanged on the 4 sampled functions; versions types/16, reconstruction/79, emitters 85.
 
 ## L: Loops
 
@@ -965,7 +967,7 @@ Files that several items touch:
 
 ### T1: Incremental hash of the dependency ledger
 
-- [ ] **Problem.** `fingerprint(readset)` (`source-facts.ts:1817-1837`, inside the dependency loop at `:1786`) rebuilds and hashes the whole append-only ledger (about 10.9k reads) for every context-specialized dependency: 11.0 s of profile plus GC.
+- [x] **Problem.** `fingerprint(readset)` (`source-facts.ts:1817-1837`, inside the dependency loop at `:1786`) rebuilds and hashes the whole append-only ledger (about 10.9k reads) for every context-specialized dependency: 11.0 s of profile plus GC. _Done (`wt/rm4-t1`): all 237 lane texts and states identical to `od-rm3-final`; SQLite `decompile_ms_total` back-to-back at similar load: base 139.3 / 125.6 s → 117.2 / 106.9 s._
   - **Change:**
     - `src/core/identity.ts`: an append-only canonical hasher that produces exactly `fingerprint({version: 1, complete: true, reads})` for a growing array, with `canonicalIdentity` per element (no second format).
     - `src/project/cache/dependencies.ts`: `AnalysisDependencyCollector.readsetFingerprint(readset)` absorbs only new reads. `finish()` snapshots are prefixes (`:410-415`). Fall back to the full hash for foreign readsets.

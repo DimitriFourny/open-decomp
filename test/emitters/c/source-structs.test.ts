@@ -10,6 +10,7 @@ import { sysvAMD64Abi } from '../../../src/abi/sysv-amd64/index.js';
 import { constructSSA } from '../../../src/analysis/ssa/index.js';
 import {
   recoverTypes,
+  type ImageTypeBinding,
   type MemoryShape,
   type SuppliedTypeRecord,
 } from '../../../src/analysis/types/index.js';
@@ -23,6 +24,7 @@ function planner(
   definitions: Record<string, RecoveredType>,
   exhausted = false,
   shapes: readonly MemoryShape[] = [],
+  images: ReadonlyMap<string, ImageTypeBinding> = new Map(),
 ) {
   const context = createOperationContext();
   const records = new Map<string, SuppliedTypeRecord>(
@@ -35,7 +37,7 @@ function planner(
   if (exhausted)
     for (let index = 0; index < 256; index++)
       validation.presentation('fixture', String(index), `capacity ${index}`);
-  return new SourceStructs(records, validation, 'function', context, shapes);
+  return new SourceStructs(records, validation, 'function', context, shapes, images);
 }
 const word: RecoveredType = { kind: 'integer', bits: 32, signed: false };
 function shape(fields: readonly [bigint, string][]): RecoveredType {
@@ -73,6 +75,33 @@ test('observed structure names unify equal layouts and separate different ones',
     structs.layout('first')?.map((member) => member.offset),
     [4n, 24n],
   );
+});
+
+test('image-wide names print as the binding label; layout digests never reuse one', () => {
+  const definitions = { word, first: shape([[4n, 'word']]), second: shape([[8n, 'word']]) };
+  const plain = planner(definitions).name('first');
+  assert.match(plain, /^struct_[0-9a-f]{6}$/);
+  const binding = (name: string): ImageTypeBinding => ({
+    type_id: 'second',
+    name,
+    first_seen: 'setSectorSize_arg0',
+    state: 'complete',
+    functions: 2,
+    conflicts: [],
+  });
+  // The binding's label names its type, whatever its anchor says.
+  const labelled = planner(definitions, false, [], new Map([['second', binding('struct_123abc')]]));
+  assert.equal(labelled.name('second'), 'struct_123abc');
+  assert.doesNotMatch(labelled.name('second'), /setSectorSize/);
+  assert.equal(labelled.name('first'), plain);
+  // Another type's digest that equals a reserved label extends until unique.
+  const reserved = planner(definitions, false, [], new Map([['second', binding(plain)]]));
+  assert.equal(reserved.name('second'), plain);
+  const other = reserved.name('first');
+  assert.notEqual(other, plain);
+  assert.match(other, /^struct_[0-9a-f]{8}$/);
+  assert.ok(other.startsWith(plain));
+  assert.equal(reserved.name('first'), other);
 });
 
 test('single scalar, floating, pointer and proven-stride array pointees collapse without bounds', () => {
