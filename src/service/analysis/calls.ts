@@ -333,9 +333,7 @@ export function environmentWriterCalls(
       if (node.kind === 'call')
         visit(
           node.id,
-          node.target.kind === 'direct'
-            ? node.target.address
-            : addresses.get(node.target.value.id),
+          node.target.kind === 'direct' ? node.target.address : addresses.get(node.target.value.id),
           node.provenance.instruction_ids,
         );
     const control = block.terminator;

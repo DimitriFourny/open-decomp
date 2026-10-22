@@ -281,7 +281,7 @@ function locations(
  */
 export class SysVAMD64Abi implements AbiProfile {
   readonly name = 'System V AMD64 ABI';
-  readonly version = '1';
+  readonly version = '2';
   readonly id = 'sysv-amd64';
   readonly architecture = 'x86_64';
   readonly layout: DataLayout = Object.freeze({

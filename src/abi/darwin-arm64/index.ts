@@ -39,7 +39,7 @@ import type {
  */
 export class DarwinArm64Abi implements AbiProfile {
   readonly name = 'Darwin ARM64 C ABI';
-  readonly version = '1.3.0';
+  readonly version = '1.4.0';
   readonly id = 'darwin-arm64' as const;
   readonly architecture = 'arm64' as const;
   readonly layout: DataLayout = Object.freeze({

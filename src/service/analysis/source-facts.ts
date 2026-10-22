@@ -1443,7 +1443,11 @@ function environmentWriter(
     }
     const node = definitions.get(id);
     if (node?.kind === 'unknown_effect') continue;
-    if (node?.kind === 'assign' && node.expression.kind === 'cast' && node.expression.op === 'bitcast')
+    if (
+      node?.kind === 'assign' &&
+      node.expression.kind === 'cast' &&
+      node.expression.op === 'bitcast'
+    )
       stack.push(node.expression.value.id);
     else return true;
   }

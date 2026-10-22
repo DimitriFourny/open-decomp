@@ -208,7 +208,7 @@ function registerLocation(register: RegisterDescriptor, bits: number): AbiLocati
  */
 export class WindowsX64Abi implements AbiProfile {
   readonly name = 'Microsoft x64 ABI';
-  readonly version = '2';
+  readonly version = '3';
   readonly id = 'windows-x64';
   readonly architecture = 'x86_64';
   readonly layout = dataLayout;
