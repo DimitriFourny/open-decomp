@@ -508,3 +508,43 @@ export function nativeReturnInterface(
   }
   return { returns, return_types: types, written_result: { registers: returns, types } };
 }
+
+/** A context unit keeps its callee's result storage. `generic` is the baseline
+ * body's result with `untypedFloatWrites` (`prepareNativeContext`); it covers
+ * every baseline exit, and the context's exits are a subset of them. When both
+ * results are non-empty but name different roots (a literal-zero FP exit has
+ * no IEEE type of its own, so the context alone falls back to an integer
+ * root), the generic roots hold here as well. Widths and types on a root the
+ * context proves too stay the context's; an empty context result (a context
+ * that writes no result) never acquires one. */
+export function inheritGenericResult<T extends NativeInterface>(
+  observed: T,
+  generic: Pick<NativeInterface, 'returns' | 'return_types'> | undefined,
+): T {
+  if (!generic?.returns.length || !observed.returns.length) return observed;
+  const roots = new Set(observed.returns.map((register) => register.root));
+  if (
+    generic.returns.length === roots.size &&
+    generic.returns.every((register) => roots.has(register.root))
+  )
+    return observed;
+  const returns: RegisterDescriptor[] = [],
+    types: DataType[] = [];
+  for (const [index, register] of generic.returns.entries()) {
+    const local = observed.returns.findIndex((item) => item.root === register.root);
+    const result = local >= 0 ? observed.returns[local]! : register;
+    returns.push(result);
+    types.push(
+      (local >= 0 ? observed.return_types?.[local] : generic.return_types?.[index]) ?? {
+        kind: 'integer',
+        bits: result.width_bits,
+      },
+    );
+  }
+  return {
+    ...observed,
+    returns,
+    return_types: types,
+    written_result: { registers: returns, types },
+  };
+}
