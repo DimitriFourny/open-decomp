@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   createOperationContext,
+  entityIdentity,
   type AbiLocation,
   type AbiProfile,
   type AbiType,
@@ -12,7 +13,7 @@ import { sysvAMD64Abi } from '../../src/abi/sysv-amd64/index.js';
 import { windowsX64Abi } from '../../src/abi/windows-x64/index.js';
 import { constructSSA } from '../../src/analysis/ssa/index.js';
 import { recoverTypes } from '../../src/analysis/types/index.js';
-import { integer, type SSAForm } from '../../src/ir/index.js';
+import { integer, type Provenance, type SSAForm } from '../../src/ir/index.js';
 import { structureControlFlow } from '../../src/presentation/index.js';
 import { reconstruct } from '../../src/reconstruction/index.js';
 import type { SourceEvidence } from '../../src/reconstruction/source-model.js';
@@ -798,3 +799,280 @@ for (const abi of [sysvAMD64Abi, windowsX64Abi])
       assert.doesNotMatch(emission.text, language === 'c-like' ? /^uint64_t fn_/m : /-> uint64_t:/);
     }
   });
+
+const site = (address: bigint): Provenance => ({
+  instruction_ids: [entityIdentity(slice, 'instruction', address)],
+  ranges: [{ start: { image_id: image, space: 'va', value: address }, size: 4n }],
+  evidence_ids: [],
+  synthetic: [],
+});
+const isFloatingIncidental = (record: { rule?: string; reason?: string }): boolean =>
+  record.rule === 'incidental_result' && record.reason?.includes('vector store') === true;
+
+/** Darwin `void reset(struct reader *r) { release(r->owner); memset(r, 0, 32); }`:
+ * `release` leaves its result in x0, then `movi v0.2d, #0` fills v0 for two
+ * 128-bit stores. As after constant folding, each 64-bit cell of v0 holds its
+ * own constant; only the `movi` instruction links them to the stored zero. */
+function vectorFill() {
+  const abi = darwinArm64Abi;
+  const x0 = abi.unknown_call_clobbers.registers.find(
+    (item) => item.root === 'arm64:x0' && item.width_bits === 64,
+  )!;
+  const x19 = abi.preserved.find((item) => item.root === 'arm64:x19' && item.width_bits === 64)!;
+  const fp = register(
+    abi.classifyCall({ returns: f64, parameters: [], variadic: false, fixed_parameter_count: 0 })
+      .returns[0],
+  );
+  const cell = (offset: number): RegisterDescriptor => ({
+    ...fp,
+    id: `${fp.root}:${offset}:64`,
+    offset_bits: offset,
+    width_bits: 64,
+    write_rule: 'preserve_other_bits',
+  });
+  const b = builder('vector-fill'),
+    block = b.block('entry');
+  const reader = block.readRegister(x0);
+  block.writeRegister(x19, reader);
+  block.writeRegister(x0, block.load(u64, reader));
+  block.call(
+    { kind: 'direct', address: { image_id: image, space: 'va', value: 0x2000n } },
+    [],
+    [],
+    abi.unknown_call_clobbers,
+  );
+  block.source(site(0x1010n));
+  const zero = block.constant(integer(128), 0n);
+  block.writeRegister(cell(0), block.constant(u64, 0n));
+  block.writeRegister(cell(64), block.constant(u64, 0n));
+  block.source(site(0x1014n));
+  const base = block.readRegister(x19);
+  block.store(base, zero);
+  block.store(block.int('add', base, block.constant(u64, 16n)), zero);
+  block.return([]);
+  const ir = constructSSA(b.finish(block, [])).value as SSAForm;
+  const callId = ir.blocks[0]!.instructions.find((node) => node.kind === 'call')!.id;
+  const source: SourceEvidence = {
+    abi,
+    addresses: [],
+    callees: [
+      {
+        call_id: callId,
+        parameters: [x0],
+        returns: [x0],
+        argument_list_complete: true,
+        evidence_ids: [],
+      },
+    ],
+  };
+  const view = (kind: 'source' | 'checked') =>
+    reconstruct(
+      { function: structureControlFlow(ir, createOperationContext()).value!, source },
+      createOperationContext(),
+      kind,
+    );
+  return { ir, source, view, fp };
+}
+
+test('darwin-arm64 a vector zero-fill temporary in v0 is no result', () => {
+  const fixture = vectorFill();
+  const source = fixture.view('source');
+  for (const projection of source.returns.values()) {
+    assert.equal(projection.results.length, 0);
+    assert.equal(projection.outputs.length, 0);
+    for (const root of ['arm64:x0', fixture.fp.root])
+      assert.ok(projection.exit_scratch?.some((slice) => slice.register.root === root));
+  }
+  assert.ok(source.local_validation?.some(isFloatingIncidental));
+  assert.ok(
+    source.local_validation?.some(
+      (record) =>
+        record.rule === 'incidental_result' &&
+        record.reason?.includes('a call result left in place before later effects'),
+    ),
+  );
+  assert.ok(
+    source.local_validation_session?.abiConformance.some(
+      (site) =>
+        site.rule === 'incidental_result' && site.explanation.includes('floating-point result'),
+    ),
+  );
+  // The checked view keeps the exact physical exit state.
+  const checked = fixture.view('checked');
+  assert.ok(!checked.local_validation?.some(isFloatingIncidental));
+  for (const projection of checked.returns.values()) {
+    assert.equal(projection.exit_scratch, undefined);
+    assert.ok(projection.outputs.some((binding) => binding.register.root === fixture.fp.root));
+  }
+  for (const language of ['c-like', 'python-like'] as const) {
+    const { emission } = emit(fixture.ir, { source: fixture.source }, language);
+    assert.match(emission.text, language === 'c-like' ? /^void fn_/m : /-> void:/);
+    assert.doesNotMatch(emission.text, /physical_return|\breturn [^;\n]/);
+    const formals = emittedFormals(emission);
+    assert.equal(formals.length, 1);
+    const memory = new Map<bigint, number>();
+    for (let byte = 0n; byte < 40n; byte++) memory.set(0x3000n + byte, Number(byte) + 1);
+    const released: bigint[][] = [];
+    const observed = execute(
+      emission,
+      new Map([[formals[0]!.statement_id, 0x3000n]]),
+      memory,
+      0n,
+      new Map(),
+      new Map(),
+      new Map([
+        [
+          'sub_2000',
+          (arguments_: readonly bigint[]) => {
+            released.push([...arguments_]);
+            return 0x55n;
+          },
+        ],
+      ]),
+    );
+    assert.deepEqual(released, [[0x0807060504030201n]]);
+    for (let byte = 0n; byte < 40n; byte++)
+      assert.equal(observed.memory.get(0x3000n + byte), byte < 32n ? 0 : Number(byte) + 1);
+    assert.deepEqual(observed.values, []);
+  }
+});
+
+/** `struct big copy(const struct big *in)` through the hidden result pointer
+ * (SysV rdi, Win64 rcx), which the ABI echoes in rax (moved there first, as
+ * compilers schedule it): a 128-bit `movups` copy
+ * through xmm0 plus a 64-bit tail move. `scalar` instead moves the first u64
+ * through the low FP lane and stores it at its own width; `vector` packs the
+ * two u64 halves into a written vector of two lanes before the 128-bit store. */
+function hiddenResultCopy(abi: AbiProfile, mode: 'copy' | 'scalar' | 'vector') {
+  const layout = abi.classifyCall({
+    returns: word,
+    parameters: [{ kind: 'pointer' }, { kind: 'pointer' }],
+    variadic: false,
+    fixed_parameter_count: 2,
+  });
+  const out = register(layout.parameters[0]!.locations[0]),
+    input = register(layout.parameters[1]!.locations[0]),
+    result = register(layout.returns[0]);
+  const xmm0 = register(
+    abi.classifyCall({ returns: f64, parameters: [], variadic: false, fixed_parameter_count: 0 })
+      .returns[0],
+  );
+  const b = builder(`hidden-result-copy-${abi.id}-${mode}`),
+    block = b.block('entry');
+  const destination = block.readRegister(out),
+    from = block.readRegister(input);
+  block.writeRegister(result, destination);
+  const offset = (base: typeof from, bytes: bigint) =>
+    block.int('add', base, block.constant(u64, bytes));
+  if (mode === 'scalar') {
+    const head = block.load(u64, from);
+    block.writeRegister({ ...xmm0, id: `${xmm0.root}:0:64`, width_bits: 64 }, head);
+    block.store(destination, head);
+    block.store(offset(destination, 8n), block.load(u64, offset(from, 8n)));
+  } else {
+    const copy =
+      mode === 'vector'
+        ? block.pack({ kind: 'vector', element: u64, lanes: 2 }, [
+            block.load(u64, from),
+            block.load(u64, offset(from, 8n)),
+          ])
+        : block.load(integer(128), from);
+    block.writeRegister(xmm0, copy);
+    block.store(destination, copy);
+  }
+  block.store(offset(destination, 16n), block.load(u64, offset(from, 16n)));
+  block.return([]);
+  const ir = constructSSA(b.finish(block, [])).value as SSAForm;
+  const source: SourceEvidence = { abi, callees: [], addresses: [] };
+  const view = (kind: 'source' | 'checked') =>
+    reconstruct(
+      { function: structureControlFlow(ir, createOperationContext()).value!, source },
+      createOperationContext(),
+      kind,
+    );
+  return { ir, source, view, xmm0, result };
+}
+
+/** Executes a hidden-result copy of 24 patterned bytes from 0x3000 to 0x4000. */
+const runCopy = (
+  fixture: { ir: SSAForm; source: SourceEvidence },
+  language: 'c-like' | 'python-like',
+) => {
+  const { emission } = emit(fixture.ir, { source: fixture.source }, language);
+  const formals = emittedFormals(emission);
+  assert.equal(formals.length, 2);
+  const memory = new Map<bigint, number>();
+  for (let byte = 0n; byte < 24n; byte++) {
+    memory.set(0x3000n + byte, Number(byte) * 7 + 3);
+    memory.set(0x4000n + byte, 0);
+  }
+  const observed = execute(
+    emission,
+    new Map([
+      [formals[0]!.statement_id, 0x4000n],
+      [formals[1]!.statement_id, 0x3000n],
+    ]),
+    memory,
+  );
+  for (let byte = 0n; byte < 24n; byte++)
+    assert.equal(observed.memory.get(0x4000n + byte), Number(byte) * 7 + 3);
+  return { text: emission.text, values: observed.values, formals };
+};
+
+for (const abi of [sysvAMD64Abi, windowsX64Abi])
+  test(`${abi.id} a 128-bit copy temporary in xmm0 leaves the echoed hidden result pointer`, () => {
+    const fixture = hiddenResultCopy(abi, 'copy');
+    const source = fixture.view('source');
+    for (const projection of source.returns.values()) {
+      assert.equal(projection.results.length, 1);
+      assert.equal(projection.outputs.length, 0);
+      assert.ok(
+        projection.exit_scratch?.some((slice) => slice.register.root === fixture.xmm0.root),
+      );
+    }
+    assert.ok(source.local_validation?.some(isFloatingIncidental));
+    assert.ok(
+      source.local_validation_session?.abiConformance.some(
+        (site) => site.rule === 'incidental_result',
+      ),
+    );
+    const checked = fixture.view('checked');
+    assert.ok(!checked.local_validation?.some(isFloatingIncidental));
+    for (const projection of checked.returns.values()) {
+      assert.equal(projection.exit_scratch, undefined);
+      assert.ok(projection.outputs.some((binding) => binding.register.root === fixture.xmm0.root));
+    }
+    for (const language of ['c-like', 'python-like'] as const) {
+      const { text, values, formals } = runCopy(fixture, language);
+      assert.doesNotMatch(text, /physical_return|^void fn_|-> void:/m);
+      assert.match(text, new RegExp(`\\breturn ${formals[0]!.name}\\b`));
+      assert.deepEqual(values, [0x4000n]);
+    }
+  });
+
+test('a 64-bit untyped FP value stored at its own width and returned keeps the explicit form', () => {
+  const fixture = hiddenResultCopy(sysvAMD64Abi, 'scalar');
+  const source = fixture.view('source');
+  assert.ok(!source.local_validation?.some(isFloatingIncidental));
+  assert.ok(
+    source.local_validation?.some(
+      (record) =>
+        record.rule === 'primary_result' && record.reason?.includes('without typed IEEE evidence'),
+    ),
+  );
+  for (const language of ['c-like', 'python-like'] as const) {
+    const { text } = runCopy(fixture, language);
+    assert.match(text, /physical_return\(/);
+  }
+});
+
+// The test oracle executes no vector memory; the typed path is checked on the plan.
+test('a vector-typed 128-bit copy in xmm0 keeps the typed vector path', () => {
+  const fixture = hiddenResultCopy(sysvAMD64Abi, 'vector');
+  const source = fixture.view('source');
+  assert.ok(!source.local_validation?.some(isFloatingIncidental));
+  for (const projection of source.returns.values()) {
+    assert.equal(projection.results.length, 1);
+    assert.equal(projection.results[0]!.type.kind, 'vector');
+  }
+});
