@@ -76,7 +76,7 @@ The renderer prints `physical_return` at `src/emitters/renderer.ts:8130-8199` wh
 
 ### R1: Rebind narrow join exits at the function's integer result width
 
-- [ ] **Problem.** In `matrix_switch` (ELF `-O2` `0x401aa0`, PE `-O2` `0x140001040`), `default: return a` and `case 9: return a == b ? 42 : 99` share one `ret`. Case 9 writes `eax`, which zero-extends, so rax is two SSA cells. OD prints `return physical_return(explicit_values((uint64_t)result), physical_inputs("x86_64:rax:32:32", value0));`. Ghidra prints `return param_2;`.
+- [x] **Problem.** In `matrix_switch` (ELF `-O2` `0x401aa0`, PE `-O2` `0x140001040`), `default: return a` and `case 9: return a == b ? 42 : 99` share one `ret`. Case 9 writes `eax`, which zero-extends, so rax is two SSA cells. OD prints `return physical_return(explicit_values((uint64_t)result), physical_inputs("x86_64:rax:32:32", value0));`. Ghidra prints `return param_2;`.
   - **Root cause:** `source-planner.ts:1115-1127` sets `wide` only when a high cell has a defining expression. A phi has none (`source-cells.ts:111-117`). The join exit therefore binds the 32-bit low cell. Harmonization (`:1227-1252`) then zero-extends it to the function width and keeps the high cell as an overlay. G8 recombination (`source-cells.ts:144-201`) does not fire, because an exit snapshot is not a joint read.
   - **Change:** in harmonization, for an exit narrower than the function width W, check whether its uncertain outputs cover exactly bits [narrow, W) of the integer return root. If they do, bind the whole location at W (`concat` of the cells) and drop those outputs. Otherwise keep `zero_extend`. `recombineSourceCells` then merges the phi web and records `register_cell_recombination`.
   - **Soundness:** bit-exact, because concat(cells) is the register value, and needs no ABI premise. Do not widen exits one by one: a prototype that followed phi sources made `btreeOverwriteContent` 64-bit. Decide W from all exits first, then rebind.
@@ -86,6 +86,7 @@ The renderer prints `physical_return` at `src/emitters/renderer.ts:8130-8199` wh
     - an unchanged checked view;
     - a negative case where every exit is narrow keeps the narrow type.
   - **Acceptance:** both `matrix_switch` texts end `case 9: arg1 = arg1 == arg2 ? 42 : 99; break; } return arg1;`. No other full-tier text changes.
+  - Evidence (2026-10-22): `source-planner.ts` harmonization rebinds (source view only, record `exit_result_width`) an exit narrower than the all-exit width W whose remaining return-root overlays tile exactly [narrow, W); G8 then records `register_cell_recombination`. OD lane `od-rm3-r1` vs `od-head`: only the two `matrix_switch` texts differ, both ending `case 9: arg1 = arg1 == arg2 ? 42 : 99; break; } return arg1;` (physical_return 1 → 0 each; texts with it 18 → 16); their checked views are byte-identical. Tests: `source-loop-cells.test.ts` SysV + AAPCS64 switch join executed in C and Python with `a = 0x123456789abcdef0`, all-narrow negative keeps `uint32_t`. reconstruction/64.
 
 ### R2: Forwarded result demand from a self-recursive call is not demand
 
