@@ -1370,6 +1370,22 @@ context's exits are a subset of the baseline exits. Thus both tail calls of the
 SysV/Win64 `-O2` `matrix_variadic_call` (`matrix_variadic(0)` returns through
 `xorpd %xmm0,%xmm0` alone) return the callee's `double`.
 
+The native return interface (`nativeReturnInterface`) types an unoptimized FP
+result like the source planner: when an FP/vector root has no expression or
+contract type on an exit and its low 64 (or 32) bits are, through lossless
+transport, phis and lane projections, a load of an exact local stack slot
+(negative callee-entry SP offset), the type is the slot's typer result
+(`createSlotTyper`, `source-slot-types.ts`, shared with the planner). Every direct
+store to the slot must be typed FP of the same width, literal bits, or a reload
+of an exact slot that is itself so typed; at least one store must be typed (a
+slot of literals or of only the slot's width is no type), and an integer store,
+an overlapping or dynamic stack write, or a load that a frame address may have
+reached a call or unresolved memory before (`StackSnapshot.escaped` at the load)
+leaves the root untyped. The existing typed-result precedence then replaces the
+integer root (an `-O0` loop counter in `eax`). Thus the `-O0` variadic
+`matrix_variadic` summary is `double`, and its callers print
+`double r = matrix_variadic(…); return r;` through their own frame slot.
+
 Bounded native parameter summaries refine the caller's existing memory shapes without rerunning its ABI/stack analysis. Compatible partial fields accumulate; overlapping alternatives, unknown size/alignment, dynamic indices, aliases and escapes remain explicit. Exact full-width copies and split entry cells retain one original pointer identity, while distinct incoming pointer bases remain distinct phi views. Callback fields retain the actual target and prepared whole argument carriers, not a guessed prototype. Source-built caller regressions cover alias/non-alias storage, strides, union conflicts and callback effects in both dialects.
 
 Incoming stack arguments use callee-entry-SP coordinates. Exact, unchanged ABI scalar slots become provenance-backed source inputs, not freshly allocated private frame bytes. The symbol-bearing and stripped Mach-O ten-input fixture is evaluated in both dialects against 25 independent uint64 cases, including `1..10 → 385`, high-bit values and modulo-overflow boundaries. The source view decides per slot (`incoming_formal`, ABI premise `incoming_arguments_private`): the stack plan's _incoming floor_ is the lowest entry-SP offset that any escaping or indexing address that can designate incoming bytes (a known base ≥ 0, a mixed-sign phi or reload, an unknown base, or a floor ≥ 0) can take; a word-sized ABI parameter slot that is only loaded, exact, nonvolatile, not overlapped by another access and wholly below that floor is the formal, even after open calls, unknown stores or a frame address that escaped elsewhere, as long as no unbounded escape or unknown effect exists. Callers, callees, globals and loaded or returned pointers are assumed never to designate this activation's incoming area; only addresses derived from it can. The checked view keeps the whole-function gates (no escape, no store through an unknown address, clear per-load alias facts). `test/reconstruction/incoming-stack.test.ts` executes, for AAPCS64 (9 parameters) and SysV (7), a slot read after an open call and a store through argument 1 (formal, oracle-equal for 0, 2^64−1 and 2^63, events `store, call` only) and the same slot whose address is passed to the call (memory read through `entry_sp`, observing the call oracle's write). SQLite `createFunctionApi` now prints `arg8, arg9, opaque_1* arg10` and no `entry_sp`.
