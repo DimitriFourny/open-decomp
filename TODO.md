@@ -305,7 +305,7 @@ Files that several items touch:
 
 ### V2: Closed-world caller consensus makes a function `void`
 
-- [ ] **Problem.** 19 void-source functions print a value or `unknown_result`. The body alone cannot tell `f(); }` from `return f();`. Mechanisms:
+- [x] **Problem.** 19 void-source functions print a value or `unknown_result`. The body alone cannot tell `f(); }` from `return f();`. Mechanisms: _(done: `callerResultConsensus` + `caller_consensus` record/premise; OD lane `od-rm4-v2` prints the 13 acceptance functions and `sqlite3WhereExplainBloomFilter` as `void` with `return;`/`f(...);`, no other text changes, checked view identical on 7 compared functions; the 4 optional ones abstain (windows end at unknown effects / indirect exits); ~+345k work (the image sweep) where the scan runs: `isDate` and `sqlite3Fts3Incrmerge` +~354k, not paid back)_
   - a tail call into an in-image callee whose interface never carries `returns_void`: `codeOffset`, `sqlite3DropTrigger`, `pcache1RemoveFromHash`, `sqlite3RowidConstraint`, `analyzeDatabase`, …;
   - a final call establishing the result: `verifyDbFile` (`sqlite3_log`), `fts5StructureWrite` (`sqlite3_free`, which OD prints as `void` on its own), `sqlite3AddDefaultValue`, …;
   - a kept stored value: `fts3EvalAllocateReaders`.
