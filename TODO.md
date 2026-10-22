@@ -371,7 +371,8 @@ A prototype of S1–S3 (unsound, measurement only) gave these results:
 
 ### S8 (optional): Callers see a callee's variadic interface
 
-- [ ] Publish the S6/S7 footprint as a `NativeInterface` field: `variadic: {named_integer, named_vector, named_stack_bytes}` (`src/service/analysis/source-facts.ts:541-616`, native summaries). Bump `stack-calls` and `NATIVE_SUMMARY_FORMAT`.
+- [x] **Done (S8):** `nativeVariadicFootprint` (prepared unit, shared S6/S7 classification) publishes `NativeInterface.variadic`; source-view callers bind the named prefix and the anonymous arguments they provably set up (`variadic_call_arguments`, `variadic_call_convention`): all nine `matrix_variadic_call` texts print `matrix_variadic(2, …a, …b)` (ELF `-O2` regains `double arg1, arg2`, PE `-O0` loses the `rdx` formal); SQLite `sqlite3ParseUri` prints its `sqlite3_mprintf` actuals; executed SysV/Win64/Darwin caller fixtures in `native-interface.test.ts`; checked views unchanged.
+  Publish the S6/S7 footprint as a `NativeInterface` field: `variadic: {named_integer, named_vector, named_stack_bytes}` (`src/service/analysis/source-facts.ts:541-616`, native summaries). Bump `stack-calls` and `NATIVE_SUMMARY_FORMAT`.
   - Effect: call sites print the variadic arguments (`matrix_variadic(2, a, b)`), and `matrix_variadic_call` `-O2` keeps its double parameters `a`, `b`, which R3 does not restore.
   - Depends on: S6, S7, R3.
 
