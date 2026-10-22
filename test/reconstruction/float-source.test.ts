@@ -91,7 +91,14 @@ int main(void) {
       );
       assert.ok('data' in result && result.data.delivery === 'inline');
       const emission: WireEmission = result.data.emission;
-      assert.match(emission.text, /nearest-even/);
+      // The source view prints no FP-environment note; the premise is a recorded requirement.
+      assert.doesNotMatch(emission.text, /nearest-even/);
+      assert.ok(emission.requirements?.some((item) => item.kind === 'fp_environment'));
+      assert.ok(
+        emission.requirements?.some((item) =>
+          item.sites.some((site) => site.state_epoch === 'fp_default_environment'),
+        ),
+      );
       const formals = emittedFormals(emission).filter((formal) => formal.name !== 'entry_sp');
       assert.equal(formals.length, 2, emission.text);
       for (const [index, [a, b]] of cases.entries()) {
