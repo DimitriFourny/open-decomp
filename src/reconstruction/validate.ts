@@ -7,7 +7,7 @@ import type {
   StructuredFunction,
 } from '../presentation/index.js';
 import type { Reconstruction } from './model.js';
-import { stackEntry, variadicArea } from './source-model.js';
+import { registerOutputs, stackEntry, variadicArea } from './source-model.js';
 import { validateEmittedUses } from './validate-uses.js';
 import {
   crossSilently,
@@ -163,7 +163,8 @@ export function validateReconstruction(program: Reconstruction, context: Operati
             definitions.add(result.id);
         }
         if ('register_outputs' in node)
-          for (const binding of node.register_outputs) definitions.add(binding.value.id);
+          for (const binding of registerOutputs(program.source, node))
+            definitions.add(binding.value.id);
       }
       for (const definition of program.source?.definitions?.get(node.id) ?? [])
         definitions.add(definition.result.id);

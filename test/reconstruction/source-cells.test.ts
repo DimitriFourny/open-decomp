@@ -1,11 +1,37 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createOperationContext } from '../../src/core/index.js';
-import { effectType, integer, type Expression, type Value } from '../../src/ir/index.js';
+import {
+  effectType,
+  integer,
+  type Expression,
+  type RegisterBinding,
+  type Value,
+} from '../../src/ir/index.js';
 import type { BlockRegion, ParallelTransfer } from '../../src/presentation/index.js';
 import { LocalValidationSession } from '../../src/reconstruction/local-validation.js';
 import { recombineSourceCells } from '../../src/reconstruction/source-cells.js';
 import { provenance, register } from '../ir/support.js';
+
+/** The source planner's cell interface over one test's definition map; whole
+ * instruction outputs are collected in `outputs`. */
+function cellPlan(
+  definitions: Map<string, Expression>,
+  outputs = new Map<string, readonly RegisterBinding[]>(),
+): Parameters<typeof recombineSourceCells>[5] {
+  return {
+    make: (key, type, _block, expression) => {
+      if (expression) definitions.set(key, expression);
+      return { id: key, type };
+    },
+    alias: (target, expression) => {
+      definitions.set(target.id, expression);
+    },
+    outputs: (node, bindings) => {
+      outputs.set(node.id, bindings);
+    },
+  };
+}
 
 const recombined = [
   'whole',
@@ -142,16 +168,9 @@ for (const scenario of [
         { transfer: second, block },
       ],
       definitions,
+      new Map(),
       incoming,
-      {
-        make: (key, type, _block, expression) => {
-          if (expression) definitions.set(key, expression);
-          return { id: key, type };
-        },
-        alias: (target, expression) => {
-          definitions.set(target.id, expression);
-        },
-      },
+      cellPlan(definitions),
       validation,
       context,
     );
@@ -260,16 +279,9 @@ for (const scenario of ['same-reason', 'different-reason', 'undefined-state', 'm
         { transfer: second, block },
       ],
       definitions,
+      new Map(),
       incoming,
-      {
-        make: (key, type, _block, expression) => {
-          if (expression) definitions.set(key, expression);
-          return { id: key, type };
-        },
-        alias: (target, expression) => {
-          definitions.set(target.id, expression);
-        },
-      },
+      cellPlan(definitions),
       validation,
       context,
     );
@@ -360,16 +372,9 @@ for (const scenario of [
         { transfer: second, block },
       ],
       definitions,
+      new Map(),
       incoming,
-      {
-        make: (key, type, _block, expression) => {
-          if (expression) definitions.set(key, expression);
-          return { id: key, type };
-        },
-        alias: (target, expression) => {
-          definitions.set(target.id, expression);
-        },
-      },
+      cellPlan(definitions),
       validation,
       context,
     );

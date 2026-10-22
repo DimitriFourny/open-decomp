@@ -30,6 +30,7 @@ import { planSourceStack } from './source-stack.js';
 import { planVariadicStackArguments } from './source-variadic.js';
 import { projectSourceConstants } from './source-data.js';
 import { recombineSourceCells } from './source-cells.js';
+import { registerOutputs } from './source-model.js';
 import {
   normalizeSourceExpressions,
   sourceExpressionDemand,
@@ -248,6 +249,7 @@ function reconstructView(
           blocks,
           allTransfers,
           expressions,
+          owner,
           parameterSources,
           sourcePlan,
           localValidation,
@@ -345,6 +347,8 @@ function reconstructView(
           case 'unknown_effect':
             for (const binding of node.register_inputs) roots.push(binding.value);
             for (const binding of node.register_outputs) roots.push(binding.value);
+            for (const binding of registerOutputs(sourcePlan.presentation, node))
+              roots.push(binding.value);
             break;
           case 'memory_fence':
             break;
@@ -632,6 +636,8 @@ function reconstructView(
       for (const node of block.statements) {
         context.checkpoint(1);
         if (node.kind !== 'call') continue;
+        for (const binding of registerOutputs(sourcePlan.presentation, node))
+          clobbers.set(binding.value.id, node.id);
         for (const binding of node.register_outputs) clobbers.set(binding.value.id, node.id);
         for (const value of calls.get(node.id)?.results ?? []) {
           resultCells.add(value.id);
