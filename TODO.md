@@ -771,7 +771,7 @@ Files that several items touch:
 
 ### E4: Choose signed or narrow local types by conversion cost
 
-- [ ] **Problem.** Locals are declared `uint32_t` 736 times and `int32_t` 8 times. The texts hold 397 signed tests such as `(int32_t)x >= 1`, 236 chains such as `(uint64_t)(int32_t)x`, and 80 `(uint32_t)valueN ==` on 64-bit locals that are only read low. Judges read `count` as unsigned or cite "machine-level sign-extension arithmetic".
+- [x] **Problem.** Locals are declared `uint32_t` 736 times and `int32_t` 8 times. The texts hold 397 signed tests such as `(int32_t)x >= 1`, 236 chains such as `(uint64_t)(int32_t)x`, and 80 `(uint32_t)valueN ==` on 64-bit locals that are only read low. Judges read `count` as unsigned or cite "machine-level sign-extension arithmetic".
   - **Root cause:** signed and narrow spellings exist only for formals (`signedConsumer`, `formal_low_slice`, `source-signature.ts:715-725, 829-888`). A local declared signed converts back at each use (`renderer.ts:1841-1842`).
   - **Change:**
     - A planner next to `planLocalTypes` (`src/emitters/source-local-types.ts`) for integer partitions of 8, 16 and 32 bits, plus 64 → low slice.
@@ -792,6 +792,7 @@ Files that several items touch:
     - `btreeOverwriteContent` has no `(int32_t)value0 <= arg3`.
     - No text where conversions increase. Checked view unchanged.
   - **Expected effect:** −0.75k to −1.2k tokens in about 55 functions [estimate].
+  - **Done (E4):** `planIntegerSpellings` + `local_integer_spelling`, C only; OD lane vs `od-main-ad6a967`: 43 texts change, −313 printed casts, none increases; `sqlite3DropTrigger` prints `int32_t count; … if (count >= 1)`; `btreeOverwriteContent` keeps `(int32_t)value0 <= arg3` (signed `value0` would print 2 conversions, `value0 - (uint32_t)arg3` and `(uint64_t)(uint32_t)value0`, against 1) and narrows its three call results; checked view and Python-like unchanged.
 
 ### E5: Fold the bitfield-move aliases (SXTB/SXTH/SXTW, SBFIZ/UBFIZ, SBFX)
 
