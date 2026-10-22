@@ -9226,11 +9226,19 @@ export class Renderer {
       );
       this.mapped(this.dataOrigin(node), start, [node]);
     }
+    // An unobserved FP-environment value is not declared, unless it represents
+    // a coalesced class that also holds an observed member.
+    const observedClasses = new Set<string>();
+    if (this.fpPresentation.unobserved.size)
+      for (const [id, representative] of this.variables) {
+        this.context.checkpoint(1);
+        if (!this.fpPresentation.unobserved.has(id)) observedClasses.add(representative.id);
+      }
     for (const value of this.program.values.values()) {
       this.context.checkpoint(1);
       if (
         !this.program.live.has(value.id) ||
-        this.fpPresentation.unobserved.has(value.id) ||
+        (this.fpPresentation.unobserved.has(value.id) && !observedClasses.has(value.id)) ||
         this.inline.has(value.id) ||
         this.inlinedCalls.has(value.id) ||
         formals.has(value.id) ||
