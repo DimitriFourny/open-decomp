@@ -87,7 +87,10 @@ test(
           /\b\w+_(?:arg\d+|ret|local_[0-9a-f]+|alloc_0x[0-9a-f]+|obj\d+)\b/,
           `${name} ${emitter}`,
         );
-    assert.match((await decompile('context_drive', 'python-like')).text, new RegExp(`\\b${set.name}\\b`));
+    assert.match(
+      (await decompile('context_drive', 'python-like')).text,
+      new RegExp(`\\b${set.name}\\b`),
+    );
     assert.deepEqual(get.members, ['field_0x8', 'field_0x10']);
     assert.match(set.declaration, /pad_0x0\[|field_0x0;/);
     assert.match(get.declaration, /pad_0x0\[8\]/);

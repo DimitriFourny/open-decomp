@@ -211,8 +211,18 @@ test('image-wide declarations name types by label and keep the anchor as a comme
         { anchor: argument('second'), own: false },
       ],
     ),
-    object('first|a0', 'first', [word(0n, 64), word(16n)], [{ anchor: argument('first'), own: true }]),
-    object('second|a0', 'second', [word(4n), word(24n)], [{ anchor: argument('second'), own: true }]),
+    object(
+      'first|a0',
+      'first',
+      [word(0n, 64), word(16n)],
+      [{ anchor: argument('first'), own: true }],
+    ),
+    object(
+      'second|a0',
+      'second',
+      [word(4n), word(24n)],
+      [{ anchor: argument('second'), own: true }],
+    ),
   ]);
   const wide = classOf(solution, 'first|a0'),
     high = classOf(solution, 'second|a0');
