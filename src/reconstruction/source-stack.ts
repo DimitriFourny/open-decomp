@@ -2437,6 +2437,9 @@ export function planSourceStack(
     };
     return node.kind === 'load' ? moved(node.result.id) : source(node.value.id);
   };
+  // A3: the save-area records are admitted once per plan; every later frame()
+  // call reuses the admission (its subjects are the same save stores).
+  let saveAreaAdmitted = false;
   const frame = (
     retained: ReadonlySet<string>,
     live: ReadonlySet<string>,
@@ -2549,20 +2552,23 @@ export function planSourceStack(
         ))
     )
       return fallback();
-    const saveSubjects = [input.function.id, ...[...saveStores].slice(0, 63)];
-    if (
-      top < 0n &&
-      !validation.presentation(
-        'frame_object_save_area',
-        input.function.id,
-        'the frame object ends at the lowest frame save slot when every byte from it to the entry SP is a hidden save byte: no retained access, live address, indexed base or escape lies there and no escaped object reaches a save slot; every load and store keeps its address, width, order and aliasing, nothing is forwarded',
-        saveSubjects,
-      )
-    ) {
-      top = 0n;
-      layout = lay(top);
+    if (top < 0n && !saveAreaAdmitted) {
+      const saveSubjects = [input.function.id, ...[...saveStores].slice(0, 63)];
+      if (
+        validation.presentation(
+          'frame_object_save_area',
+          input.function.id,
+          'the frame object ends at the lowest frame save slot when every byte from it to the entry SP is a hidden save byte: no retained access, live address, indexed base or escape lies there and no escaped object reaches a save slot; every load and store keeps its address, width, order and aliasing, nothing is forwarded',
+          saveSubjects,
+        )
+      ) {
+        validation.requireAbi('frame_save', saveSubjects, FRAME_SAVE_PREMISE);
+        saveAreaAdmitted = true;
+      } else {
+        top = 0n;
+        layout = lay(top);
+      }
     }
-    if (top < 0n) validation.requireAbi('frame_save', saveSubjects, FRAME_SAVE_PREMISE);
     if (!entryLive && !reachAll && !saveArea && escapeFloors.size)
       layout = escapedSlots(layout, below, indexed, top);
     if (sharedEntry) {
@@ -2642,6 +2648,7 @@ export function planSourceStack(
       )
         candidates.push({ ...reach, member, ok: true });
     }
+    if (!candidates.length) return layout;
     const holding = (offset: bigint) => {
       for (let low = 0, high = candidates.length - 1; low <= high;) {
         const middle = (low + high) >> 1,
