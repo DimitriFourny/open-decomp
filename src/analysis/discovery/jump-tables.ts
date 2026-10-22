@@ -183,14 +183,42 @@ export interface JumpTableProofInput {
   readonly is_entry: (address: bigint) => boolean;
   readonly executable: (address: bigint) => boolean;
   readonly max_entries: number;
+  /** `jumpTableChain` of this same input when the caller already walked it. */
+  readonly chain?: readonly DecodedInstruction[];
 }
 export type JumpTableProof = Omit<ResolvedJumpTable, 'evidence_ids'>;
 
+/** The longest single-entry straight-line chain of decoded instructions ending at the branch:
+ * every member after the first has exactly one decoded predecessor, the previous member, and is
+ * no root. A proof is a function of this chain alone, so callers re-prove exactly when it
+ * changes (a member gains a predecessor or becomes a root, or the first member gains its first
+ * predecessor). */
+export function jumpTableChain(
+  input: Pick<JumpTableProofInput, 'branch' | 'incoming' | 'is_entry'>,
+  context: OperationContext,
+): DecodedInstruction[] {
+  const chain: DecodedInstruction[] = [input.branch];
+  for (let current = input.branch; chain.length < MAX_CHAIN;) {
+    context.checkpoint(1);
+    if (input.is_entry(current.address.value)) break;
+    const predecessors = input.incoming.get(current.address.value) ?? [];
+    if (predecessors.length !== 1) break;
+    const previous = predecessors[0]!;
+    if (
+      chain.includes(previous) ||
+      previous.validity !== 'valid' ||
+      (previous.flow.kind !== 'fallthrough' && previous.flow.kind !== 'branch')
+    )
+      break;
+    chain.unshift(previous);
+    current = previous;
+  }
+  return chain;
+}
+
 /** Prove the complete target set of one indirect branch, or return undefined.
  *
- * Evaluates the longest straight-line chain of decoded instructions ending at the
- * branch in which every instruction after the first has exactly one decoded
- * predecessor, the previous chain member. Values start opaque at the chain
+ * Evaluates the `jumpTableChain` ending at the branch. Values start opaque at the chain
  * start. Only exact integer moves, add/sub/shift/extension, PC-relative
  * constants, compare flags and nonvolatile stack/register slot forwarding are
  * modeled; any other instruction forgets every register, flag and slot it may
@@ -207,22 +235,7 @@ export function proveJumpTable(
   context: OperationContext,
 ): JumpTableProof | undefined {
   const { image, branch } = input;
-  const chain: DecodedInstruction[] = [branch];
-  for (let current = branch; chain.length < MAX_CHAIN;) {
-    context.checkpoint(1);
-    if (input.is_entry(current.address.value)) break;
-    const predecessors = input.incoming.get(current.address.value) ?? [];
-    if (predecessors.length !== 1) break;
-    const previous = predecessors[0]!;
-    if (
-      chain.includes(previous) ||
-      previous.validity !== 'valid' ||
-      (previous.flow.kind !== 'fallthrough' && previous.flow.kind !== 'branch')
-    )
-      break;
-    chain.unshift(previous);
-    current = previous;
-  }
+  const chain = input.chain ?? jumpTableChain(input, context);
   if (chain.length < 3) return undefined;
   const values = new Values();
   const registers = new Map<string, Node>();

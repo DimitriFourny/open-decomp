@@ -91,7 +91,7 @@ The renderer prints `physical_return` at `src/emitters/renderer.ts:8130-8199` wh
 
 ### R2: Forwarded result demand from a self-recursive call is not demand
 
-- [ ] **Problem.** `btreeOverwriteContent` (`static int`) prints 6 × `physical_return(explicit_values((uint32_t)comparison), physical_inputs("arm64:x0:32:32", value2))`. `fts3EvalAllocateReaders` and `fts3EvalNextRow` (both `static void`) print the same overlay. All three are self-recursive.
+- [x] **Problem.** `btreeOverwriteContent` (`static int`) prints 6 × `physical_return(explicit_values((uint32_t)comparison), physical_inputs("arm64:x0:32:32", value2))`. `fts3EvalAllocateReaders` and `fts3EvalNextRow` (both `static void`) print the same overlay. All three are self-recursive.
   - **Root cause:** `src/analysis/calls/result-demands.ts:94-105` pushes every changed exit cell of the primary result root as a full-width demand on the call that defines it. A callee's high half that only flows to this function's own exit therefore demands `x0[0:64]`. `source-facts.ts:2021-2036` folds dependencies of the function's own unit into `function_return_demands`, so the self-call demands the function's own result. That blocks `exit_scratch` (`reconstruction/index.ts:556-559, 686-689`) and `incidental_result` (`source-results.ts:695-698, 781-791`).
   - **Change:**
     - Tag demand roots from the return-exit snapshot as _forwarded_. Every other root is _semantic_: loads, stores, call arguments, branches, switch, indirect targets, explicit return values. A value reached from both is semantic.
@@ -109,10 +109,12 @@ The renderer prints `physical_return` at `src/emitters/renderer.ts:8130-8199` wh
     - `fts3EvalAllocateReaders` has no `physical_return`. Its leftover `uint32_t` result is a known residual: a stored constant 7 left in `w0` looks deliberate.
     - Expected side changes, both toward the source: `fts3EvalTestExpr` → `uint32_t`, `fts5ParseSetColset` → `void`. Nothing else changes.
   - **Not in this item:** using forwarded demand for non-self callers only when the caller's own exit is semantically demanded. It changes many callee summaries; measure it as a separate item if wanted.
+  - Evidence (2026-10-22): `CallResultDemands` tags return-exit-snapshot roots forwarded (semantic closure first); `NativeDependency.return_demand_semantic`; the selected function's own unit contributes only semantic demand to `function_return_demands`; `NATIVE_SUMMARY_FORMAT` 2. OD lane `od-rm3-r2` vs main texts: exactly the five listed texts differ (`physical_return` 6→0, 1→0, 6→0). A self-call whose result is returned whole (no 32-bit use joined with an `int` result) still takes the call site's full-width observed result; see `test/reconstruction/recursive-result-source.c` for the shapes that are covered.
 
 ### R3: A context-specialized callee summary keeps the callee's result root
 
-- [ ] **Problem.** `matrix_variadic_call` `-O2` (ELF `0x401d60`, PE `0x140001260`, stripped ELF `sub@0x401d50` and PE `sub@0x140001250`) is two tail calls to the variadic `matrix_variadic` (returns `double`). OD prints a `void` function whose two exits return different registers through `physical_return`, under the header `/* ABI scratch at return, not results: … */`.
+- [x] **Problem.** `matrix_variadic_call` `-O2` (ELF `0x401d60`, PE `0x140001260`, stripped ELF `sub@0x401d50` and PE `sub@0x140001250`) is two tail calls to the variadic `matrix_variadic` (returns `double`). OD prints a `void` function whose two exits return different registers through `physical_return`, under the header `/* ABI scratch at return, not results: … */`.
+  - Evidence (2026-10-22): `generic_result` on the context unit = `nativeReturnInterface(baseline, …, untypedFloatWrites)` (no seeding; a literal-zero FP exit counts as a write of the root another exit types), applied by `inheritGenericResult` (`native-transfer.ts`) in `observeNativeUnit` for the summary and `source_interface`; context units are not persisted, so `NATIVE_SUMMARY_FORMAT` stays; `stack-calls/11`. OD lane full tier: exactly the four texts changed (`double …`, `return matrix_variadic(0);` / `return matrix_variadic(2…);`, no "ABI scratch", 0 `physical_return`); `fts3UpdateMethod`, `analyzeDatabase` byte-identical; coverage unchanged. Tests: assembled SysV callee (`native-interface.test.ts`), caller executed as `double` with a stub callee in both dialects (`native-context.test.ts`).
   - **Root cause:**
     - `native-context-prepare.ts:28-67` specializes the callee to the call's constants. For `matrix_variadic(0)` only the `xorpd %xmm0,%xmm0; ret` exit survives.
     - A literal zero has no IEEE type, so `native-transfer.ts:428-453` skips xmm0 (`if (floating && !type) continue;`) and claims `rax[0:64]`, which the `va_list` setup writes.
@@ -377,7 +379,8 @@ A whole-image instrumented run on sqlite3-arm64 found 21 tables proved and 291 d
 
 ### J1: Re-prove jump tables on settled chains
 
-- [ ] **Problem.** `selectInnerLoop` (`0x1000bc1e4`) prints `if (value7 <= 12) return indirect_exit(0x1000bc594 + ((uint64_t)data_100132d3e[value7] << 2), …)`. Its graph holds 253 of the function's 639 instructions, so the case bodies are lost. Ghidra prints the `switch`.
+- [x] **Problem.** `selectInnerLoop` (`0x1000bc1e4`) prints `if (value7 <= 12) return indirect_exit(0x1000bc594 + ((uint64_t)data_100132d3e[value7] << 2), …)`. Its graph holds 253 of the function's 639 instructions, so the case bodies are lost. Ghidra prints the `switch`.
+  - **Done (J1):** `selectInnerLoop` proves the table at branch `0x1000bc590` (13 targets, guard exact), holds 639 instructions and prints `void selectInnerLoop(…)` with a `switch (value7)` (case 1 shares the out-of-range exit) and no `indirect_exit`; SQLite image-wide proved tables 21 → 22 (none lost); the full-tier OD lane changes only that text.
   - **Root cause:**
     - `proveJumpTable` (`src/analysis/discovery/jump-tables.ts:205-702`) runs once, when the branch is first decoded, on the predecessor map decoded so far (`discovery/index.ts:542-566`).
     - Per-graph validation (`:788-883`) only re-checks the recorded chain. When a chain member later gains predecessors, the table is rejected for good (`:877-880`).

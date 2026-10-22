@@ -571,7 +571,12 @@ result, projected result or tail interface), computed nonprimary slices may
 instead accompany a void-like `return;`. This is an explicit ABI assumption,
 not a recovered authored void prototype. Positive
 consumption evidence from already prepared native units keeps slices inline;
-callers are not exhaustively scanned. The inference explicitly records
+callers are not exhaustively scanned. A self-recursive call is one of those
+callers: its result demand counts only where it is _semantic_ (reached from a
+load, store, call argument, branch, switch, indirect target or explicit return
+value). Bits it only forwards to the function's own return-exit snapshot are
+circular and gather no evidence; demand from other prepared callers still
+counts in full, forwarded bits included. The inference explicitly records
 “no result-use evidence gathered; callers not scanned” and requires
 `abi_conformance`; it is an assumption, not proof of non-consumption. The existing
 `unavailable_semantics` diagnostic remains. These slices cease to be source
@@ -1375,6 +1380,19 @@ exit metadata (moved out of line only under `exit_scratch`) and in the checked
 view. Native written-result storage that the rule rejects stops counting as
 result evidence for exit overlays. Vector-typed FP carriers, supplied signatures
 and checked views keep the existing projection.
+
+A context-specialized callee summary (constant/alias call-site assumptions)
+keeps the callee's result root. The context unit carries the baseline body's
+result, proven on every baseline exit, where an FP/vector exit whose write is
+proven but has no IEEE type of its own (a literal zero) counts as a write of the
+root another exit types. When the context's own result and that generic result
+are both non-empty and name different roots, the context summary and its
+`source_interface` take the generic roots; widths and types on a root both prove
+stay the context's, and an empty context result stays empty. Values at the call
+stay context-precise; only the storage classification is inherited, because the
+context's exits are a subset of the baseline exits. Thus both tail calls of the
+SysV/Win64 `-O2` `matrix_variadic_call` (`matrix_variadic(0)` returns through
+`xorpd %xmm0,%xmm0` alone) return the callee's `double`.
 
 Bounded native parameter summaries refine the caller's existing memory shapes without rerunning its ABI/stack analysis. Compatible partial fields accumulate; overlapping alternatives, unknown size/alignment, dynamic indices, aliases and escapes remain explicit. Exact full-width copies and split entry cells retain one original pointer identity, while distinct incoming pointer bases remain distinct phi views. Callback fields retain the actual target and prepared whole argument carriers, not a guessed prototype. Source-built caller regressions cover alias/non-alias storage, strides, union conflicts and callback effects in both dialects.
 

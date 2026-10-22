@@ -18,6 +18,15 @@ export interface CallPreparationIndex {
   appendSources(id: string, target: Value[]): boolean;
 }
 
+/** Per-call result demand. `all` includes values whose only consumer is this
+ * function's own return-exit snapshot (forwarded); `semantic` keeps only demand
+ * reached from loads, stores, call arguments, control transfers, explicit
+ * return values and supplied roots. A value reached from both is semantic. */
+export interface CallResultDemands {
+  readonly all: ReadonlyMap<string, readonly RegisterDescriptor[]>;
+  readonly semantic: ReadonlyMap<string, readonly RegisterDescriptor[]>;
+}
+
 /** Structural facts for one unchanged SSA stage. Demand results are never cached. */
 export interface CallResultDemandIndex {
   preparation(ir: SSAForm, abi: AbiProfile, context: OperationContext): CallPreparationIndex;
@@ -26,7 +35,7 @@ export interface CallResultDemandIndex {
     abi: AbiProfile,
     context: OperationContext,
     additionalRoots?: readonly Value[],
-  ): ReadonlyMap<string, readonly RegisterDescriptor[]>;
+  ): CallResultDemands;
 }
 
 export function observeCallResultDemands(
@@ -35,7 +44,7 @@ export function observeCallResultDemands(
   context: OperationContext,
   additionalRoots: readonly Value[] = [],
   index?: CallResultDemandIndex,
-): ReadonlyMap<string, readonly RegisterDescriptor[]> {
+): CallResultDemands {
   return (index ?? createCallResultDemandIndex(ir, abi, context)).query(
     ir,
     abi,
@@ -69,7 +78,8 @@ export function createCallResultDemandIndex(
   const entry = new Map(
     (states.get(ir.entry)?.entry ?? []).map((binding) => [binding.register.id, binding.value.id]),
   );
-  const roots: Value[] = [];
+  const roots: Value[] = [],
+    forwarded: Value[] = [];
   for (const block of ir.blocks) {
     for (const node of block.instructions) {
       context.checkpoint(1);
@@ -100,7 +110,7 @@ export function createCallResultDemandIndex(
             binding.register.root === primary.register.root &&
             entry.get(binding.register.id) !== binding.value.id
           )
-            roots.push(binding.value);
+            forwarded.push(binding.value);
         }
     }
     for (const edge of successors(control)) {
@@ -155,76 +165,110 @@ export function createCallResultDemandIndex(
       profile: AbiProfile,
       queryContext: OperationContext,
       additionalRoots: readonly Value[] = [],
-    ): ReadonlyMap<string, readonly RegisterDescriptor[]> {
+    ): CallResultDemands {
       queryContext.checkpoint(0);
       if (input !== ir || profile !== abi)
         throw new TypeError('Call result demand index belongs to a different SSA or ABI stage');
-      const demanded = new Map<string, Map<string, RegisterDescriptor>>();
-      const pending = additionalRoots.map((value) => ({
-        value,
-        offset: 0,
-        width: bitWidth(value.type),
-      }));
-      for (const value of roots) pending.push({ value, offset: 0, width: bitWidth(value.type) });
+      const all = new Map<string, Map<string, RegisterDescriptor>>(),
+        semantic = new Map<string, Map<string, RegisterDescriptor>>();
+      const pending: { value: Value; offset: number; width: number; semantic: boolean }[] = [];
       const seen = new Set<string>();
-      for (let index = 0; index < pending.length; index++) {
-        queryContext.checkpoint(1);
-        const { value, offset, width } = pending[index]!,
-          key = `${value.id}:${offset}:${width}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        const output = outputs.get(value.id);
-        if (output) {
-          const registers = demanded.get(output.call) ?? new Map<string, RegisterDescriptor>();
-          const register = output.binding.register,
-            high = register.offset_bits + offset + width;
-          const previous = registers.get(register.root);
-          registers.set(register.root, {
-            ...register,
-            offset_bits: 0,
-            width_bits: Math.max(previous?.width_bits ?? 0, high),
-          });
-          demanded.set(output.call, registers);
-        }
-        const expression = expressions.get(value.id);
-        if (expression?.kind === 'extract')
-          pending.push({ value: expression.value, offset: expression.offset + offset, width });
-        else if (
-          expression?.kind === 'cast' &&
-          (expression.op === 'truncate' ||
-            expression.op === 'zero_extend' ||
-            expression.op === 'sign_extend' ||
-            expression.op === 'bitcast')
-        ) {
-          const available = bitWidth(expression.value.type);
-          if (offset < available)
+      let index = 0;
+      // Forwarded roots enter only after the semantic closure is complete, so a
+      // slice reached from both is visited (and recorded) as semantic.
+      for (const [phase, semanticPhase] of [
+        [additionalRoots, true],
+        [roots, true],
+        [forwarded, false],
+      ] as const) {
+        for (const value of phase)
+          pending.push({ value, offset: 0, width: bitWidth(value.type), semantic: semanticPhase });
+        for (; index < pending.length; index++) {
+          queryContext.checkpoint(1);
+          const item = pending[index]!,
+            { value, offset, width } = item,
+            key = `${value.id}:${offset}:${width}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          const output = outputs.get(value.id);
+          if (output) {
+            const register = output.binding.register,
+              high = register.offset_bits + offset + width;
+            for (const demanded of item.semantic ? [all, semantic] : [all]) {
+              const registers = demanded.get(output.call) ?? new Map<string, RegisterDescriptor>();
+              const previous = registers.get(register.root);
+              registers.set(register.root, {
+                ...register,
+                offset_bits: 0,
+                width_bits: Math.max(previous?.width_bits ?? 0, high),
+              });
+              demanded.set(output.call, registers);
+            }
+          }
+          const expression = expressions.get(value.id);
+          if (expression?.kind === 'extract')
             pending.push({
               value: expression.value,
-              offset,
-              width: Math.min(width, available - offset),
+              offset: expression.offset + offset,
+              width,
+              semantic: item.semantic,
             });
-          if (expression.op === 'sign_extend' && offset + width > available)
-            pending.push({ value: expression.value, offset: available - 1, width: 1 });
-        } else if (expression?.kind === 'concat') {
-          let cursor = 0;
-          for (const part of expression.values) {
-            const end = cursor + bitWidth(part.type),
-              low = Math.max(cursor, offset),
-              high = Math.min(end, offset + width);
-            if (low < high) pending.push({ value: part, offset: low - cursor, width: high - low });
-            cursor = end;
-          }
-        } else if (expression)
-          for (const operand of expressionOperands(expression)) {
+          else if (
+            expression?.kind === 'cast' &&
+            (expression.op === 'truncate' ||
+              expression.op === 'zero_extend' ||
+              expression.op === 'sign_extend' ||
+              expression.op === 'bitcast')
+          ) {
+            const available = bitWidth(expression.value.type);
+            if (offset < available)
+              pending.push({
+                value: expression.value,
+                offset,
+                width: Math.min(width, available - offset),
+                semantic: item.semantic,
+              });
+            if (expression.op === 'sign_extend' && offset + width > available)
+              pending.push({
+                value: expression.value,
+                offset: available - 1,
+                width: 1,
+                semantic: item.semantic,
+              });
+          } else if (expression?.kind === 'concat') {
+            let cursor = 0;
+            for (const part of expression.values) {
+              const end = cursor + bitWidth(part.type),
+                low = Math.max(cursor, offset),
+                high = Math.min(end, offset + width);
+              if (low < high)
+                pending.push({
+                  value: part,
+                  offset: low - cursor,
+                  width: high - low,
+                  semantic: item.semantic,
+                });
+              cursor = end;
+            }
+          } else if (expression)
+            for (const operand of expressionOperands(expression)) {
+              queryContext.checkpoint(1);
+              pending.push({
+                value: operand,
+                offset: 0,
+                width: bitWidth(operand.type),
+                semantic: item.semantic,
+              });
+            }
+          for (const source of incoming.get(value.id) ?? []) {
             queryContext.checkpoint(1);
-            pending.push({ value: operand, offset: 0, width: bitWidth(operand.type) });
+            pending.push({ value: source, offset, width, semantic: item.semantic });
           }
-        for (const source of incoming.get(value.id) ?? []) {
-          queryContext.checkpoint(1);
-          pending.push({ value: source, offset, width });
         }
       }
-      return new Map([...demanded].map(([call, registers]) => [call, [...registers.values()]]));
+      const freeze = (demanded: Map<string, Map<string, RegisterDescriptor>>) =>
+        new Map([...demanded].map(([call, registers]) => [call, [...registers.values()]]));
+      return { all: freeze(all), semantic: freeze(semantic) };
     },
   });
 }

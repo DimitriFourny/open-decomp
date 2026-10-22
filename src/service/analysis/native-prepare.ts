@@ -61,6 +61,12 @@ export interface PreparedNativeUnit extends NativeSummaryUnit {
   readonly observed_calls: readonly InferredCallee[];
   readonly entry_prefix?: NativeInterface;
   readonly context_assumptions?: NativeContext;
+  /** On a context unit: the context-free result of the baseline body, proven on
+   * every baseline exit (`prepareNativeContext`). The context's exits are a
+   * subset, so its storage classification holds for them too
+   * (`inheritGenericResult` in `observeNativeUnit`). Never persisted: context
+   * units are rebuilt from their baseline. */
+  readonly generic_result?: Pick<NativeInterface, 'returns' | 'return_types' | 'written_result'>;
   readonly dependency_readset?: AnalysisReadset;
   readonly demand_index?: CallResultDemandIndex;
   readonly interface_index?: NativeInterfaceIndex;
@@ -83,7 +89,7 @@ export function nativeDependencies(
   const demand =
     ir.form === 'ssa'
       ? observeCallResultDemands(ir, input.components.abi, context, [], demandIndex)
-      : new Map();
+      : undefined;
   const result: NativeDependency[] = [];
   const definitions = new Map(
     ir.blocks.flatMap((block) =>
@@ -138,7 +144,8 @@ export function nativeDependencies(
         result.push({
           call_id: node.id,
           target: targets[0]!,
-          return_demand: demand.get(node.id) ?? [],
+          return_demand: demand?.all.get(node.id) ?? [],
+          return_demand_semantic: demand?.semantic.get(node.id) ?? [],
           evidence_ids: [...new Set([...callerProofs, ...node.provenance.evidence_ids])],
           original_subject_ids: [ir.id, node.id, ...node.provenance.instruction_ids],
           ...(assumptions ? { assumptions } : {}),

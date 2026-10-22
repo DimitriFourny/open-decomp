@@ -35,6 +35,9 @@ export interface NativeDependency {
   readonly call_id: string;
   readonly target: FunctionRecord;
   readonly return_demand?: readonly RegisterDescriptor[];
+  /** The part of `return_demand` not reached only through the caller's own
+   * return-exit snapshot (see `CallResultDemands.semantic`). */
+  readonly return_demand_semantic?: readonly RegisterDescriptor[];
   readonly assumptions?: NativeContext;
   readonly evidence_ids?: readonly string[];
   readonly original_subject_ids?: readonly string[];
