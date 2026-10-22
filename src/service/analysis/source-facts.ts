@@ -47,10 +47,12 @@ import {
 import type { DebugRecovery } from '../../metadata/debug/index.js';
 import type { LibraryContracts } from '../../metadata/library-contracts/index.js';
 import type {
+  CallerResultDemand,
   InferredCallee,
   SourceAddress,
   SourceEvidence,
 } from '../../reconstruction/source-model.js';
+import { callerResultDemands } from './caller-result-use.js';
 import {
   createNativeUnitPersistence,
   preparedSize,
@@ -2048,12 +2050,13 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
     }
   }
   // Positive result-use evidence only. Reuse units already prepared by native
-  // analysis; do not turn a presentation request into an incoming-caller scan.
+  // analysis; the incoming-caller scan below runs only on the planner's demand.
   // A self-call result that reaches only this function's own return exit is
   // circular: under the result-storage premise the self-call is one of the
   // callers, so this function's own unit contributes only semantic demand.
   const functionReturnDemands = new Map<string, RegisterDescriptor>();
-  for (const unit of new Set([...partialUnits.values(), ...requestUnits.values()])) {
+  const preparedUnits = new Set([...partialUnits.values(), ...requestUnits.values()]);
+  for (const unit of preparedUnits) {
     context.checkpoint(1);
     const own = unit.function.id === input.ir.id;
     for (const dependency of unit.dependencies) {
@@ -2070,6 +2073,10 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
         scope.dependencies.replay(unit.dependency_readset);
     }
   }
+  // Incoming caller sites are scanned only when the planner asks for them.
+  let callerDemand: CallerResultDemand | null | undefined;
+  const callerDemands = (scanContext: OperationContext): CallerResultDemand | undefined =>
+    (callerDemand ??= callerResultDemands(input, preparedUnits, scanContext) ?? null) ?? undefined;
   const ruleCalls = variadicRuleCalls(input.ir, input.types.calls, input.library, context);
   const objc = objcSourceFacts({
     ir: input.ir,
@@ -2102,6 +2109,7 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
     ...(objc.facts ? { objc: objc.facts } : {}),
     memory_transfers,
     function_return_demands: [...functionReturnDemands.values()],
+    caller_result_demands: callerDemands,
     ...(function_returns === undefined ? {} : { function_returns }),
     ...(likely_arity === undefined ? {} : { likely_arity }),
     ...(likely_types === undefined ? {} : { likely_types }),

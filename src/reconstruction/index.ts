@@ -596,6 +596,7 @@ function reconstructView(
       : evidence.function_returns;
     const resultEvidence = [
       ...(evidence.function_return_demands ?? []),
+      ...(sourcePlan.presentation.caller_result_demands ?? []),
       ...(observedReturns?.registers ?? []),
     ];
     const declaredContract = input.types?.signatures.some(
