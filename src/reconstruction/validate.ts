@@ -7,7 +7,7 @@ import type {
   StructuredFunction,
 } from '../presentation/index.js';
 import type { Reconstruction } from './model.js';
-import { stackEntry } from './source-model.js';
+import { stackEntry, variadicArea } from './source-model.js';
 import { validateEmittedUses } from './validate-uses.js';
 import {
   crossSilently,
@@ -78,7 +78,7 @@ export function validateReconstruction(program: Reconstruction, context: Operati
     for (const transfer of transfers(program, id)) pending.push(transfer.target);
   }
   // The variadic area (`va`) is defined by the `va_start` prologue.
-  const variadic = program.source?.variadic?.area;
+  const variadic = variadicArea(program.source?.variadic);
   const definitions = new Set([
     ...program.parameters.map((value) => value.id),
     ...(variadic ? [variadic.id] : []),

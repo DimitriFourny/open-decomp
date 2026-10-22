@@ -838,8 +838,12 @@ export function reconstruct(
     }
     const control = block.control,
       operands: Value[] = [];
-    if (control.kind === 'if') operands.push(control.condition);
-    else if (control.kind === 'switch') operands.push(control.value);
+    // Source view (S7): the dropped `al` guard of a SysV va_start prints nothing.
+    if (control.kind === 'if') {
+      const variadic = sourceStack?.variadic;
+      if (variadic?.kind !== 'va_list' || variadic.guard !== control.id)
+        operands.push(control.condition);
+    } else if (control.kind === 'switch') operands.push(control.value);
     else if (control.kind === 'indirect') operands.push(control.target);
     const tail = tails.get(control.id);
     if (tail) operands.push(...tail.boundary.arguments);

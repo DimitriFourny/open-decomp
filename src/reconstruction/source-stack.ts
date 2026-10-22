@@ -34,7 +34,7 @@ import { LocalValidationSession } from './local-validation.js';
 import { type ForwardedByte, validateStackPromotion } from './local-storage-validation.js';
 import { sourceRequirementPredicates } from './source-requirements.js';
 import { classifyIndirectTails } from './source-tails.js';
-import { classifyVariadicArea } from './source-variadic.js';
+import { classifySysvVaStart, classifyVariadicArea } from './source-variadic.js';
 
 type MemoryNode = Extract<Instruction, { kind: 'load' | 'store' }>;
 const FRAME_OBJECT_SCOPE =
@@ -61,7 +61,8 @@ const SCALAR_BYTES = new Set([1n, 2n, 4n, 8n, 16n]);
  * starts at the first incoming byte (`returnAddressBytes`, stack-aligned by the
  * call) and ends at its last member; offsets below that byte are ignored, and a
  * taken address above every member starts a byte array to the next
- * `alignment` boundary. */
+ * `alignment` boundary. `va` (S7, `below` only): the entry-SP offset of the
+ * SysV `va_list`, one 24-byte member that holds every access inside it. */
 export function frameLayout(
   accesses: readonly {
     readonly offset: bigint;
@@ -76,6 +77,7 @@ export function frameLayout(
   alignment: number,
   returnAddressBytes: bigint,
   direction: 'below' | 'above' = 'below',
+  va?: bigint,
 ): { minimum_offset: bigint; size: bigint; members: FrameMember[] } {
   const unit = BigInt(alignment);
   const order = (left: bigint, right: bigint): number => (left < right ? -1 : left > right ? 1 : 0);
@@ -199,7 +201,10 @@ export function frameLayout(
     return members;
   };
   const clusters: Cluster[] = [];
-  const sorted = [...accesses].sort(
+  // The `va_list` bytes (S7) are an access of their own (no id); the member
+  // merge below makes them one member.
+  const reserved = va === undefined ? [] : [{ offset: va, end: va + 24n, id: '' }];
+  const sorted = [...accesses, ...reserved].sort(
     (left, right) => order(left.offset, right.offset) || order(left.end, right.end),
   );
   for (let first = 0; first < sorted.length;) {
@@ -219,7 +224,7 @@ export function frameLayout(
           scalar:
             SCALAR_BYTES.has(end - offset) &&
             group.every((access) => access.offset === offset && access.end === end),
-          access_ids: group.map((access) => access.id),
+          access_ids: group.flatMap((access) => (access.id ? [access.id] : [])),
         },
       ]),
     );
@@ -258,7 +263,7 @@ export function frameLayout(
       clusters.splice(index + 1, 1);
     }
   }
-  const members: FrameMember[] = clusters.map((cluster) => ({
+  let members: FrameMember[] = clusters.map((cluster) => ({
     offset: cluster.offset,
     size: cluster.end - cluster.offset,
     scalar: cluster.scalar,
@@ -275,6 +280,27 @@ export function frameLayout(
     members.push({ offset: start, size: end - start, scalar: false, access_ids: [] });
   }
   members.sort((left, right) => order(left.offset, right.offset));
+  if (va !== undefined) {
+    // Every member over the `va_list` bytes is the one `va` member.
+    const inside = members.filter(
+      (member) => member.offset < va + 24n && member.offset + member.size > va,
+    );
+    const start = inside.reduce((low, member) => (member.offset < low ? member.offset : low), va),
+      end = inside.reduce(
+        (high, member) => (member.offset + member.size > high ? member.offset + member.size : high),
+        va + 24n,
+      );
+    members = [
+      ...members.filter((member) => !inside.includes(member)),
+      {
+        offset: start,
+        size: end - start,
+        scalar: false,
+        access_ids: inside.flatMap((member) => member.access_ids),
+        ...(start === va && end === va + 24n ? { va: true as const } : {}),
+      },
+    ].sort((left, right) => order(left.offset, right.offset));
+  }
   if (direction === 'above') {
     // Members are sorted and disjoint: the last one ends the object.
     const last = members.at(-1);
@@ -556,6 +582,8 @@ export function planSourceStack(
     readonly named: (registers: readonly RegisterDescriptor[]) => readonly Value[] | null;
     /** Commits `...`: creates the `va` area value at entry-SP `offset`. */
     readonly area: (offset: bigint, named: readonly Value[] | null) => Value | null;
+    /** Commits `...` after exactly these named formals (SysV `va_list`). */
+    readonly list: (named: readonly Value[]) => boolean;
   },
 ) {
   const addresses = new Map<string, bigint>(),
@@ -2101,7 +2129,7 @@ export function planSourceStack(
           `Presenting ... and va_start assumes the ${input.source!.abi.id} variadic calling convention: callers pass the anonymous arguments in consecutive 8-byte slots starting at entry SP ${area.offset}${area.stores.length ? ' (the anonymous register arguments spilled to their home slots, as va_start does)' : ''}, and the named formals are exactly those printed before .... Every remaining load and store keeps its address, width and order; the checked view keeps the entry-SP form and the home stores.`,
         );
         for (const id of area.stores) hidden.add(id);
-        variadicArea = { area: value, offset: area.offset };
+        variadicArea = { kind: 'area', area: value, offset: area.offset };
       }
     }
   }
@@ -2154,6 +2182,71 @@ export function planSourceStack(
     (node) => tainted.has(node.address.id) && !addresses.has(node.address.id),
   );
   const sharedEntry = escaped || aliased || dynamicStorage;
+  // Source view (S7): the SysV `va_start` footprint (`classifySysvVaStart`).
+  // Its stores are `va_start`'s own effect and are hidden; the `va_list` stays
+  // the frame-object member `va`, the register save area leaves the frame
+  // (va_arg reaches it only through `reg_save_area`), and the `al` guard
+  // around the vector register stores prints nothing. Every frame address
+  // must have known origins (no unknown effect): under the frame-object
+  // premise each designates bytes of the object it derives from, so only
+  // addresses derived from the save area's own (checked) or `reg_save_area`
+  // reach it, even where a stepped pointer has no proven lower bound.
+  let saveArea: { readonly start: bigint; readonly end: bigint } | null = null;
+  if (
+    view === 'source' &&
+    variadic &&
+    !variadicArea &&
+    !frameExposed &&
+    facts?.state === 'complete'
+  ) {
+    const found = classifySysvVaStart(
+      {
+        input,
+        blocks,
+        expressions,
+        incoming,
+        predecessors,
+        calls,
+        returns,
+        accesses,
+        addresses,
+        presented,
+        tainted: (value) => tainted.has(value.id),
+        kept: (id) => !hidden.has(id) && !locals.has(id),
+        bound: incomingFormalLoads,
+        indexed: indexedBases,
+      },
+      context,
+    );
+    const named = found && variadic.named(found.named);
+    if (
+      found &&
+      named &&
+      validation.presentation(
+        'va_start',
+        input.function.id,
+        `callee-side SysV variadic interface: the ${named.length} named register formals, then ...; the ${found.stores.length} stores of the va_start lowering (register save area at entry SP ${found.save}: the anonymous integer argument registers, and under the al != 0 guard the anonymous vector argument registers; va_list at entry SP ${found.va}: gp_offset, fp_offset, overflow_arg_area = entry SP + ${found.overflow}, reg_save_area) are hidden and print as va_start(frame.va, <last named>) at the last of them, on every path before any other access to these areas, call or escape; the guard prints nothing; va is a frame member whose every other access is exactly one of its fields; the save area, its addresses, the saved registers and al have no other use`,
+        [input.function.id, ...found.stores],
+      ) &&
+      (sharedEntry ||
+        validation.presentation('frame_object', input.function.id, FRAME_OBJECT_SCOPE)) &&
+      variadic.list(named)
+    ) {
+      validation.requireAbi(
+        'variadic_convention',
+        [input.function.id, ...found.stores],
+        `Presenting ... and va_start assumes the ${abi.id} variadic calling convention: callers pass the anonymous arguments in the integer and vector argument registers after the named ones and then in consecutive 8-byte stack slots from the first unnamed one, set al to an upper bound of the vector registers used (so the al guard skips only vector registers no anonymous argument occupies), and the named formals are exactly those printed before .... The hidden stores are va_start's own effect; va_arg reads the register save area only through va's reg_save_area. Every remaining load and store keeps its address, width and order; the checked view keeps every store and the guard.`,
+      );
+      for (const id of found.stores) hidden.add(id);
+      variadicArea = {
+        kind: 'va_list',
+        offset: found.va,
+        anchor: found.anchor,
+        guard: found.guard,
+      };
+      saveArea = { start: found.save, end: found.save + 176n };
+    }
+  }
   const entryAddresses = new Set(
     accesses
       .filter(
@@ -2210,11 +2303,8 @@ export function planSourceStack(
   const requiresIncoming = (id: string): boolean =>
     incomingFormal !== null && (presented.get(id) ?? -1n) >= incomingOrigin;
   // A variadic area stands in for the entry SP: entry SP = va - offset.
-  const entryStorage = variadicArea
-    ? variadicArea.area
-    : sharedEntry || entryAddresses.size
-      ? entryStack()
-      : null;
+  const area = variadicArea?.kind === 'area' ? variadicArea : null;
+  const entryStorage = area ? area.area : sharedEntry || entryAddresses.size ? entryStack() : null;
   const requiresEntry = (id: string): boolean =>
     !requiresIncoming(id) &&
     (entryAddresses.has(id) ||
@@ -2228,14 +2318,14 @@ export function planSourceStack(
       )
         alias(
           binding.value,
-          variadicArea?.offset
+          area?.offset
             ? {
                 kind: 'integer',
                 op: 'sub',
                 left: entryStorage,
                 right: make('variadic-entry-offset', entryStorage.type, entry.id, {
                   kind: 'constant',
-                  bits: variadicArea.offset,
+                  bits: area.offset,
                 }),
               }
             : { kind: 'cast', op: 'bitcast', value: entryStorage },
@@ -2351,7 +2441,8 @@ export function planSourceStack(
         if (offset < minimum) minimum = offset;
         if (offset >= maximum) maximum = offset + 1n;
       }
-    if (!remaining.length && !addressLive) return null;
+    // `va_start(frame.va, …)` (S7) needs the frame object even when nothing else does.
+    if (!remaining.length && !addressLive && variadicArea?.kind !== 'va_list') return null;
     const alignment = input.source!.abi.layout.stack_alignment;
     const entryLive = entryStorage !== null && live.has(entryStorage.id);
     const fallback = (): SourceStackStorage =>
@@ -2376,8 +2467,13 @@ export function planSourceStack(
     )
       return fallback();
     const below = entryLive ? remaining.filter((access) => access.end <= 0n) : remaining;
+    // The register save area (S7) is va_start's, reached only through
+    // `reg_save_area`: no frame member.
+    const outside = (offset: bigint): boolean =>
+      !saveArea || offset < saveArea.start || offset >= saveArea.end;
     const taken: bigint[] = [];
-    for (const [id, offset] of presented) if (live.has(id) && offset < 0n) taken.push(offset);
+    for (const [id, offset] of presented)
+      if (live.has(id) && offset < 0n && outside(offset)) taken.push(offset);
     context.checkpoint(below.length + taken.length);
     const layout = frameLayout(
       below.map((access) => ({
@@ -2387,9 +2483,11 @@ export function planSourceStack(
         transport: transport(access.node),
       })),
       taken,
-      indexedBases,
+      saveArea ? new Set([...indexedBases].filter(outside)) : indexedBases,
       alignment,
       input.source!.abi.stack_return_address_bytes,
+      'below',
+      variadicArea?.kind === 'va_list' ? variadicArea.offset : undefined,
     );
     // An object needs a member: no frame byte below the entry SP stays memory
     // and no address of one is live, so the entry-SP form alone remains.
