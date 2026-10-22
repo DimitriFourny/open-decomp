@@ -2553,7 +2553,8 @@ export function planSourceStack(
     )
       return fallback();
     if (top < 0n && !saveAreaAdmitted) {
-      const saveSubjects = [input.function.id, ...[...saveStores].slice(0, 63)];
+      // The save stores already anchor the `frame_save` premise (save elision).
+      const saveSubjects = [...saveStores].slice(0, 64);
       if (
         validation.presentation(
           'frame_object_save_area',
@@ -2678,10 +2679,10 @@ export function planSourceStack(
       if (candidate && offset !== candidate.start) candidate.ok = false;
     }
     const chosen = candidates.filter((candidate) => candidate.ok);
-    const subjects = [
-      input.function.id,
-      ...chosen.flatMap((candidate) => candidate.member.access_ids),
-    ].slice(0, 64);
+    // The members' accesses anchor the premises (the function id would tie the
+    // requirement to every site of the function).
+    const accessIds = chosen.flatMap((candidate) => candidate.member.access_ids),
+      subjects = (accessIds.length ? accessIds : [input.function.id]).slice(0, 64);
     if (
       !chosen.length ||
       !validation.presentation(
