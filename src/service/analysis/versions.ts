@@ -1,4 +1,9 @@
-import { OperationError, type CacheIdentity, type Target } from '../../core/index.js';
+import {
+  OperationError,
+  type AbiProfile,
+  type CacheIdentity,
+  type Target,
+} from '../../core/index.js';
 import { Arm64Decoder } from '../../decoders/arm64/index.js';
 import { X86Decoder } from '../../decoders/x86_64/index.js';
 import { MachOLoader } from '../../loaders/macho/index.js';
@@ -56,10 +61,16 @@ export function pipelineComponents(target: Target): (typeof components)[keyof ty
   return components[key];
 }
 
+/** The target's ABI profile, or undefined when no pipeline is registered for it. */
+export function targetAbi(target: Target): AbiProfile | undefined {
+  const key = targetPipeline(target);
+  return key && components[key].abi;
+}
+
 // Components without independent releases are explicitly versioned by this
 // composition contract. Bump the corresponding entry when its semantics change.
 const analysis =
-  'pipeline/26;discovery/7;targets/2;ssa/5;values-effects/6;stack-calls/11;debug/3;library/9;types/15;annotations/1;structure/8;reconstruction/66';
+  'pipeline/26;discovery/8;targets/2;ssa/5;values-effects/6;stack-calls/11;debug/3;library/9;types/15;annotations/1;structure/8;reconstruction/66';
 const versionRecords = (() => {
   const arm = new Arm64Decoder(),
     x86 = new X86Decoder({ formatting: false });
