@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict';
 import test, { describe } from 'node:test';
-import { entityIdentity } from '../../../src/core/index.js';
+import { createOperationContext, entityIdentity } from '../../../src/core/index.js';
 import { DarwinArm64Abi } from '../../../src/abi/darwin-arm64/index.js';
+import { sysvAMD64Abi } from '../../../src/abi/sysv-amd64/index.js';
+import { constructSSA } from '../../../src/analysis/ssa/index.js';
+import { recoverTypes, type TypeRecoveryResult } from '../../../src/analysis/types/index.js';
 import { IRBuilder, integer, type SSAForm, type Value } from '../../../src/ir/index.js';
 import type { EmissionResult } from '../../../src/emitters/model.js';
-import { image, provenance, slice } from '../../ir/support.js';
-import { emit, execute } from './support.js';
+import { builder, image, provenance, register, slice } from '../../ir/support.js';
+import { emit, emittedFormals, execute } from './support.js';
 
 const i1 = integer(1),
   i8 = integer(8),
@@ -306,5 +309,135 @@ for (const language of ['c-like', 'python-like'] as const)
           assert.equal(observed.events.filter((event) => event === 'load').length, loads);
         }
       }
+    });
+  });
+
+const rdi = register('rdi', 64, 0, 'replace_root', 'x86_64:rdi'),
+  rsi = register('rsi', 64, 0, 'replace_root', 'x86_64:rsi'),
+  rdx = register('rdx', 64, 0, 'replace_root', 'x86_64:rdx');
+interface DisplacedFields {
+  readonly ssa: SSAForm;
+  readonly types: TypeRecoveryResult;
+  /** The displaced address `node + 0x190`. */
+  readonly fields: Value;
+}
+/** A list walk from `*rdi`: each node gets `node + 0x190` stored at +0 and +8
+ * in two statements, its successor read in between, and the walked variable
+ * reassigned to that successor. With `escaped`, the displaced address is also
+ * stored as a value. */
+function displacedFields(escaped: boolean): DisplacedFields {
+  const b = builder(`rematerialized-address-${escaped}`),
+    entry = b.block('entry'),
+    loop = b.block('loop'),
+    exit = b.block('exit');
+  entry.writeRegister(rdx, entry.load(i64, entry.readRegister(rdi)));
+  entry.jump(loop);
+  const node = loop.readRegister(rdx);
+  const fields = loop.int('add', node, loop.constant(i64, 0x190n));
+  loop.store(fields, loop.constant(i64, 0n));
+  const next = loop.load(i64, node);
+  loop.store(
+    loop.int('add', fields, loop.constant(i64, 8n)),
+    loop.cast('truncate', i32, loop.readRegister(rsi)),
+  );
+  if (escaped) loop.store(loop.readRegister(rdi), fields);
+  loop.writeRegister(rdx, next);
+  loop.branch(loop.compare('ne', next, loop.constant(i64, 0n)), loop.edge(loop), loop.edge(exit));
+  exit.return([]);
+  const ssa = constructSSA(b.finish(entry, [])).value as SSAForm;
+  const types = recoverTypes(ssa, sysvAMD64Abi, createOperationContext(), {
+    slice_id: slice,
+    image_id: image,
+    revision: 1,
+  });
+  return { ssa, types, fields };
+}
+/** `*0x1000` heads a list of nodes at `nodes`; every other byte is patterned. */
+function listMemory(nodes: readonly bigint[]): Map<bigint, number> {
+  const bytes = new Map<bigint, number>();
+  for (let offset = 0n; offset < 0x800n; offset++)
+    bytes.set(0x1000n + offset, Number((offset * 37n + 11n) & 0xffn));
+  const pointer = (at: bigint, value: bigint): void => {
+    for (let byte = 0n; byte < 8n; byte++)
+      bytes.set(at + byte, Number((value >> (8n * byte)) & 0xffn));
+  };
+  pointer(0x1000n, nodes[0]!);
+  nodes.forEach((node, index) => pointer(node, nodes[index + 1] ?? 0n));
+  return bytes;
+}
+
+for (const language of ['c-like', 'python-like'] as const)
+  describe(`address rematerialization ${language}`, () => {
+    const render = (
+      program: DisplacedFields,
+      view: 'source' | 'checked' = 'source',
+    ): EmissionResult =>
+      emit(
+        program.ssa,
+        { types: program.types, source: { abi: sysvAMD64Abi, callees: [], addresses: [] } },
+        language,
+        view,
+      );
+    const run = (output: EmissionResult, bytes: Map<bigint, number>) => {
+      const [head, value] = emittedFormals(output.emission);
+      return execute(
+        output.emission,
+        new Map([
+          ...head!.semantic_ids.map((id) => [id, 0x1000n] as const),
+          ...value!.semantic_ids.map((id) => [id, 0x1234_5678_9an] as const),
+        ]),
+        bytes,
+      );
+    };
+    test('a displaced address read only as store addresses prints at each access, through a reassigned base', () => {
+      const program = displacedFields(false),
+        output = render(program),
+        checked = render(program, 'checked'),
+        text = output.emission.text;
+      assert.ok(!named(output, program.fields), text);
+      assert.ok(
+        output.emission.local_validation?.some(
+          (record) => record.rule === 'address_rematerialization',
+        ),
+        text,
+      );
+      if (language === 'c-like')
+        assert.match(text, /(\w+)->field_0x190 = 0;\n.*\n\s*\1->field_0x198 = arg1;/, text);
+      // Two nodes; a node at `first + 0x190` whose link the first store clears;
+      // the second node's +0x198 field missing (a fault after earlier effects).
+      const fault = listMemory([0x1100n, 0x1300n]);
+      fault.delete(0x1300n + 0x19an);
+      for (const bytes of [listMemory([0x1100n, 0x1300n]), listMemory([0x1100n, 0x1290n]), fault]) {
+        const actual = run(output, new Map(bytes)),
+          expected = run(checked, new Map(bytes));
+        assert.equal(actual.exit, expected.exit, text);
+        assert.deepEqual(actual.events, expected.events, text);
+        assert.deepEqual(actual.memory, expected.memory, text);
+      }
+      const observed = run(output, listMemory([0x1100n, 0x1290n]));
+      // The aliased link was cleared before it was read: the walk stops there.
+      assert.deepEqual(observed.events, [
+        'load',
+        'store',
+        'load',
+        'store',
+        'store',
+        'load',
+        'store',
+      ]);
+      assert.equal(observed.memory.get(0x1290n + 0x198n), 0x9a);
+      assert.equal(observed.memory.get(0x1100n + 0x190n), 0);
+      assert.equal(run(output, fault).exit, 'fault');
+    });
+
+    test('a displaced address also stored as a value stays a variable', () => {
+      const program = displacedFields(true),
+        output = render(program);
+      assert.ok(named(output, program.fields), output.emission.text);
+      const bytes = listMemory([0x1100n, 0x1300n]);
+      const actual = run(output, new Map(bytes)),
+        expected = run(render(program, 'checked'), new Map(bytes));
+      assert.deepEqual(actual.events, expected.events);
+      assert.deepEqual(actual.memory, expected.memory);
     });
   });

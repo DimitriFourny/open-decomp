@@ -368,3 +368,89 @@ for (const [bytes, indexed, text] of [
     const final = start + count * ((indexed ? stride * 4n : 0n) + BigInt.asUintN(64, bytes));
     assert.deepEqual(observed.values, [word(memoryImage(), BigInt.asUintN(64, final), 4)]);
   });
+
+/** A declared `uint8_t*` formal `p`: a 32-bit load at `p + 5` and a local `q =
+ * p - 3` declared `uint32_t*` (stored through, and stored as a value). */
+function bytePointer(language: 'c-like' | 'python-like', view: 'source' | 'checked') {
+  const b = builder(`byte-sum-${sequence++}`),
+    block = b.block('entry');
+  const pointer = block.readRegister(rdi);
+  const loaded = block.load(integer(32), block.int('add', pointer, block.constant(i64, 5n)));
+  const derived = block.int('sub', pointer, block.constant(i64, 3n));
+  block.store(derived, loaded);
+  block.store(block.readRegister(rsi), derived);
+  block.return([block.cast('zero_extend', i64, block.load(integer(16), derived))]);
+  const ssa = constructSSA(b.finish(block, [i64])).value as SSAForm;
+  const bindings = ssa.register_states.find((state) => state.block === ssa.entry)!.entry;
+  const types = recoverTypes(ssa, sysvAMD64Abi, createOperationContext(), {
+    slice_id: slice,
+    image_id: image,
+    revision: 1,
+    types: [
+      ...(
+        [
+          ['byte', { kind: 'integer', bits: 8, signed: false }],
+          ['byte-pointer', { kind: 'pointer', bits: 64, to: 'byte' }],
+          ['word', { kind: 'integer', bits: 32, signed: false }],
+          ['word-pointer', { kind: 'pointer', bits: 64, to: 'word' }],
+        ] as const
+      ).map(([id, definition]) => ({
+        id,
+        definition,
+        source: 'debug' as const,
+        status: 'established' as const,
+        evidence_ids: [],
+      })),
+    ],
+    bindings: [
+      [bindings.find((binding) => binding.register.root === rdi.root)!.value.id, 'byte-pointer'],
+      [derived.id, 'word-pointer'],
+    ].map(([subject_id, type_id]) => ({
+      subject_id: subject_id!,
+      type_id: type_id!,
+      source: 'debug' as const,
+      status: 'established' as const,
+      evidence_ids: [],
+    })),
+  });
+  return emit(ssa, { types, source }, language, view);
+}
+
+for (const language of ['c-like', 'python-like'] as const)
+  test(`byte pointer sums: a displaced declared byte pointer is C byte arithmetic (${language})`, () => {
+    const output = bytePointer(language, 'source');
+    const text = output.emission.text;
+    if (language === 'c-like') {
+      const base = /\*\(uint32_t \*\)\((\w+) \+ 5\)/.exec(text)?.[1];
+      assert.ok(base, text);
+      assert.match(text, new RegExp(`\\w+ = \\(uint32_t\\*\\)\\(${base} - 3\\);`), text);
+      // The byte pointer itself never round-trips through an integer.
+      assert.doesNotMatch(text, new RegExp(`\\(uintptr_t\\)${base}\\b`), text);
+      assert.ok(
+        output.emission.local_validation?.some((record) => record.rule === 'byte_pointer_sum'),
+      );
+    }
+    const run = (emission: typeof output.emission) => {
+      const [pointer, slot] = emittedFormals(emission);
+      return execute(
+        emission,
+        new Map([
+          ...pointer!.semantic_ids.map((id) => [id, BASE + 0x80n] as const),
+          ...slot!.semantic_ids.map((id) => [id, BASE + 0x10n] as const),
+        ]),
+        new Map(memoryImage()),
+      );
+    };
+    const observed = run(output.emission),
+      expected = run(bytePointer(language, 'checked').emission);
+    const model = new Map(memoryImage());
+    const word32 = word(model, BASE + 0x85n, 4);
+    for (let byte = 0n; byte < 4n; byte++)
+      model.set(BASE + 0x7dn + byte, Number((word32 >> (8n * byte)) & 0xffn));
+    for (let byte = 0n; byte < 8n; byte++)
+      model.set(BASE + 0x10n + byte, Number(((BASE + 0x7dn) >> (8n * byte)) & 0xffn));
+    assert.deepEqual(observed.values, [word(model, BASE + 0x7dn, 2)]);
+    assert.deepEqual(observed.memory, model);
+    assert.deepEqual(observed.values, expected.values);
+    assert.deepEqual(observed.events, expected.events);
+  });

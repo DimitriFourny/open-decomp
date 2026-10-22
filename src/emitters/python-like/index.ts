@@ -2,7 +2,7 @@ import type { Emitter, OperationContext } from '../../core/index.js';
 import type { EmissionInput, EmissionResult } from '../model.js';
 import { renderSource } from '../renderer.js';
 
-export const PYTHON_LIKE_EMITTER_VERSION = 'reconstructed-python-like-87';
+export const PYTHON_LIKE_EMITTER_VERSION = 'reconstructed-python-like-88';
 type Options = Parameters<Emitter<EmissionInput>['emit']>[1];
 
 /** Python-shaped high-level pseudocode, never ordinary executable Python.
