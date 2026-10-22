@@ -84,7 +84,9 @@ function x86(payload: X86Payload, delta: bigint): StackDelta {
     return slot.length === 1 && slot[0]!.index === null ? delta + slot[0]!.displacement : null;
   }
   if (/^pop(?:f|fq)?$/.test(mnemonic)) {
-    if (operands.some((operand) => operand.kind !== 'register' || operand.register.role !== 'general'))
+    if (
+      operands.some((operand) => operand.kind !== 'register' || operand.register.role !== 'general')
+    )
       return null;
     const slot = payload.memory;
     return slot.length === 1 &&
