@@ -1065,13 +1065,18 @@ as `(uintptr_t)"create" + i`. Unnamed data addresses stay numbers.
 
 Indexed read-only tables (`indexed_data_load`) print their contents as
 `static const uintN_t name[N] = {...}` (16 bytes per line, decimal below 2^32). `N`
-is the smaller of the accessed range (width, masks and dominating unsigned
-comparisons bound the index) and the extent: symbol size, else the distance to the next
-symbol/data record/relocation or section end (`object.span_bound`, a bound rather
-than a size). Tables up to 512 bytes print in full; larger ones a 256-byte prefix and
-`/* ... K more */`; an unbounded index over an unsized object shows its first 16 elements
-(`extent not established`). Writable storage, storage with a relocation slot and
-a per-function budget of 1536 content bytes keep the `extern` view. Synthesized
+is an extent only when it comes from a symbol size (capped by the accessed range) or
+from the accessed range itself, which width, masks, dominating unsigned comparisons and
+a guarded `x - c` (`x >= c` and `x <= m` give at most `m - c`) bound; the range must lie
+within the distance to the next symbol/data record/relocation or section end
+(`object.span_bound`, a bound rather than a size). That claim is a
+`table_extent` presentation record. A neighbour distance is never printed as a length:
+past it the extent is not established and the table prints as `name[] = {`, its first
+16 bytes and `/* ... further elements not shown */`. Tables up to 64 bytes print in full;
+larger ones with an established extent print one 16-byte row and `/* ... K more */`
+under the declared `[N]`. The note reads `VA 0x..., read-only; N elements`. Writable
+storage, storage with a relocation slot and a per-function budget of 1536 content bytes
+keep the `extern` view. Synthesized
 struct members are `field_0xOFFSET` and gaps `pad_0xOFFSET` (hexadecimal, never `f_36`).
 
 Source-only `constant_pool_literal` replaces exact-width, aligned, nonvolatile

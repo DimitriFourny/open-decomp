@@ -822,7 +822,7 @@ Files that several items touch:
 
 ### P1: Table contents policy and extent soundness
 
-- [ ] **Problem.** Inlined tables cost 15.6k lexical tokens, 7.6% of OD's total. 87% of that is six 256-byte maps repeated across 38 functions, which no judge asked for and which no QA answer uses: the four table-backed QA questions are 0/3 for OD today. One declaration is wrong: `unicodeNext` prints `static const uint8_t sqlite3Utf8Trans1[3979]` (source: 64 entries), followed by 192 bytes of neighbouring opcode-name strings.
+- [x] **Problem.** Inlined tables cost 15.6k lexical tokens, 7.6% of OD's total. 87% of that is six 256-byte maps repeated across 38 functions, which no judge asked for and which no QA answer uses: the four table-backed QA questions are 0/3 for OD today. One declaration is wrong: `unicodeNext` prints `static const uint8_t sqlite3Utf8Trans1[3979]` (source: 64 entries), followed by 192 bytes of neighbouring opcode-name strings.
   - **Root cause:**
     - `TABLE_FULL_BYTES = 512n` and `TABLE_PREFIX_BYTES = 256` (`renderer.ts:209-210`).
     - `tableContents` (`:3866-3956`) takes `span_bound` (the distance to the next symbol, "a bound, not a size", `source-model.ts:139-142`) as the extent (`:3887-3890`).
@@ -849,6 +849,7 @@ Files that several items touch:
     - No `[3979]`.
     - Checked view identical on all 232.
   - **Expected effect** (measured on the stored texts): lexical sum 205,686 → 192,009; geomean 1.337 → 1.272; Claude geomean about 1.42 [estimate]; QA tokens on `sqlite3_incomplete`, `sqlite3_stricmp`, `sqlite3_strnicmp` and `renameColumnFunc`.
+  - **Evidence (rm4-p1):** OD lane `od-rm4-p1` vs `od-rm3-final`: exactly the 38 texts that print a table changed (all other 194 byte-identical, no state/work change beyond noise), no `[3979]`; lexical sum 205,686 → 192,106 (1,087,232 → 1,052,948 bytes); checked view byte-identical on 6 changed functions. `maximum()` stayed as it was; `reachOf` (source-tables.ts) adds the guarded `x - c` and constant `x >> c` rules (so `Utf8Trans1` is `[64]` in full and `aAscii` `[4]`). Deviation: `statemap` (index is a loop-carried state with no provable range) and the tables whose index range is not provable (`UpperToLower`, `aEntry`, `CtypeMap`) now print `name[]` with the first row; the old `[10]`/`[274]` were neighbour distances (source: `statemap[8]`).
 
 ### P2: Struct bodies without pad members in the inline text
 

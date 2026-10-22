@@ -652,7 +652,7 @@ function wholeValue(value: Value, expressions: ReadonlyMap<string, Expression>):
 
 /** Most bytes of an indexed read-only table the source facts carry: enough for
  * the complete small tables and the printed prefix of larger ones. */
-const TABLE_BYTES_READ = 512n;
+const TABLE_BYTES_READ = 64n;
 
 function sourceAddresses(
   input: SourceFactsInput,
