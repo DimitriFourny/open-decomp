@@ -139,7 +139,7 @@ Files that several items touch:
 
 ## M1: Signature and diagnostic rows in odbench
 
-- [ ] **Problem.** The largest excess wrong-claim class (return types) does not appear in the report. Comprehension is one sample per function, so its noise is about ±0.1. The OD lane does not record diagnostics, so this investigation needed throwaway census scripts for cut callees, partial reasons, unsupported encodings and open arity.
+- [x] **Problem.** The largest excess wrong-claim class (return types) does not appear in the report. Comprehension is one sample per function, so its noise is about ±0.1. The OD lane does not record diagnostics, so this investigation needed throwaway census scripts for cut callees, partial reasons, unsupported encodings and open arity.
   - **Change** (`scripts/bench/odbench/`):
     - `od-worker.ts`/`lane-od.ts`: record per function the diagnostics (code plus first sentence, deduplicated) in `lane.json`. This is not part of text identity.
     - New `signature.ts` with a tolerant C definition reader for the three lane styles: OD (preamble, one-line signatures), Ghidra (signature line, then `{`) and source (macros such as `SQLITE_API`, multi-line parameters, `KEEP`). The report gains a "signature vs source" table per lane:
@@ -151,6 +151,7 @@ Files that several items touch:
     - `bun run bench report --lanes od-rm3-final,source --tier full` re-renders from the caches, with no model call.
     - It shows OD void-source 17/13/12 (void/value/unknown) and value-source 8/180/1 (±1 for parser differences, explained).
     - Texts and judgments are unchanged.
+  - **Done (evidence).** `bench report --lanes od-rm3-final,source --tier full` re-renders from the caches with no model call: void-source 17/13/12, value-source 9/180/1 (the prototype's 8 omitted the stripped `sub@0x10000041c` `KEEP aggregate` function, which the reader matches by taking the text's last definition; 232 paired, not 231), Ghidra 40/2/0 and 14/176/0. Embedded-assignment conditions count 41 in OD (casts before the group and arithmetic operators after it included; the prototype's 46 was not reproduced by any variant tried: the only `if`/`while` lines with an assignment group that this counter skips are 6 comma conditions, which stay in `comma_conditions`), 17 in the source, 0 in Ghidra. `bench run od --label rm4-m1`: 232 texts byte-identical to `od-rm3-final`, state/reason/sha unchanged, 237 functions with `diagnostics` (202 with at least one).
 
 ## M2: Speed rows that match the D8 target
 
@@ -792,7 +793,7 @@ Files that several items touch:
 
 ### E5: Fold the bitfield-move aliases (SXTB/SXTH/SXTW, SBFIZ/UBFIZ, SBFX)
 
-- [ ] **Problem.** 25 sign-fill selects such as `((x >> 0x1f) & 1 ? 0xffffffffffffffff : 0) & 0xffffffff00000000) | (x & 0xffffffff)` and 5 rotate-as-shift idioms in 15 functions, each 15–35 tokens. Judges cite `btreeOverwriteContent`, `openStatTable` and `fts3MatchinfoLcsCb`.
+- [x] **Problem.** 25 sign-fill selects such as `((x >> 0x1f) & 1 ? 0xffffffffffffffff : 0) & 0xffffffff00000000) | (x & 0xffffffff)` and 5 rotate-as-shift idioms in 15 functions, each 15–35 tokens. Judges cite `btreeOverwriteContent`, `openStatTable` and `fts3MatchinfoLcsCb`. _Done (`wt/rm4-e5`): fields of 8/16/32 bits starting at bit 0 fold (SXTB/SXTH/SXTW, SBFIZ, UBFIZ); SBFX/UBFX and odd widths keep their lowering (the division and signed-shift recognizers read them, and odd widths print as xor/subtract pairs). Lane `od-rm4-e5` vs `od-main-afb7691`: 61 sign-fill selects and 7 rotate idioms fold in 28 functions (30 texts change, all of them by these folds; 14 selects and 10 rotates remain in other shapes); `btreeOverwriteContent` prints `(uint64_t)count` (`count` is an `int32_t` formal) and `size = (uint64_t)(int32_t)size`; `fts3MatchinfoLcsCb` prints `*(uint64_t *)((uintptr_t)arg2 + ((uint64_t)arg1 << 5))` with `int32_t arg1`; checked view byte-identical; reconstruction 80, fingerprints unchanged._
   - **Root cause:** the generic SBFM/UBFM lowering (`src/lifters/arm64/semantics.ts:332-353`). `foldShiftIdiom` (`src/reconstruction/source-shifts.ts:121-171`) folds only masks equal to the whole non-wrapped part.
   - **Change:** in `foldShiftIdiom` or a sibling rule in `EXPRESSION_RULES` (`source-rules.ts:632-652`), with masks equal to the field exactly:
     - (i) `(select(bit_s(x), ~0, 0) & ~mask(s+1)) | (x & mask(s+1))` → `sign_extend(trunc_{s+1}(x))`;

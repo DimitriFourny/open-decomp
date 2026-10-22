@@ -18,6 +18,7 @@ import type {
   Corpus,
   CorpusFunction,
   FunctionResult,
+  FunctionDiagnostic,
   FunctionWork,
   FunctionState,
   LaneRun,
@@ -57,6 +58,7 @@ export type OdWorkerLine =
       readonly ms: number;
       readonly text: string | null;
       readonly work: FunctionWork | null;
+      readonly diagnostics: readonly FunctionDiagnostic[];
     }
   | { readonly kind: 'done'; readonly cold_ms: number; readonly decompile_ms_total: number };
 
@@ -67,6 +69,7 @@ interface Attempt {
   readonly ms: number | null;
   readonly text: string | null;
   readonly work: FunctionWork | null;
+  readonly diagnostics: readonly FunctionDiagnostic[] | null;
 }
 
 /** One worker process: its functions' attempts and timing. */
@@ -157,6 +160,7 @@ async function runRepeat(
         ms: line.ms,
         text: line.text,
         work: line.work,
+        diagnostics: line.diagnostics,
       });
     else done = line;
   }
@@ -170,7 +174,14 @@ async function runRepeat(
         : started === fn.id
           ? `${lost} while decompiling this function`
           : `${lost} (before this function)`;
-    attempts.set(fn.id, { state: 'failed', reason, ms: null, text: null, work: null });
+    attempts.set(fn.id, {
+      state: 'failed',
+      reason,
+      ms: null,
+      text: null,
+      work: null,
+      diagnostics: null,
+    });
   }
   const measured = [...attempts.values()].reduce((sum, attempt) => sum + (attempt.ms ?? 0), 0);
   return {
@@ -306,6 +317,7 @@ export async function runOdLane(opts: {
         reason: first.reason,
         ms: times.length === 0 ? null : median(times),
         work: first.work,
+        diagnostics: first.diagnostics,
         ...written,
         ...(opts.repeat > 1
           ? {
