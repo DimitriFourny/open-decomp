@@ -1,17 +1,26 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createOperationContext, entityIdentity } from '../../src/core/index.js';
+import { darwinArm64Abi } from '../../src/abi/darwin-arm64/index.js';
+import { constructSSA } from '../../src/analysis/ssa/index.js';
+import { recoverTypes } from '../../src/analysis/types/index.js';
+import { simplifySSA } from '../../src/analysis/values/index.js';
 import {
+  OracleMemory,
   evaluateExpression,
   expressionOperands,
   integer,
   type Expression,
   type IntegerOp,
   type RuntimeValue,
+  type SSAForm,
   type Value,
 } from '../../src/ir/index.js';
 import { LocalValidationSession } from '../../src/reconstruction/local-validation.js';
 import { normalizeSourceExpressions } from '../../src/reconstruction/source-expressions.js';
+import { emit, emittedFormals, execute } from '../emitters/c/support.js';
+import { data, evaluate as evaluateLifted, fromWords, lift } from '../lifters/arm64/support.js';
+import type { EmissionResult } from '../../src/emitters/model.js';
 import { slice } from '../ir/support.js';
 
 type View = 'source' | 'checked' | 'record bound';
@@ -583,3 +592,416 @@ for (const scenario of maskedFields)
       assert.deepEqual(kept.after.get(kept.root.id), kept.before.get(kept.root.id));
     });
   }
+
+// ---------------------------------------------------------------------------
+// Lifted bitfield moves (SXT*, SBFIZ/UBFIZ, SBFX), emitted in both dialects.
+// ---------------------------------------------------------------------------
+
+const abi = darwinArm64Abi;
+const ret = 0xd65f03c0;
+
+function lifted(words: readonly number[]) {
+  const graph = fromWords([...words, ret]);
+  const registers = lift(graph).ir;
+  const ssa = simplifySSA(constructSSA(registers).value as SSAForm).value as SSAForm;
+  const types = recoverTypes(ssa, abi, createOperationContext(), {
+    image_id: graph.function.entry.image_id,
+    slice_id: slice,
+    revision: 0,
+  });
+  return { registers, ssa, source: { abi, callees: [], addresses: [] }, types };
+}
+
+/** `SBFM`/`UBFM` Xd/Wd = Xn/Wn, #immr, #imms with d = n = 0. */
+const bitfieldMove = (signed: boolean, bits: 32 | 64, immr: number, imms: number): number =>
+  ((bits === 64 ? 0x93400000 : 0x13000000) |
+    (signed ? 0 : 0x40000000) |
+    (immr << 16) |
+    (imms << 10)) >>>
+  0;
+
+interface Move {
+  readonly name: string;
+  readonly word: number;
+  /** The architectural result for the register input (source-level oracle). */
+  readonly oracle: (x: bigint) => bigint;
+}
+const field = (bits: 32 | 64, signed: boolean, lsb: number, width: number, shift: number) => {
+  const wide = BigInt(bits);
+  return (x: bigint): bigint => {
+    const taken = (x >> BigInt(lsb)) & ((1n << BigInt(width)) - 1n);
+    const value = signed ? BigInt.asIntN(width, taken) : taken;
+    return BigInt.asUintN(Number(wide), value << BigInt(shift));
+  };
+};
+const moves: readonly Move[] = [
+  ['sxtw x0, w0', true, 64, 0, 31, field(64, true, 0, 32, 0)],
+  ['sxth x0, w0', true, 64, 0, 15, field(64, true, 0, 16, 0)],
+  ['sxtb x0, w0', true, 64, 0, 7, field(64, true, 0, 8, 0)],
+  ['sxth w0, w0', true, 32, 0, 15, field(32, true, 0, 16, 0)],
+  ['sxtb w0, w0', true, 32, 0, 7, field(32, true, 0, 8, 0)],
+  ['sbfiz x0, x0, #5, #32', true, 64, 59, 31, field(64, true, 0, 32, 5)],
+  ['sbfiz x0, x0, #2, #32', true, 64, 62, 31, field(64, true, 0, 32, 2)],
+  ['sbfiz x0, x0, #3, #8', true, 64, 61, 7, field(64, true, 0, 8, 3)],
+  ['sbfiz w0, w0, #3, #5', true, 32, 29, 4, field(32, true, 0, 5, 3)],
+  ['sbfiz w0, w0, #1, #7', true, 32, 31, 6, field(32, true, 0, 7, 1)],
+  ['ubfiz x0, x0, #5, #32', false, 64, 59, 31, field(64, false, 0, 32, 5)],
+  ['ubfiz x0, x0, #3, #8', false, 64, 61, 7, field(64, false, 0, 8, 3)],
+  ['ubfiz w0, w0, #4, #8', false, 32, 28, 7, field(32, false, 0, 8, 4)],
+  ['sbfx x0, x0, #8, #16', true, 64, 8, 23, field(64, true, 8, 16, 0)],
+  ['sbfx w0, w0, #4, #12', true, 32, 4, 15, field(32, true, 4, 12, 0)],
+  ['sbfx x0, x0, #8, #24', true, 64, 8, 31, field(64, true, 8, 24, 0)],
+].map(([name, signed, bits, immr, imms, oracle]) => ({
+  name: name as string,
+  word: bitfieldMove(signed as boolean, bits as 32 | 64, immr as number, imms as number),
+  oracle: oracle as Move['oracle'],
+}));
+
+/** Inputs with bit 31 set, with the top bit of narrower fields set, with junk
+ * above the field, and with the field's top bit clear. */
+const moveInputs = [
+  0n,
+  1n,
+  0x7fn,
+  0x80n,
+  0xffn,
+  0x7fffn,
+  0x8000n,
+  0xffffn,
+  0x7fffffffn,
+  0x80000000n,
+  0xffffffffn,
+  0x1_8000_0000n,
+  0x7fffffff_ffffffffn,
+  0x80000000_00000000n,
+  0xfedcba98_80000001n,
+  0x12345678_90abcdefn,
+  0xffffffff_ffffffffn,
+];
+
+/** str x0, [x1]: the 64-bit result is observed whole, through memory, so that
+ * the return-width presentation of the function never hides upper bits. */
+const storeX0 = 0xf9000020;
+const object = data;
+
+/** The unsigned extract with a rotation is not a bitfield-move alias of this
+ * rule: it keeps its lowering, and stays exact. */
+const unfolded: readonly Move[] = [
+  {
+    name: 'ubfx x0, x0, #8, #16',
+    word: bitfieldMove(false, 64, 8, 23),
+    oracle: field(64, false, 8, 16, 0),
+  },
+];
+
+const shiftIdiomRecorded = (emission: EmissionResult['emission']): boolean =>
+  emission.local_validation?.some(
+    (record) =>
+      record.kind === 'presentation' &&
+      record.rule === 'shift_idiom' &&
+      record.status === 'verified',
+  ) ?? false;
+
+/** The stored 64-bit register after the lifted bitfield move, executed from the
+ * emitted text of one dialect and view. */
+function storedResult(
+  emission: EmissionResult['emission'],
+  value: bigint,
+  inputMask: bigint,
+): bigint {
+  const formals = emittedFormals(emission);
+  const memory = new Map(
+    Array.from({ length: 8 }, (_, index): [bigint, number] => [object + BigInt(index), 0]),
+  );
+  const observed = execute(
+    emission,
+    new Map([
+      [formals[0]!.statement_id, value & inputMask],
+      [formals[1]!.statement_id, object],
+    ]),
+    memory,
+  );
+  assert.equal(observed.exit, 'machine_return', emission.text);
+  let stored = 0n;
+  for (let index = 7; index >= 0; index--)
+    stored = (stored << 8n) | BigInt(observed.memory.get(object + BigInt(index)) ?? 0);
+  return stored;
+}
+
+function checkMove(move: Move, folds: boolean): void {
+  const fixture = lifted([move.word, storeX0]);
+  for (const value of moveInputs) {
+    const evaluated = evaluateLifted(
+      fixture.registers,
+      new Map([
+        ['arm64:x0', value],
+        ['arm64:x1', object],
+      ]),
+      {
+        memory: new OracleMemory([
+          { base: data, bytes: new Uint8Array(8), writable: true },
+        ]).snapshot(),
+      },
+    );
+    assert.equal(
+      new OracleMemory(evaluated.memory).read(object, 64),
+      move.oracle(value),
+      `lifter x0=0x${value.toString(16)}`,
+    );
+  }
+  for (const language of ['c-like', 'python-like'] as const)
+    for (const view of ['source', 'checked'] as const) {
+      const { emission } = emit(fixture.ssa, fixture, language, view);
+      const label = `${language} ${view} ${move.name}\n${emission.text}`;
+      assert.equal(shiftIdiomRecorded(emission), folds && view === 'source', label);
+      if (folds && view === 'source')
+        assert.doesNotMatch(emission.text, /0xffffffff[0-9a-f]* : 0|else 0|\bror\b/, label);
+      const formals = emittedFormals(emission);
+      assert.equal(formals.length, 2, label);
+      // The source view may declare the operand as its low word (a recorded
+      // ABI presentation); the bits it drops must not change the result.
+      const declared = new RegExp(
+        `\\bu?int(8|16|32|64)_t\\s+${formals[0]!.name}\\b|\\b${formals[0]!.name}: u?int(8|16|32|64)_t`,
+      ).exec(emission.text);
+      const inputMask = declared
+        ? (1n << BigInt(declared[1] ?? declared[2]!)) - 1n
+        : (1n << 64n) - 1n;
+      for (const value of moveInputs)
+        assert.equal(
+          storedResult(emission, value, inputMask),
+          move.oracle(value),
+          `x0=0x${value.toString(16)} ${label}`,
+        );
+    }
+}
+
+for (const move of moves)
+  test(`lifted ${move.name} agrees with the architecture and folds to one extension`, () =>
+    checkMove(move, true));
+for (const move of unfolded)
+  test(`lifted ${move.name} agrees with the architecture and keeps its lowering`, () =>
+    checkMove(move, false));
+
+// ---------------------------------------------------------------------------
+// The generic SBFM/UBFM lowering (src/lifters/arm64/semantics.ts) as IR, over
+// every (immr, imms) of an 8-bit word and sampled 64-bit ones.
+// ---------------------------------------------------------------------------
+
+const fieldMask = (bits: number): bigint => (1n << BigInt(bits)) - 1n;
+const rotateConstant = (value: bigint, right: number, width: number): bigint =>
+  ((value >> BigInt(right)) | (value << BigInt(width - right))) & fieldMask(width);
+
+/** `bottom = ror(x, r) & rotate(mask(s+1), r)`, `top = sign ? ones : 0`,
+ * `(top & ~t) | (bottom & t)` exactly as the lifter lowers SBFM/UBFM. */
+function bitfieldLowering(kit: Kit, r: number, s: number, signed: boolean): Value {
+  const width = kit.width,
+    t = fieldMask(((s - r) & (width - 1)) + 1);
+  const rotated = r === 0 ? kit.x : rotateRight(kit, r),
+    bottom = kit.int('and', rotated, kit.constant(rotateConstant(fieldMask(s + 1), r, width))),
+    top = signed
+      ? kit.select(kit.signBit(kit.x, s), kit.constant(kit.ones), kit.constant(0n))
+      : kit.constant(0n);
+  return kit.int(
+    'or',
+    kit.int('and', top, kit.constant(kit.ones ^ t)),
+    kit.int('and', bottom, kit.constant(t)),
+  );
+}
+const selects = (outcome: Outcome): boolean =>
+  reachable(outcome).some((expression) => expression.kind === 'select');
+const rotates = (outcome: Outcome): boolean =>
+  reachable(outcome).some(
+    (expression) =>
+      expression.kind === 'integer' && (expression.op === 'ror' || expression.op === 'rol'),
+  );
+
+for (const signed of [true, false])
+  for (let r = 0; r < 8; r++)
+    for (let s = 0; s < 8; s++) {
+      // t = all ones: SBFM #0,#7 is the identity, and a field ending at the top
+      // bit with a fill below it is a plain shift (handled by the shift rules).
+      test(`source bitfield move (w=8, ${signed ? 'SBFM' : 'UBFM'} #${r}, #${s}) is exact and leaves no rotation or fill`, () => {
+        const build = (kit: Kit) => bitfieldLowering(kit, r, s, signed);
+        const name = `bitfield-${signed}-${r}-${s}`;
+        const outcome = run(name, 8, 'source', build);
+        assertExact(outcome, 8);
+        // A genuine bitfield move: the field is n bits at k from bit o, and the
+        // sign fill (if any) covers exactly the bits above the field.
+        const sbfiz = s < r - 1,
+          sbfx = s >= r && !(r === 0 && s === 7);
+        if (signed && (sbfiz || sbfx)) {
+          assert.ok(recorded(outcome), JSON.stringify(outcome.after.get(outcome.root.id)));
+          assert.ok(!selects(outcome) && !rotates(outcome), 'folded to one extension');
+        }
+        if (!signed && s < r - 1)
+          assert.ok(!rotates(outcome), 'UBFIZ is the zero-extended field shifted into place');
+        for (const view of ['checked', 'record bound'] as const) {
+          const kept = run(name, 8, view, build);
+          assert.deepEqual(kept.after.get(kept.root.id), kept.before.get(kept.root.id));
+          assert.ok(!recorded(kept));
+          assertExact(kept, 8);
+        }
+      });
+    }
+
+for (const [r, s] of [
+  [0, 31],
+  [0, 15],
+  [0, 7],
+  [59, 31],
+  [62, 31],
+  [61, 7],
+  [8, 23],
+  [1, 30],
+  [33, 40],
+  [60, 3],
+  [63, 0],
+] as const)
+  for (const signed of [true, false])
+    test(`source bitfield move (w=64, ${signed ? 'SBFM' : 'UBFM'} #${r}, #${s}) is exact`, () => {
+      const outcome = run(`bitfield64-${signed}-${r}-${s}`, 64, 'source', (kit) =>
+        bitfieldLowering(kit, r, s, signed),
+      );
+      assertExact(outcome, 64);
+      if (signed && (s < r - 1 || (s >= r && s < 63)))
+        assert.ok(
+          recorded(outcome) && !selects(outcome) && !rotates(outcome),
+          JSON.stringify(outcome.after.get(outcome.root.id)),
+        );
+    });
+
+/** Shapes that look like a bitfield move but are not one: every one keeps its
+ * select and its rotation (the identity does not hold, or is not proved). */
+const notBitfields: readonly Negative[] = [
+  {
+    name: 'a fill that leaves a gap above the field',
+    build: (kit) =>
+      kit.int(
+        'or',
+        kit.int(
+          'and',
+          kit.select(kit.signBit(kit.x, 3), kit.constant(kit.ones), kit.constant(0n)),
+          kit.constant(0xe0n),
+        ),
+        kit.int('and', kit.x, kit.constant(0x0fn)),
+      ),
+  },
+  {
+    name: 'a fill that overlaps the field',
+    build: (kit) =>
+      kit.int(
+        'or',
+        kit.int(
+          'and',
+          kit.select(kit.signBit(kit.x, 3), kit.constant(kit.ones), kit.constant(0n)),
+          kit.constant(0xf8n),
+        ),
+        kit.int('and', kit.x, kit.constant(0x0fn)),
+      ),
+  },
+  {
+    name: 'a sign bit one below the top of the field',
+    build: (kit) =>
+      kit.int(
+        'or',
+        kit.int(
+          'and',
+          kit.select(kit.signBit(kit.x, 2), kit.constant(kit.ones), kit.constant(0n)),
+          kit.constant(0xf0n),
+        ),
+        kit.int('and', kit.x, kit.constant(0x0fn)),
+      ),
+  },
+  {
+    name: 'a sign bit above the field',
+    build: (kit) =>
+      kit.int(
+        'or',
+        kit.int(
+          'and',
+          kit.select(kit.signBit(kit.x, 4), kit.constant(kit.ones), kit.constant(0n)),
+          kit.constant(0xf0n),
+        ),
+        kit.int('and', kit.x, kit.constant(0x0fn)),
+      ),
+  },
+  {
+    name: 'a sign bit of another value',
+    build: (kit) =>
+      kit.int(
+        'or',
+        kit.int(
+          'and',
+          kit.select(kit.signBit(kit.y, 3), kit.constant(kit.ones), kit.constant(0n)),
+          kit.constant(0xf0n),
+        ),
+        kit.int('and', kit.x, kit.constant(0x0fn)),
+      ),
+  },
+  {
+    name: 'a field of another value',
+    build: (kit) =>
+      kit.int(
+        'or',
+        kit.int(
+          'and',
+          kit.select(kit.signBit(kit.x, 3), kit.constant(kit.ones), kit.constant(0n)),
+          kit.constant(0xf0n),
+        ),
+        kit.int('and', kit.y, kit.constant(0x0fn)),
+      ),
+  },
+  {
+    name: 'a fill of the inverted sign',
+    build: (kit) =>
+      kit.int(
+        'or',
+        kit.int(
+          'and',
+          kit.select(kit.signBit(kit.x, 3), kit.constant(0n), kit.constant(kit.ones)),
+          kit.constant(0xf0n),
+        ),
+        kit.int('and', kit.x, kit.constant(0x0fn)),
+      ),
+  },
+  {
+    name: 'a field mask with a hole',
+    build: (kit) =>
+      kit.int(
+        'or',
+        kit.int(
+          'and',
+          kit.select(kit.signBit(kit.x, 3), kit.constant(kit.ones), kit.constant(0n)),
+          kit.constant(0xf0n),
+        ),
+        kit.int('and', kit.x, kit.constant(0x0bn)),
+      ),
+  },
+  {
+    name: 'a field that wraps around the rotation',
+    build: (kit) =>
+      kit.int(
+        'or',
+        kit.int(
+          'and',
+          kit.select(kit.signBit(kit.x, 5), kit.constant(kit.ones), kit.constant(0n)),
+          kit.constant(0xc0n),
+        ),
+        kit.int('and', rotateRight(kit, 3), kit.constant(0x3fn)),
+      ),
+  },
+  {
+    name: 'a rotation masked across its wrap point',
+    build: (kit) => kit.int('and', rotateRight(kit, 3), kit.constant(0xe1n)),
+  },
+  {
+    name: 'a rotation masked to a field with a hole',
+    build: (kit) => kit.int('and', rotateRight(kit, 5), kit.constant(0x16n)),
+  },
+];
+for (const scenario of notBitfields)
+  test(`source bitfield move stays: ${scenario.name}`, () => {
+    const outcome = run(`not-bitfield-${scenario.name}`, 8, 'source', scenario.build);
+    assert.ok(!recorded(outcome), JSON.stringify(outcome.after.get(outcome.root.id)));
+    assertExact(outcome, 8);
+  });

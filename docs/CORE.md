@@ -901,6 +901,21 @@ the wrapped part of a rotation is that field of the rotated operand, and a
 masked field whose mask bits all lie in the non-wrapped part is the same field of
 `x>>k`. Every mask must match exactly (one bit more or fewer keeps the rotate),
 so a true rotate stays a rotate and its helper is still emitted.
+The same rule folds the ARM64 bitfield-move aliases (`SXTB`/`SXTH`/`SXTW`,
+`SBFIZ`, `SBFX`, `UBFIZ`: the generic `SBFM`/`UBFM` lowering) as bit-exact field
+algebra. Masks are accumulated through nested `and`s, and a rotation masked to
+one run of `n` bits that does not cross the wrap point reads `n` consecutive bits
+of `x`: `ror(x,w-k) & (mask(n)<<k)` with `k>0` is `zero_extend(trunc_n(x)) << k`
+(`x << k` when `k+n=w`), and a field of `n` bits OR-ed with its own top bit
+selected into exactly the bits above it (`(sign ? ones : 0) & ~mask(k+n)`, the
+condition being that very bit of the same source) is `sign_extend(field) << k`,
+for example `(uint64_t)(int32_t)count`. A fill that leaves a gap or overlaps the
+field, a sign bit that is not the field's top bit, a field of another value, a
+hole in a mask and a field crossing the wrap point keep the original form; an
+unsigned extract with a rotation and no placement (`UBFX`) is unchanged. The sign
+extension makes the existing narrow-formal/`return_low_word` presentations see an
+explicit 32-bit extension (an operand used only through `(int32_t)` becomes an
+`int32_t` formal, under their own records and ABI requirements).
 The printer applies the width- and signedness-exact rules below only when its
 recorder accepts a presentation record, so checked text never changes:
 `zero_high_join` (constant-zero concat parts are omitted; one remaining lowest
