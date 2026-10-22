@@ -935,7 +935,7 @@ Files that several items touch:
 
 ### L3: `for` loops over `-O0` promoted stack-slot induction variables
 
-- [ ] **Problem.** 8 `-O0` loops (`matrix_callback` ×3, `matrix_multi_exit` ×3, `matrix_variadic` PE/Mach-O) print `index = 0; while (index < n) { …; index = index + 1; }`. Ghidra prints `for`, and the judge cites "ghidra has a clean for-loop".
+- [x] **Problem.** 8 `-O0` loops (`matrix_callback` ×3, `matrix_multi_exit` ×3, `matrix_variadic` PE/Mach-O) print `index = 0; while (index < n) { …; index = index + 1; }`. Ghidra prints `for`, and the judge cites "ghidra has a clean for-loop".
   - **Root cause:** the step and init are `store`s to a promoted private local. `trailingStatement` accepts only `assign`/`load` (`renderer.ts:5644`), and `acceptStatementFor` identifies the variable by `step.result` (`:5587`).
   - **Change:** accept a trailing store into a promoted, non-escaped, non-punned local when:
     - the test reads a load of it;

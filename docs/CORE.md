@@ -507,7 +507,11 @@ single-result call its first test reads prints it inside that test, as for
 Python-like only `while (x := p.next) != 0:`); the statement still runs once per
 header entry, immediately before the test. A header with a valid C bottom test
 stays `do`/`while` instead, and a `for` counts the statement's operands as test
-reads. Chained stages leaving on their true arm print the exact complement
+reads. A C `for` also takes a store into a promoted private stack slot (an `-O0`
+induction variable; no frame address reaches it) as step and init (`for (index =
+0; index < n; index = index + 1)`) when the test reads the slot through a load,
+it is the loop's only store to it, the step ends the sole repeat edge and the
+init ends the entry block; `for_loop` records it. Chained stages leaving on their true arm print the exact complement
 (`x == 0`, not `!(x != 0)`). Stages needing temporaries, exit copies, effects or
 shared entries remain explicit; unrelated early returns stay inside the body.
 `loop_form` records the conditions and existing control/move validation remains
