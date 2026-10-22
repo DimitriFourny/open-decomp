@@ -212,7 +212,8 @@ A prototype of S1–S3 (unsound, measurement only) gave these results:
 
 ### S1: Incoming scalar stack arguments become formals by per-slot reach
 
-- [ ] **Problem.** `createFunctionApi` has 11 source parameters; on AAPCS64, arguments 9–11 are on the caller's stack. OD reads `*(uint64_t *)((uintptr_t)entry_sp + 0/8/16)`. Ghidra prints `param_9..param_11`.
+- [x] **Problem.** `createFunctionApi` has 11 source parameters; on AAPCS64, arguments 9–11 are on the caller's stack. OD reads `*(uint64_t *)((uintptr_t)entry_sp + 0/8/16)`. Ghidra prints `param_9..param_11`.
+  - **Done (S1):** `incomingFloor` in `expose()`, per-slot binding with `incoming_formal` / `incoming_arguments_private`; full-tier OD lane changes only `createFunctionApi` (18 → 0 `entry_sp`, `…, arg8, arg9, opaque_1* arg10`, negative slots as `frame.*`), checked views of the 13 `entry_sp` functions byte-identical; float/narrower slots not added (no corpus need).
   - **Root cause:** `src/reconstruction/source-stack.ts:1394-1433` binds incoming loads to formals (via `incomingStack`, `source-planner.ts:1356-1377`) only when all of these hold:
     - `!escaped`. But any unresolved call sets it (`:609-614`), and every callee summary here was cut by budget.
     - No store through a non-stack pointer anywhere in the function (`:1409`).
