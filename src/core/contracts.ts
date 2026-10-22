@@ -423,6 +423,9 @@ export interface NativeSummaryRow {
   readonly allowance: number;
   readonly work: number;
   readonly value: unknown;
+  /** Retained-size estimate of `value` (the caller's units), bounding what the write queue may
+   * keep alive; absent counts as 1. */
+  readonly weight?: number;
 }
 export interface ProjectStore {
   readonly project_id: string;
@@ -510,11 +513,19 @@ export interface ProjectStore {
   /** One persisted prepared-callee summary, or null when absent, evicted or not authentic:
    * a row whose identity or content digest does not match is never returned. */
   readNativeSummary(scope: string, functionId: string): NativeSummaryRow | null;
-  /** Queue a summary for the next batched write (the next artifact publication, an explicit
-   * flush, or close). Returns false when it cannot be stored (not encodable, larger than the
-   * per-project byte cap). Best effort: a cache write never fails a request. */
+  /** Queue a summary for a later batched write: idle slices of `flushNativeSummaries`, the
+   * queue's size bound, or close; never inside a request's commit. Encoding happens at the
+   * write, so the caller must not mutate `row.value` afterwards. Returns false only for a row
+   * that is invalid for this store (scope, revision, numbers); a row that cannot be encoded or
+   * exceeds the per-project byte cap is dropped at the write. A queued row becomes readable
+   * through `readNativeSummary` at the next `releaseNativeSummaries` (a request boundary) exactly
+   * as if written. Best effort: a cache write never fails a request. */
   queueNativeSummary(row: NativeSummaryRow): boolean;
-  flushNativeSummaries(): void;
+  /** A request boundary: make the rows queued so far readable. Cheap; writes nothing. */
+  releaseNativeSummaries(): void;
+  /** Write the oldest `maxRows` queued summaries (all by default) in one transaction without
+   * fsync; returns how many are still queued. A no-op inside a transaction. */
+  flushNativeSummaries(maxRows?: number): number;
   saveJob(job: Job): void;
   readJob(jobId: string): Job | null;
   /** Live job lifecycle view in stable ID order; cursors bind the current project revision. */

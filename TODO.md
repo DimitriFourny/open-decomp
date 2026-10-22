@@ -1062,7 +1062,7 @@ Files that several items touch:
 
 ### T7: Constant-factor bundle
 
-- [ ] **Change** (all four are output-neutral):
+- [x] **Change** (all four are output-neutral): _Done (`wt/rm4-t7`): parts 1-3 as specified; part 4 only for derived data. Lane `od-rm4-t7` and an `--only sqlite3-arm64` rerun: all texts, states and work identical to `od-main-bf6f43f`. Summaries are encoded and written off the commit (idle slices, no fsync); the artifact `fsync` and `FULL` commit stay because they are job state (`project-cache.md` §7). Measured SQLite lane time is within noise (126.1 vs 126.5 s in the cleanest pair, load 6-16); 25-function runs 24.9 → 21.0 s._
   1. `verifyIR` identity checks: precompiled `^entity_[0-9a-f]{64}$` / `^evidence_[0-9a-f]{64}$` tests instead of zod `safeParse` per id (`src/ir/verify.ts:228, 253, 254, 582`). Measured −1.6 s.
   2. `analysis/stack/index.ts` `combine`/`join`/`union` (`:135-170`): fast paths for equal, empty and single lists, and a merge of two sorted unique lists. 5.7 s self in the profile.
   3. Do not re-validate and re-encode the result just built in the same process (`validateComputation`, `src/project/cache/index.ts:150`, 5.1 s; `delivery`): parse once, as the result-hit path does.
