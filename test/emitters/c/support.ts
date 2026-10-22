@@ -49,6 +49,22 @@ interface StructMemberDeclaration {
   readonly array: boolean;
 }
 const MATH: CType = { kind: 'math' };
+/** SysV AMD64 `va_list` element `__va_list_tag`: two u32 offsets, two pointers. */
+const VA_LIST_TAG = '__va_list_tag';
+const VA_LIST_LAYOUT: StructLayout = {
+  size: 24n,
+  fields: new Map([
+    ['gp_offset', { offset: 0n, type: { kind: 'int', bits: 32, signed: false }, array: false }],
+    ['fp_offset', { offset: 4n, type: { kind: 'int', bits: 32, signed: false }, array: false }],
+    ['overflow_arg_area', { offset: 8n, type: { kind: 'pointer', to: null }, array: false }],
+    ['reg_save_area', { offset: 16n, type: { kind: 'pointer', to: null }, array: false }],
+  ]),
+};
+/** gp_offset and fp_offset `va_start` sets after these named formals. */
+const vaOffsets = (formals: readonly CType[]): [bigint, bigint] => [
+  8n * BigInt(formals.filter((type) => type.kind !== 'float').length),
+  48n + 16n * BigInt(formals.filter((type) => type.kind === 'float').length),
+];
 /** Decode the body of a C or Python-like string/character literal (octal and
  * \\u/\\U escapes included). */
 export function unescapeLiteral(body: string): string {
@@ -311,6 +327,10 @@ export class Parser {
     string,
     { readonly offset: bigint; readonly type: Extract<CType, { kind: 'int' | 'float' }> | null }
   >();
+  /** Named formal types in order (SysV `va_start`'s gp_offset/fp_offset). */
+  private readonly formalTypes: CType[] = [];
+  /** Python-like: the entry-SP offset each `frame.va: va_list` states. */
+  private readonly vaOffsets = new Map<string, bigint>();
   /** Declared result types of `extern R name(...);` functions. */
   private readonly prototypes = new Map<string, CType>();
   returnType: CType = MATH;
@@ -388,6 +408,21 @@ export class Parser {
         .replace(/struct\{[^}]*\}/g, 'struct')
         .matchAll(/(\w+): (float|double)\b/g))
         this.symbols.set(match[1]!, { kind: 'float', bits: match[2] === 'float' ? 32 : 64 });
+      // Named formal classes for a SysV `va_start` (S7).
+      for (const match of headerText
+        .slice(0, headerText.indexOf(') ->'))
+        .replace(/struct\{[^}]*\}/g, 'struct')
+        .matchAll(/(\w+): (\w+)/g))
+        this.formalTypes.push(
+          /^(?:float|double)$/.test(match[2]!)
+            ? { kind: 'float', bits: 64 }
+            : { kind: 'int', bits: 64, signed: false },
+        );
+      // `frame.va: va_list  # at entry-SP offset -0xN` (the comment is the offset).
+      for (const match of text.matchAll(
+        /^\s*(\w+)\.va: va_list {2}# at entry-SP offset -0x([\da-f]+)$/gm,
+      ))
+        this.vaOffsets.set(match[1]!, BigInt(`0x${match[2]}`));
       const result = /-> (float|double):(?:\s+#.*)?$/.exec(lines[endHeader]!);
       if (result) this.returnType = { kind: 'float', bits: result[1] === 'float' ? 32 : 64 };
       const indents = [0];
@@ -552,6 +587,24 @@ export class Parser {
       return { name, type: field, size, count, array };
     };
     while (this.peek() !== '}') {
+      // A SysV `va_list` member (`__va_list_tag[1]`, 24 bytes, 8-aligned).
+      if (this.peek() === 'va_list') {
+        this.take('va_list');
+        const name = this.take();
+        this.take(';');
+        this.structs.set(VA_LIST_TAG, VA_LIST_LAYOUT);
+        if (!packed) {
+          offset = ((offset + 7n) / 8n) * 8n;
+          if (alignment < 8n) alignment = 8n;
+        }
+        fields.set(name, {
+          offset,
+          type: { kind: 'pointer', to: { kind: 'struct', name: VA_LIST_TAG } },
+          array: true,
+        });
+        offset += VA_LIST_LAYOUT.size;
+        continue;
+      }
       // An anonymous union: its members start at one offset and share storage.
       if (this.peek() === 'union') {
         this.take('union');
@@ -607,7 +660,10 @@ export class Parser {
       }
       const type = this.bodyType(false);
       if (!type || this.peek() === ')' || this.peek() === ',') return;
-      this.symbols.set(this.take(), this.cType(type));
+      const formal = this.take(),
+        ctype = this.cType(type);
+      this.symbols.set(formal, ctype);
+      this.formalTypes.push(ctype);
       if (this.peek() === ',') this.take(',');
     }
   }
@@ -743,12 +799,17 @@ export class Parser {
       }
       // `frame.local_N: T` declares the member at entry-SP offset -N.
       this.take('.');
+      // `frame.va: va_list` (S7) states its offset in its comment.
       const field = this.take(),
-        match = /^local_([\da-f]+)$/.exec(field);
+        match =
+          /^local_([\da-f]+)$/.exec(field) ??
+          (field === 'va' && this.vaOffsets.has(token)
+            ? [field, this.vaOffsets.get(token)!.toString(16)]
+            : null);
       this.take(':');
       const type = this.bodyType(true);
       assert.ok(match && type, 'Unsupported frame member declaration');
-      const scalar = type.scalar === 'array' ? null : this.cType(type);
+      const scalar = type.scalar === 'array' || type.scalar === 'va_list' ? null : this.cType(type);
       assert.ok(scalar === null || scalar.kind === 'int' || scalar.kind === 'float');
       this.frameMembers.set(`${token}.${field}`, {
         offset: this.frameSizes.get(token)! - BigInt(`0x${match[1]}`),
@@ -875,7 +936,23 @@ export class Parser {
     }
     if (this.peek() === '(') {
       this.position--;
-      this.ops.push({ kind: 'effect', expression: this.expression() });
+      const expression = this.expression();
+      // SysV (S7): `va_start(frame.va, last)` initializes a `va_list` object.
+      if (expression.kind === 'call' && expression.name === 'va_start') {
+        const [gp, fp] = vaOffsets(this.formalTypes);
+        this.ops.push({
+          kind: 'effect',
+          expression: {
+            kind: 'call',
+            name: 'va_start_list',
+            args: [
+              expression.args[0]!,
+              { kind: 'literal', value: gp },
+              { kind: 'literal', value: fp },
+            ],
+          },
+        });
+      } else this.ops.push({ kind: 'effect', expression });
       this.take('\n');
       return;
     }
@@ -940,6 +1017,26 @@ export class Parser {
     // `va_start(va, last);` sets `va` to the first anonymous argument's address.
     if (token === 'va_start') {
       this.take('(');
+      // SysV (S7): `va_start(frame.va, last);` initializes a `va_list` object.
+      if (this.tokens[this.position + 1] !== ',' && this.tokens[this.position + 1] !== ')') {
+        const list = this.expression();
+        if (this.peek() === ',') {
+          this.take(',');
+          this.expression();
+        }
+        this.take(')');
+        this.take(';');
+        const [gp, fp] = vaOffsets(this.formalTypes);
+        this.ops.push({
+          kind: 'effect',
+          expression: {
+            kind: 'call',
+            name: 'va_start_list',
+            args: [list, { kind: 'literal', value: gp }, { kind: 'literal', value: fp }],
+          },
+        });
+        return;
+      }
       const name = this.take();
       if (this.peek() === ',') {
         this.take(',');
@@ -1363,7 +1460,7 @@ export class Parser {
         assert.ok(
           member?.type.kind === 'int' ||
             member?.type.kind === 'float' ||
-            (member?.type.kind === 'pointer' && !member.array),
+            member?.type.kind === 'pointer',
           `Undeclared struct member ${field}`,
         );
         const address: Expr = {
@@ -1375,8 +1472,14 @@ export class Parser {
         const memberType = member.type;
         expression =
           memberType.kind === 'pointer'
-            ? // A pointer member is its 64-bit target address.
-              { ...this.read(address, { kind: 'int', bits: 64, signed: false }), ctype: memberType }
+            ? member.array
+              ? // An array of structures (`va_list`) decays to its first element.
+                { kind: 'cast', type: memberType, value: address }
+              : // A pointer member is its 64-bit target address.
+                {
+                  ...this.read(address, { kind: 'int', bits: 64, signed: false }),
+                  ctype: memberType,
+                }
             : member.array
               ? { kind: 'cast', type: { kind: 'pointer', to: memberType }, value: address }
               : this.read(address, memberType);
@@ -1396,7 +1499,35 @@ export class Parser {
           left: expression,
           right: { kind: 'literal', value: member.offset },
         };
-        expression = member.type ? this.read(address, member.type) : address;
+        if (field === 'va' && this.vaOffsets.has(expression.name) && this.peek() === '[') {
+          // `frame.va[k].gp_offset` (S7): a field of the k-th `__va_list_tag`.
+          this.take('[');
+          const index = this.expression();
+          this.take(']');
+          this.take('.');
+          const name = this.take(),
+            item = VA_LIST_LAYOUT.fields.get(name);
+          assert.ok(item, `Undeclared va_list field ${name}`);
+          expression = this.read(
+            {
+              kind: 'binary',
+              op: '+',
+              left: address,
+              right: {
+                kind: 'binary',
+                op: '+',
+                left: {
+                  kind: 'binary',
+                  op: '*',
+                  left: index,
+                  right: { kind: 'literal', value: 24n },
+                },
+                right: { kind: 'literal', value: item.offset },
+              },
+            },
+            item.type.kind === 'int' ? item.type : { kind: 'int', bits: 64, signed: false },
+          );
+        } else expression = member.type ? this.read(address, member.type) : address;
       } else return expression;
     }
   }
@@ -2000,6 +2131,28 @@ export function execute(
       const area = inputs.get('...');
       assert.ok(area !== undefined, 'Missing explicit variadic area input (...)');
       return area;
+    }
+    // SysV `va_start(list, last)`: the caller's anonymous register arguments
+    // are saved at `inputs.get('...registers')` (integers at 8i, vectors at
+    // 48 + 16j) and its stack ones start at `inputs.get('...')`.
+    if (name === 'va_start_list') {
+      const list = number(args[0]),
+        overflow = inputs.get('...'),
+        save = inputs.get('...registers');
+      assert.ok(overflow !== undefined && save !== undefined, 'Missing SysV variadic inputs');
+      const fields: [bigint, bigint, number][] = [
+        [0n, number(args[1]), 4],
+        [4n, number(args[2]), 4],
+        [8n, overflow, 8],
+        [16n, save, 8],
+      ];
+      for (const [offset, value, bytes] of fields)
+        for (let i = 0; i < bytes; i++) {
+          const cell = list + offset + BigInt(i);
+          memory.set(cell, Number((value >> BigInt(8 * i)) & 255n));
+          uninitializedStack.delete(cell);
+        }
+      return null;
     }
     if (
       /^(?:bv_|fp_|cast_|flag_|vector_|extract_bits$|insert_bits$|concat_low_first$|signed_value$|wrap$)/.test(

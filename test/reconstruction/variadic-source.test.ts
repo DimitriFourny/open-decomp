@@ -248,3 +248,66 @@ for (const variant of ['missing_store', 'direct_use'] as const)
       assert.doesNotMatch(output.text, /\.\.\.|va_start/, output.text);
     }
   });
+
+// SysV AMD64 (S7): fixture_variadic's va_start lowering (rsi..r9 saved, the
+// al-guarded xmm0..7 saves, va_list = {8, 48, entry SP + 8, save area}) is
+// va_start(frame.va, count) on a va_list frame member.
+test('elf-x86_64-symbols: fixture_variadic prints ... and va_start on a va_list frame member', async (t) => {
+  const p = await project(t, 'elf-x86_64-symbols');
+  const fn = p.functions.find((candidate) => candidate.entry.value === 0x4019c0n);
+  assert.ok(fn);
+  for (const emitter of ['c-like', 'python-like'] as const) {
+    const result: StoredDecompilation = p.payload(
+      (await p.decompile(fn.id, { options: { emitter } })).result,
+    ).result;
+    const emission: StoredDecompilation['data']['emission'] = result.data.emission;
+    assert.doesNotMatch(
+      emission.text,
+      /\bentry_sp\b|uint128_t|unknown_value\("bits8_t"/,
+      emission.text,
+    );
+    assert.match(emission.text, /\(\w+ \w+, \.\.\.\)|\(\w+: \w+, \.\.\.\)/, emission.text);
+    assert.match(emission.text, /va_start\(frame\.va, \w+\)/, emission.text);
+    assert.match(emission.text, /frame\.va\[0\]\.fp_offset/, emission.text);
+    assert.ok(
+      emission.local_validation?.some(
+        (record) => record.kind === 'presentation' && record.rule === 'va_start',
+      ),
+    );
+    const formals = emittedFormals(emission);
+    assert.equal(formals.length, 1, emission.text);
+    // 13 doubles: xmm0..7 in the register save area, the rest on the stack.
+    const values = [...doubles, 3.25, -7, 2 ** 60];
+    const save = 0xa000n;
+    for (let count = 0; count <= 12; count++) {
+      const memory = new Map<bigint, number>();
+      for (let byte = 0n; byte < 176n; byte++) memory.set(save + byte, 0x5a);
+      values
+        .slice(0, count)
+        .forEach((value, index) =>
+          writeWord(
+            memory,
+            index < 8 ? save + 48n + 16n * BigInt(index) : area + 8n * BigInt(index - 8),
+            doubleBits(value),
+          ),
+        );
+      const observation = execute(
+        emission,
+        new Map([
+          [formals[0]!.statement_id, BigInt(count)],
+          ['...', area],
+          ['...registers', save],
+        ]),
+        memory,
+        0n,
+        new Map(),
+        new Map(),
+        new Map(),
+        acknowledgeRequirements(emission),
+      );
+      const expected = values.slice(0, count).reduce((sum, value) => sum + value, 0);
+      assert.equal(observation.exit, 'machine_return', `${emitter} ${count}`);
+      assert.deepEqual(observation.values, [doubleBits(expected)], `${emitter} ${count}`);
+    }
+  }
+});
