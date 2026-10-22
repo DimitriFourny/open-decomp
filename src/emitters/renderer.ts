@@ -1867,9 +1867,10 @@ export class Renderer {
     }
     for (const tail of this.program.tails.values())
       if (
-        tail.boundary.signature ||
-        tail.boundary.argument_list_complete !== false ||
-        this.likelyArgumentList(tail.boundary)
+        tail.target !== null &&
+        (tail.boundary.signature ||
+          tail.boundary.argument_list_complete !== false ||
+          this.likelyArgumentList(tail.boundary))
       )
         closed.add(this.addressKey(tail.target));
     this.closedCallees = closed;
@@ -2566,27 +2567,30 @@ export class Renderer {
     return { message, skip, arity };
   }
 
-  private sourceCallee(node: Extract<Instruction, { kind: 'call' }>): string {
-    if (node.target.kind === 'indirect') {
-      const value = node.target.value;
-      // Source view: an inline same-width bitcast of a pointer local carries the
-      // same target bits; the function-pointer cast then applies to the local.
-      const alias = this.inline.has(value.id) ? this.program.expressions.get(value.id) : undefined;
-      for (const candidate of alias?.kind === 'cast' &&
-      alias.op === 'bitcast' &&
-      this.sourceView &&
-      bitWidth(alias.value.type) === bitWidth(value.type)
-        ? [value, alias.value]
-        : [value]) {
-        if (!this.program.source || this.inline.has(candidate.id)) continue;
-        const id = this.variableTypeId(candidate);
-        const type = id && this.typeRecords.get(id)?.definition;
-        // Callable context retains the declared pointer local; value() converts
-        // pointers to integer bits for machine arithmetic, not invocation.
-        if (type && type.kind === 'pointer') return this.local(candidate);
-      }
-      return this.value(value);
+  /** A runtime call target in callable context: a declared pointer local
+   * prints as itself, any other value as its integer bits. */
+  private indirectCallee(value: Value): string {
+    // Source view: an inline same-width bitcast of a pointer local carries the
+    // same target bits; the function-pointer cast then applies to the local.
+    const alias = this.inline.has(value.id) ? this.program.expressions.get(value.id) : undefined;
+    for (const candidate of alias?.kind === 'cast' &&
+    alias.op === 'bitcast' &&
+    this.sourceView &&
+    bitWidth(alias.value.type) === bitWidth(value.type)
+      ? [value, alias.value]
+      : [value]) {
+      if (!this.program.source || this.inline.has(candidate.id)) continue;
+      const id = this.variableTypeId(candidate);
+      const type = id && this.typeRecords.get(id)?.definition;
+      // Callable context retains the declared pointer local; value() converts
+      // pointers to integer bits for machine arithmetic, not invocation.
+      if (type && type.kind === 'pointer') return this.local(candidate);
     }
+    return this.value(value);
+  }
+
+  private sourceCallee(node: Extract<Instruction, { kind: 'call' }>): string {
+    if (node.target.kind === 'indirect') return this.indirectCallee(node.target.value);
     const key = this.addressKey(node.target.address),
       previous = this.sourceNames.get(key);
     if (previous) return previous;
@@ -4398,7 +4402,7 @@ export class Renderer {
         'indirect call target presented through a function-pointer type spelled from the projected argument and result types; an open arity keeps a trailing ellipsis and the remainder marker',
         [node.target.value.id],
       );
-    if (pointerCast) target = this.functionPointer(node, projection, target, open);
+    if (pointerCast) target = this.functionPointer(projection, target, open);
     if (open && this.sourceView) {
       const stated = pointerCast
         ? !projection.signature && projection.arguments.length > 0
@@ -4512,23 +4516,22 @@ export class Renderer {
   }
 
   /** C: `((R (*)(T0, T1, ...))target)`; Python-like: `function_pointer(target, "R (*)(...)")`.
-   * The result type is the single projected result, void only for a projected
-   * source/inferred interface without results, and unknown_result otherwise. */
+   * The result type is `result` when given, else the single projected result,
+   * void only for a projected source/inferred interface without results, and
+   * unknown_result otherwise. */
   private functionPointer(
-    node: Extract<Instruction, { kind: 'call' }>,
     projection: BoundaryProjection,
     target: string,
     open: boolean,
+    result: string = projection.results.length === 1
+      ? projection.signature
+        ? this.sourceType(projection.signature.signature.return_type)
+        : this.valueType(projection.results[0]!)
+      : projection.results.length === 0 && projection.kind !== 'physical'
+        ? 'void'
+        : 'unknown_result',
   ): string {
     const declared = projection.signature?.signature;
-    const result =
-      projection.results.length === 1
-        ? declared
-          ? this.sourceType(declared.return_type)
-          : this.valueType(projection.results[0]!)
-        : projection.results.length === 0 && projection.kind !== 'physical'
-          ? 'void'
-          : 'unknown_result';
     const parameters = declared
       ? declared.parameters.map((_, index) => this.callParameterType(projection, index))
       : projection.arguments.map((value) => {
@@ -8210,11 +8213,45 @@ export class Renderer {
         // The preceding noreturn call already ends this path in source text; the
         // trap keeps its record and (header) mapping.
         if (control.kind === 'trap' && this.noreturnCallExit(control, block)) break;
-        const tail =
-          control.kind === 'indirect' && control.tail_call
-            ? this.program.tails.get(control.id)
-            : undefined;
-        if (tail && this.program.source && control.kind === 'indirect') {
+        const tail = control.kind === 'indirect' ? this.program.tails.get(control.id) : undefined;
+        // Source view: an indirect exit proven to be a tail call of its runtime
+        // target prints as a function-pointer call that this function returns,
+        // or as a call and a plain return when the function returns nothing.
+        if (
+          tail?.target === null &&
+          control.kind === 'indirect' &&
+          this.sourceView &&
+          this.localValidation.presentation(
+            'function_pointer_call',
+            control.id,
+            "indirect tail-call target presented through a function-pointer type spelled from the observed argument types and this function's own result type (void when it returns nothing); an open arity keeps a trailing ellipsis",
+            [control.target.id],
+          )
+        ) {
+          const voidResult = this.returnSpelling === 'void';
+          const arguments_ = tail.boundary.arguments.map((value) => {
+            ids.push(value.id);
+            return this.valueLiteral(value)?.text ?? this.value(value);
+          });
+          const open = this.openList(tail.boundary);
+          if (open) {
+            this.openRemainder(
+              arguments_.length ? 'unknown_argument_remainder' : 'unknown_arguments',
+              'Unresolved remainder of a call interface; not zero arguments or a purity claim.',
+            );
+            if (!arguments_.length) arguments_.push(this.inlineEllipsis());
+          }
+          ids.push(control.target.id);
+          const target = this.functionPointer(
+            tail.boundary,
+            this.indirectCallee(control.target),
+            open,
+            voidResult ? 'void' : this.returnSpelling,
+          );
+          this.tailStatement(depth, `${target}(${this.writer.join(arguments_)})`, voidResult);
+          break;
+        }
+        if (tail && tail.target !== null && this.program.source && control.kind === 'indirect') {
           const message = this.sourceView
             ? this.input.source?.objc?.messages.get(control.id)
             : undefined;

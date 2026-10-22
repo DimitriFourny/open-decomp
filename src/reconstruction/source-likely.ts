@@ -61,7 +61,8 @@ function formalUses(
   for (const block of program.blocks.values()) {
     const control = block.control;
     if (control.kind === 'switch') switched.add(control.value.id);
-    if (control.kind === 'indirect' && control.tail_call) targets.add(control.target.id);
+    if (control.kind === 'indirect' && (control.tail_call || program.tails.has(control.id)))
+      targets.add(control.target.id);
     for (const node of block.statements) {
       context.checkpoint(1);
       if (!program.retained.has(node.id)) continue;

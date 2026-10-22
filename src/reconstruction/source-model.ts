@@ -164,6 +164,9 @@ export interface SourceEvidence {
   /** Proven-context/import-tail refinements and their propagation, source only. */
   readonly source_callees?: readonly InferredCallee[];
   readonly addresses: readonly SourceAddress[];
+  /** Virtual-address ranges of the image's executable mappings. Absent: every
+   * constant may be a code address. */
+  readonly executable_ranges?: readonly { readonly start: bigint; readonly end: bigint }[];
   /** Explicit optional-dependency limitations; never substitutes a zero interface. */
   readonly diagnostics?: readonly Diagnostic[];
   readonly evidence?: readonly Evidence[];
