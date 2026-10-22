@@ -8822,10 +8822,19 @@ export class Renderer {
         'the FP-environment assumption prints no comment: emitted source without #pragma STDC FENV_ACCESS ON presumes nearest-even rounding and masked FP traps (C11 7.6.1p2), recorded as the fp_default_environment ABI requirement; full ID, explanation and sites remain in requirements metadata',
         environment.map((requirement) => requirement.id),
       );
+    // The premise is function-wide; its provenance is the first FP-environment
+    // site the fp_environment requirement already lists, mapped to the
+    // signature (the function origin would repeat every instruction of the
+    // function).
+    const premiseSite = environmentOmitted
+      ? environment
+          .flatMap((requirement) => requirement.sites)
+          .find((site) => this.origins.has(site.subject_ids[0]!))
+      : undefined;
     if (environmentOmitted)
       this.localValidation.requireAbi(
         'fp_default_environment',
-        [this.input.function.id],
+        [premiseSite?.subject_ids[0] ?? this.input.function.id],
         'Floating-point operations assume the default environment, nearest-even rounding with FP traps masked, as C11 7.6.1p2 presumes for code compiled with FENV_ACCESS off.',
       );
     else
@@ -9114,6 +9123,13 @@ export class Renderer {
     if (environmentOmitted)
       for (const requirement of environment)
         mapSites(requirement, this.headerStart, this.headerEnd);
+    if (premiseSite && !this.fpPresentation.guards.has(premiseSite.subject_ids[0]!))
+      this.map(
+        this.origins.get(premiseSite.subject_ids[0]!)!,
+        this.headerStart,
+        premiseSite.subject_ids,
+        this.headerEnd,
+      );
     const formals = new Set(parameters.map((parameter) => parameter.value.id));
     const stack = this.program.source?.stack;
     if (stack?.kind === 'private') {

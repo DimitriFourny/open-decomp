@@ -266,12 +266,14 @@ for (const language of LANGUAGES)
     assert.equal(premise.length, 1);
     assert.equal(premise[0]!.sites.length, 1);
     assert.match(premise[0]!.explanation, /C11 7\.6\.1p2/);
-    // The premise anchors at the signature.
+    // The premise anchors at its first FP-environment site and at the signature.
     const name = identifiers.find((item) => item.entity_id === f.ir.id)!.identifier;
-    for (const span of premise[0]!.output_spans) {
-      const line = emission.text.slice(span.start, span.end);
-      assert.ok(line.includes(name), line);
-    }
+    assert.ok(
+      premise[0]!.output_spans.some((span) =>
+        emission.text.slice(span.start, span.end).includes(`${name}(`),
+      ),
+    );
+    assert.ok(premise[0]!.output_spans.length <= 2);
     const checked = emit(f.ir, { source: f.source }, language, 'checked').emission;
     assert.match(checked.text, /Requirement requirement_[0-9a-f]+ \(assumption\)/);
     assert.ok(
