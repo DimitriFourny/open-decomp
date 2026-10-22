@@ -22,9 +22,12 @@ type RegisterLocation = Extract<AbiLocation, { kind: 'register' }>;
  * register result (observed native results remain unless `void_like` names
  * the rule that makes the function void-like: `incidental_result` when the
  * integer register qualifies, but no exit path establishes it deliberately,
- * no caller demands it and the FP carrier is unchanged or undefined on every
- * exit; the register stays in exit metadata). Null means no decision: the
- * caller's existing projection applies unchanged. */
+ * no caller demands it and the FP carrier is unchanged, undefined or
+ * incidental on every exit; the register stays in exit metadata).
+ * `incidental_floating` explains why the untyped FP carrier holds only a
+ * vector copy or fill temporary and is no result (an `incidental_result`
+ * premise of its own). Null means no decision: the caller's existing
+ * projection applies unchanged. */
 export type SourcePrimaryResult =
   | {
       readonly kind: 'float';
@@ -32,12 +35,13 @@ export type SourcePrimaryResult =
       readonly type: DataType;
       readonly rejected: string;
     }
-  | { readonly kind: 'integer'; readonly reason?: string }
+  | { readonly kind: 'integer'; readonly reason?: string; readonly incidental_floating?: string }
   | {
       readonly kind: 'explicit' | 'none';
       readonly written: boolean;
       readonly reason: string;
       readonly void_like?: 'incidental_result' | 'indirect_result';
+      readonly incidental_floating?: string;
     };
 
 type ExitState =
@@ -79,7 +83,9 @@ const scalarFloat = (type: DataType): boolean =>
  * last on every exit path, then a native written-result interface naming exactly
  * one of them; otherwise the explicit form remains. An integer-only qualification
  * also keeps the explicit form when the untyped FP register is written after it
- * on every exit path. */
+ * on every exit path, unless the FP register holds only a vector copy or fill
+ * temporary (the datum of a >=128-bit store); then the integer register decides
+ * as if the FP register were undefined. */
 export function selectSourcePrimaryResult(
   input: SourcePrimaryResultInput,
 ): SourcePrimaryResult | null {
@@ -626,6 +632,104 @@ export function selectSourcePrimaryResult(
     }
     return `${root} holds only ${[...kinds].join(', ')} on its exit paths; no path moves it back after a clobber, copies another argument into it, passes through a final call's result, or computes a value consumed only by exits`;
   };
+  // Values that are, through lossless transport, the datum of a store of at
+  // least 128 bits (a vector copy or fill), and the instructions that define
+  // the constants among them. Folding gives each exit cell of a vector fill
+  // its own constant; only the defining instruction still links that cell to
+  // the stored datum.
+  let vectorData:
+    | {
+        readonly values: ReadonlySet<string>;
+        readonly instructions: ReadonlySet<string>;
+        readonly definitions: ReadonlyMap<string, BlockRegion['statements'][number]>;
+      }
+    | undefined;
+  const vectorStoreData = (): NonNullable<typeof vectorData> => {
+    if (vectorData) return vectorData;
+    const values = new Set<string>(),
+      instructions = new Set<string>(),
+      definitions = new Map<string, BlockRegion['statements'][number]>(),
+      pending: Value[] = [];
+    for (const block of blocks.values())
+      for (const node of block.statements) {
+        context.checkpoint(1);
+        if (node.kind === 'assign') definitions.set(node.result.id, node);
+        else if (node.kind === 'store' && bitWidth(node.value.type) >= 128)
+          pending.push(node.value);
+      }
+    while (pending.length) {
+      context.checkpoint(1);
+      const value = pending.pop()!;
+      if (values.has(value.id)) continue;
+      values.add(value.id);
+      const expression = expressions.get(value.id);
+      if (expression?.kind === 'constant')
+        for (const id of definitions.get(value.id)?.provenance.instruction_ids ?? [])
+          instructions.add(id);
+      else if (expression?.kind === 'cast' && transportCasts.includes(expression.op))
+        pending.push(expression.value);
+      else if (expression?.kind === 'extract') pending.push(expression.value);
+      else if (expression?.kind === 'insert') pending.push(expression.base, expression.value);
+      else if (expression?.kind === 'concat') pending.push(...expression.values);
+      else if (!expression) pending.push(...(sources.get(value.id) ?? []));
+    }
+    vectorData = { values, instructions, definitions };
+    return vectorData;
+  };
+  // Reason the FP result register is an incidental vector copy or fill
+  // temporary, or undefined. Callers must not demand it; on every exit, each
+  // slice leaf of every FP-root cell is the datum of a >=128-bit store, a
+  // constant defined by an instruction that also defines such a datum, or a
+  // call output that is not the path's final action; unchanged entry bits and
+  // undefined cells are neutral, and some exit holds a stored datum. A scalar
+  // FP value stored at its own width never qualifies. Checked before any
+  // untyped-FP result rule, which only applies when this one does not.
+  const incidentalFloatingCarrier = (): string | undefined => {
+    const root = input.floating.register.root;
+    if (input.demands.some((register) => register.root === root)) return undefined;
+    const data = vectorStoreData();
+    if (!data.values.size) return undefined;
+    let stored = false;
+    for (const block of exits)
+      for (const cell of block.register_exit) {
+        if (cell.register.root !== root) continue;
+        const walked = walk(cell.value, root);
+        if (walked.kind === 'undefined') continue;
+        if (walked.kind === 'frame') return undefined;
+        let paths: { value: Value; target: string; leaves: ReadonlySet<string> }[] | undefined;
+        for (const value of walked.constants) {
+          const definition = data.definitions.get(value.id);
+          if (
+            !data.values.has(value.id) &&
+            !definition?.provenance.instruction_ids.some((id) => data.instructions.has(id))
+          )
+            return undefined;
+          stored = true;
+        }
+        for (const value of walked.leaves) {
+          if (data.values.has(value.id)) {
+            stored = true;
+            continue;
+          }
+          if (!callOutputs.has(value.id)) return undefined;
+          // The call output must be followed by an effect on every exit path
+          // that carries it; a path that does not reach it proves nothing.
+          paths ??= exitPaths(cell.value, block.id).map((path) => {
+            const slice = walk(path.value, root);
+            return {
+              ...path,
+              leaves: new Set(slice.kind === 'written' ? slice.leaves.map((leaf) => leaf.id) : []),
+            };
+          });
+          const carrying = paths.filter((path) => path.leaves.has(value.id));
+          if (!carrying.length || carrying.some((path) => finalCall(value, path.target, block.id)))
+            return undefined;
+        }
+      }
+    return stored
+      ? `${root} holds only the datum of a vector store of at least 128 bits (copy or fill), its folded constants or call results left in place before later effects on its exit paths`
+      : undefined;
+  };
   const exitValue = (block: BlockRegion, location: RegisterLocation): Value | undefined =>
     block.register_exit.find(
       (binding) =>
@@ -752,11 +856,21 @@ export function selectSourcePrimaryResult(
         written,
         reason: `callers consume ${floatingName} while only ${integerName} qualifies`,
       };
+    // A vector copy or fill temporary in the untyped FP register is no
+    // result: the integer register decides as if the FP carrier were
+    // undefined. Untyped FP result rules apply only when it is not.
+    const floatingIncidental =
+      !integerDemanded &&
+      floatingStates.every((item) => !('type' in item) || item.type === undefined) &&
+      !floatingStates.every((item) => item.kind === 'unchanged' || item.kind === 'undefined')
+        ? incidentalFloatingCarrier()
+        : undefined;
     // Without IEEE type evidence the FP register still contradicts an integer
     // result when it is written on every exit, after the integer register on
     // every exit path (an untyped reload into the FP result register before
     // returning): the explicit form remains.
     if (
+      !floatingIncidental &&
       !integerDemanded &&
       floatingStates.every(
         (item) => item.kind === 'written' || item.kind === 'constant' || item.kind === 'untyped',
@@ -783,12 +897,20 @@ export function selectSourcePrimaryResult(
       ![...blocks.values()].some(
         (block) => block.control.kind === 'indirect' && block.control.tail_call,
       ) &&
-      floatingStates.every((item) => item.kind === 'unchanged' || item.kind === 'undefined')
+      (floatingIncidental !== undefined ||
+        floatingStates.every((item) => item.kind === 'unchanged' || item.kind === 'undefined'))
         ? incidentalInteger()
         : undefined;
+    const floating = floatingIncidental ? { incidental_floating: floatingIncidental } : {};
     return incidental
-      ? { kind: 'none', written: true, reason: incidental, void_like: 'incidental_result' }
-      : { kind: 'integer' };
+      ? {
+          kind: 'none',
+          written: true,
+          reason: incidental,
+          void_like: 'incidental_result',
+          ...floating,
+        }
+      : { kind: 'integer', ...floating };
   } else
     return {
       kind: 'none',
