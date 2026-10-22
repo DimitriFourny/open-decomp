@@ -249,8 +249,10 @@ export interface SourceLocal {
 /** An entry-backed view shares original stack bytes across every region. Its
  * bounds describe observed affine accesses, not a proven dynamic allocation.
  * Source view: `object` is this activation's frame kept as memory, printed as
- * one local object of `size` bytes ending at the entry SP; `minimum_offset` is
- * its entry-SP offset. Its `entry` is the live entry SP when addresses at or
+ * one local object of `size` bytes ending at entry-SP offset
+ * `minimum_offset + size` (the entry SP, or below it where only hidden saves
+ * and independent members follow); `minimum_offset` is its entry-SP offset.
+ * Its `entry` is the live entry SP when addresses at or
  * above the entry SP (incoming arguments, the return address, the caller's
  * frame) remain: those keep the `entry_sp + k` form beside the object. */
 export type SourceStackStorage = {
@@ -323,6 +325,12 @@ export interface FrameMember {
   /** SysV `va_list` (S7): the 24-byte member `va`; every access inside it is
    * exactly one of its fields. */
   readonly va?: true;
+  /** Source view (A3): the member is an object of its own (entity `id`),
+   * declared and addressed outside the frame object: exactly the bytes every
+   * escape reaching it can designate, bounded by a proven save slot or the
+   * entry SP; no access crosses its bounds and no escaped or indexed address
+   * lies inside it except at its start. */
+  readonly independent?: { readonly id: string };
 }
 /** Source view (S4): the incoming stack-argument bytes this activation keeps
  * as memory (a by-value aggregate modified in place), printed as one struct

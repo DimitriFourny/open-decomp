@@ -324,6 +324,11 @@ export class Parser {
   /** Local frame objects (`struct { ... } frame;`, Python `frame = stack_frame(...)`):
    * the name designates the object, `&frame` its address. */
   private readonly objects = new Set<string>();
+  /** Independent frame locals (A3) declared without an initializer whose
+   * address the text takes (`&local_34`, Python `address_of(local_34)`): each
+   * is fresh stack storage that its name reads and writes. */
+  private readonly addressed = new Set<string>();
+  private readonly cells = new Map<string, Extract<CType, { kind: 'int' | 'float' }>>();
   /** Python-like frame objects: their size and annotated members (`frame.local_38: T`);
    * a member's type is null for a byte array. */
   private readonly frameSizes = new Map<string, bigint>();
@@ -460,6 +465,7 @@ export class Parser {
         indents.pop();
         this.tokens.push('DEDENT');
       }
+      this.scanAddressed();
       this.pythonBlock();
       assert.equal(this.position, this.tokens.length);
       return;
@@ -478,6 +484,7 @@ export class Parser {
         this.tokens.push(match[0]);
       }
     }
+    this.scanAddressed();
     // Partial struct declarations precede the function; the body opens at the
     // first brace after them.
     while (['typedef', 'struct', 'extern', 'static'].includes(this.peek())) {
@@ -527,6 +534,62 @@ export class Parser {
     this.header(start);
     this.position = start;
     this.block([]);
+  }
+
+  /** Names whose address the text takes as a whole: a unary C `&name` not
+   * followed by a member, element or field, or Python `address_of(name)`. */
+  private scanAddressed(): void {
+    const identifier = /^[A-Za-z_]\w*$/;
+    for (let index = 0; index + 1 < this.tokens.length; index++) {
+      const tokens = this.tokens;
+      if (this.python) {
+        if (
+          tokens[index] === 'address_of' &&
+          tokens[index + 1] === '(' &&
+          tokens[index + 3] === ')'
+        )
+          this.addressed.add(tokens[index + 2]!);
+      } else if (
+        tokens[index] === '&' &&
+        identifier.test(tokens[index + 1]!) &&
+        !['[', '.', '->'].includes(tokens[index + 2] ?? '') &&
+        !(index > 0 && /^(?:[A-Za-z_\d]\w*|\)|\])$/.test(tokens[index - 1]!))
+      )
+        this.addressed.add(tokens[index + 1]!);
+    }
+  }
+
+  /** A3: an independent frame local, `T name;` (Python `name: T`) whose
+   * address is taken, or a byte array `uint8_t name[N];` (Python
+   * `name: array<uint8_t, N>`): fresh stack storage that the name designates;
+   * a scalar's name reads and writes it. */
+  private localObject(
+    name: string,
+    type: { scalar: string; pointers: number },
+    count: bigint | null,
+    end: string,
+  ): void {
+    const element = this.cType(count === null ? type : { scalar: 'uint8_t', pointers: 0 });
+    assert.ok(element.kind === 'int' || element.kind === 'float', 'Unsupported local object');
+    this.symbols.set(name, { kind: 'pointer', to: element });
+    if (count === null) {
+      this.scalars.add(name);
+      this.cells.set(name, element);
+    } else this.objects.add(name);
+    this.take(end);
+    this.ops.push({
+      kind: 'assign',
+      names: [name],
+      tuple: false,
+      expression: {
+        kind: 'call',
+        name: 'stack_storage',
+        args: [
+          { kind: 'literal', value: count ?? BigInt(element.bits / 8) },
+          { kind: 'literal', value: 16n },
+        ],
+      },
+    });
   }
 
   /** `[typedef] struct NAME { T field; uint8_t gap[N]; ... } [NAME];` laid out
@@ -974,15 +1037,41 @@ export class Parser {
       this.take(':');
       const type = this.bodyType(true);
       assert.ok(type, 'Unsupported source local annotation');
+      if (!tuple && this.peek() === '\n' && type.scalar === 'array') {
+        // `name: array<uint8_t, N>`: N is the token before the closing `>`.
+        this.localObject(names[0]!, type, BigInt(this.tokens[this.position - 2]!), '\n');
+        return;
+      }
+      if (!tuple && this.peek() === '\n' && this.addressed.has(names[0]!)) {
+        this.localObject(names[0]!, type, null, '\n');
+        return;
+      }
       this.symbols.set(names[0]!, this.cType(type));
+    }
+    if (!tuple && this.cells.has(names[0]!) && this.peek() === '=') {
+      this.position--;
+      this.memoryStatement('\n');
+      return;
     }
     const expression = this.peek() === '=' ? (this.take('='), this.expression()) : null;
     this.take('\n');
     if (expression?.kind === 'call' && expression.name === 'stack_frame') {
-      const size = expression.args[0];
+      const size = expression.args[0],
+        end = expression.args[2];
       assert.ok(size?.kind === 'literal' && typeof size.value === 'bigint');
+      // `stack_frame(SIZE, ALIGNMENT, END)` (A3) ends at entry-SP offset END.
+      let below = 0n;
+      if (end) {
+        assert.ok(
+          end.kind === 'unary' &&
+            end.op === '-' &&
+            end.value.kind === 'literal' &&
+            typeof end.value.value === 'bigint',
+        );
+        below = end.value.value;
+      }
       this.objects.add(names[0]!);
-      this.frameSizes.set(names[0]!, size.value);
+      this.frameSizes.set(names[0]!, size.value + below);
     }
     this.ops.push({ kind: 'assign', names, expression, tuple });
   }
@@ -1063,7 +1152,8 @@ export class Parser {
       (/^[A-Za-z_]\w*$/.test(token) &&
         (this.peek() === '[' ||
           this.peek() === '->' ||
-          (this.peek() === '.' && this.objects.has(token))))
+          (this.peek() === '.' && this.objects.has(token)) ||
+          (this.peek() === '=' && this.cells.has(token))))
     ) {
       this.position--;
       this.memoryStatement(';');
@@ -1272,6 +1362,18 @@ export class Parser {
       const type = this.bodyType(false);
       if (type) {
         names = [this.take()];
+        if (this.peek() === '[') {
+          // `uint8_t name[N];` (A3): a byte-array local of its own.
+          this.take('[');
+          const count = BigInt(this.take());
+          this.take(']');
+          this.localObject(names[0]!, type, count, ';');
+          return;
+        }
+        if (this.peek() === ';' && this.addressed.has(names[0]!)) {
+          this.localObject(names[0]!, type, null, ';');
+          return;
+        }
         this.symbols.set(names[0]!, this.cType(type));
       } else {
         this.take(token);
@@ -1876,6 +1978,8 @@ export class Parser {
         args.push({ kind: 'call', name: 'unknown_argument_remainder', args: [] });
       return { kind: 'call', name: token, args };
     }
+    const cell = this.cells.get(token);
+    if (cell) return this.read({ kind: 'ref', name: token }, cell);
     if (this.scalars.has(token)) return this.dereference({ kind: 'ref', name: token });
     return { kind: 'ref', name: token };
   }
