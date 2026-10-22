@@ -476,12 +476,21 @@ is unchanged.
 
 After inlining, both source dialects may combine an initial single-entry chain
 of expression-only loop tests. Short-circuit conditions preserve load order and
-all tests leave to the same lexical continuation without exit copies. Assignment,
-comma and copy-smuggling conditional expressions are never introduced into loop
-conditions. Stages needing temporaries, exit copies, effects or shared entries
-remain explicit; unrelated early returns stay inside the body. `loop_form`
-records the conditions and existing control/move validation remains mandatory.
-Checked rendering is unchanged.
+all tests leave to the same lexical continuation without exit copies.
+Copy-smuggling conditional expressions are never introduced into loop
+conditions. The one exception to expression-only tests is the loop header's own
+statement (`loop_comma_condition`, roadmap 4 L1): a header (or the jump block
+that alone enters its test block) printing exactly one assignment, load or
+single-result call its first test reads prints it inside that test, as for
+`comma_condition` (C `while ((x = p->next) != 0)` or `(x = f(), test)`,
+Python-like only `while (x := p.next) != 0:`); the statement still runs once per
+header entry, immediately before the test. A header with a valid C bottom test
+stays `do`/`while` instead, and a `for` counts the statement's operands as test
+reads. Chained stages leaving on their true arm print the exact complement
+(`x == 0`, not `!(x != 0)`). Stages needing temporaries, exit copies, effects or
+shared entries remain explicit; unrelated early returns stay inside the body.
+`loop_form` records the conditions and existing control/move validation remains
+mandatory. Checked rendering is unchanged.
 
 A single-test loop (`while`, `for` or C `do`/`while`) may print its exit edge's
 copies right after the loop when that edge is the only one from inside the loop
