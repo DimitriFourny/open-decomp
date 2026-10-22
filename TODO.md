@@ -155,13 +155,14 @@ Files that several items touch:
 
 ## M2: Speed rows that match the D8 target
 
-- [ ] **Problem.** The scorecard's cold time adds opening and decompiling, but the target (D8) compares the decompile time after open with Ghidra's whole run (import, analysis and decompiles), and asks for quick first decompiles. The report has neither row, no worker memory figure and no parallel OD lane: the lane header always records `jobs: 1` (`scripts/bench/odbench/lane-od.ts:257`).
+- [x] **Problem.** The scorecard's cold time adds opening and decompiling, but the target (D8) compares the decompile time after open with Ghidra's whole run (import, analysis and decompiles), and asks for quick first decompiles. The report has neither row, no worker memory figure and no parallel OD lane: the lane header always records `jobs: 1` (`scripts/bench/odbench/lane-od.ts:257`).
   - **Change** (`scripts/bench/odbench/`):
     - `od-worker.ts`/`lane-od.ts`: record per binary `open_ms` (`openBinary`, including the T8 job once it exists, with the job's own time as `open_job_ms`), `first10_ms` (wall time from open to the 10th corpus function's result, in corpus order), the existing `decompile_ms_total`, and the peak RSS of every process.
     - `--jobs N`: decompile one binary's functions with N request workers over one opened project (needs T9; until T9 lands it accepts only 1). The lane header records N.
     - `report.ts`, scorecard and section 8: per binary and in total, OD decompile time after open against Ghidra's `cold_ms`, the ratio and the D8 threshold (1.25×); `first10_ms` against 5 s on SQLite; open time and peak RSS as reported values. Keep the existing cold-time row.
   - **Tests:** odbench unit tests in `test/bench/`: the ratio and threshold rows from a synthetic lane, and `--jobs 1` lanes re-render unchanged.
   - **Acceptance:** `bench report` on the existing lanes shows SQLite 121.4 s vs 38.7 s (3.13×) and the total 140 s vs 87 s (1.61×) without a model call; a new `od` run records `first10_ms` and peak RSS.
+  - **Done:** `bench report --lanes od-rm3-final,source --tier full` (from caches) shows SQLite 121.4 s vs 38.7 s (3.13×) and total 140.0 s vs 86.7 s (1.62×; 1.61× is the rounded 140/87); an `od` run (`od-rm4-m2`, loaded host) records `first10_ms`, `open_ms` and per-process peak RSS with texts byte-identical to `od-rm3-final`; `test/bench/odbench-speed.test.ts`.
 
 ## C: Coverage and failures
 
@@ -185,7 +186,7 @@ Files that several items touch:
 
 ### C2: Exhausted validation never degrades the text
 
-- [ ] **Problem:**
+- [x] **Problem:** _(Done: lane `od-rm4-c2` at 10M: brotli `main` 55,953 → 46,419 B, `isDate` 112,543 → 81,332 B, `Incrmerge` 80,331 → 56,081 B, `boundary(` 9/27/23 → 0; every other text byte-identical to `od-rm3-final`; checked view identical; `sqlite3Select` at 40M renders in one attempt per metadata mode, then stops at the evidence catalog bound (C3).)_
   - 59 `boundary("unknown_read_write", {"arm64:x0:0:64", … 60 registers})` statements (67.7 KB) in brotli `main` (9), `isDate` (27) and `sqlite3Fts3Incrmerge` (23);
   - up to 5 full render attempts (5.3M work on `sqlite3Select` at 40M);
   - a latent "A comma statement printed a line" failure behind `sqlite3Select`/`sqlite3Pragma`.
@@ -793,7 +794,7 @@ Files that several items touch:
 
 ### E5: Fold the bitfield-move aliases (SXTB/SXTH/SXTW, SBFIZ/UBFIZ, SBFX)
 
-- [ ] **Problem.** 25 sign-fill selects such as `((x >> 0x1f) & 1 ? 0xffffffffffffffff : 0) & 0xffffffff00000000) | (x & 0xffffffff)` and 5 rotate-as-shift idioms in 15 functions, each 15–35 tokens. Judges cite `btreeOverwriteContent`, `openStatTable` and `fts3MatchinfoLcsCb`.
+- [x] **Problem.** 25 sign-fill selects such as `((x >> 0x1f) & 1 ? 0xffffffffffffffff : 0) & 0xffffffff00000000) | (x & 0xffffffff)` and 5 rotate-as-shift idioms in 15 functions, each 15–35 tokens. Judges cite `btreeOverwriteContent`, `openStatTable` and `fts3MatchinfoLcsCb`. _Done (`wt/rm4-e5`): fields of 8/16/32 bits starting at bit 0 fold (SXTB/SXTH/SXTW, SBFIZ, UBFIZ); SBFX/UBFX and odd widths keep their lowering (the division and signed-shift recognizers read them, and odd widths print as xor/subtract pairs). Lane `od-rm4-e5` vs `od-main-afb7691`: 61 sign-fill selects and 7 rotate idioms fold in 28 functions (30 texts change, all of them by these folds; 14 selects and 10 rotates remain in other shapes); `btreeOverwriteContent` prints `(uint64_t)count` (`count` is an `int32_t` formal) and `size = (uint64_t)(int32_t)size`; `fts3MatchinfoLcsCb` prints `*(uint64_t *)((uintptr_t)arg2 + ((uint64_t)arg1 << 5))` with `int32_t arg1`; checked view byte-identical; reconstruction 80, fingerprints unchanged._
   - **Root cause:** the generic SBFM/UBFM lowering (`src/lifters/arm64/semantics.ts:332-353`). `foldShiftIdiom` (`src/reconstruction/source-shifts.ts:121-171`) folds only masks equal to the whole non-wrapped part.
   - **Change:** in `foldShiftIdiom` or a sibling rule in `EXPRESSION_RULES` (`source-rules.ts:632-652`), with masks equal to the field exactly:
     - (i) `(select(bit_s(x), ~0, 0) & ~mask(s+1)) | (x & mask(s+1))` → `sign_extend(trunc_{s+1}(x))`;

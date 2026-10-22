@@ -267,3 +267,95 @@ test('exhausted source proof work retains later original forms and publishes one
     }
   }
 });
+
+/** A phi-copy check as the renderer runs it: the allowance is charged before any
+ * proof step. */
+const phiCopy = (session: LocalValidationSession, index: number) =>
+  session.check(
+    'parallel-copy',
+    `destination_${index}`,
+    'actual phi-copy emission',
+    () => {
+      session.allowance.charge();
+      return {
+        kind: 'parallel-copy',
+        subject: `destination_${index}`,
+        scope: 'actual phi-copy emission',
+        status: 'verified',
+      };
+    },
+    [`origin_${index}`],
+  );
+
+test('exhausted phi-copy checks publish one counted record and leave the bound to later presentations', () => {
+  for (const source of [false, true]) {
+    const session = new LocalValidationSession(createOperationContext(), source, 'function');
+    for (let index = 0; index < 10; index++)
+      assert.ok(session.presentation('rule', `node_${index}`, `scope ${index}`));
+    while (!session.allowance.exhausted) session.allowance.charge();
+    for (let index = 0; index < 300; index++) {
+      const record = phiCopy(session, index);
+      assert.equal(record.status, 'unverified');
+      assert.equal(record.subject, `destination_${index}`);
+      if (source || index < 246)
+        assert.equal(record.reason, 'local validation work allowance exhausted');
+    }
+    const copies = session.records.filter((record) => record.kind === 'parallel-copy');
+    for (const record of session.records) localValidationSchema.parse(record);
+    if (!source) {
+      // The checked view keeps one record per check: they fill the bound.
+      assert.equal(session.records.length, 257);
+      assert.equal(session.presentation('later', 'node', 'later scope'), false);
+      continue;
+    }
+    assert.equal(copies.length, 1);
+    assert.equal(copies[0]!.subject, 'function');
+    assert.equal(copies[0]!.status, 'unverified');
+    assert.equal(
+      copies[0]!.reason,
+      '300 later phi-copy emissions not validated; local validation allowance exhausted',
+    );
+    assert.equal(session.records.length, 11);
+    // Rewrites whose side conditions are checked are still admitted and recorded.
+    assert.ok(session.presentation('later', 'node', 'later scope'));
+    assert.equal(session.records.length, 12);
+    assert.equal(session.records.at(-1)!.rule, 'later');
+    // The summary keeps its slot and its count as more checks fold into it.
+    phiCopy(session, 300);
+    assert.equal(session.records.length, 12);
+    assert.match(session.records[10]!.reason!, /^301 later phi-copy emissions/);
+  }
+});
+
+test('exhaustion summaries of both kinds share the terminal slots of a full record bound', () => {
+  const session = new LocalValidationSession(createOperationContext(), true, 'function');
+  for (let index = 0; index < 256; index++)
+    assert.ok(session.presentation('rule', `node_${index}`, `scope ${index}`));
+  assert.equal(session.presentation('rule', 'refused', 'new scope'), false);
+  assert.equal(session.records.length, 257);
+  assert.equal(session.records[256]!.subject, '*');
+  while (!session.allowance.exhausted) session.allowance.charge();
+  assert.ok(session.skipExhaustedBitvector('first'));
+  for (let index = 0; index < 3; index++) phiCopy(session, index);
+  assert.ok(session.skipExhaustedBitvector('second'));
+  assert.equal(session.records.length, 258);
+  assert.deepEqual(
+    session.records.slice(256).map((record) => [record.kind, record.reason]),
+    [
+      [
+        'bitvector',
+        'local validation record bound exceeded; 2 later candidates were not attempted because the local validation allowance was exhausted',
+      ],
+      [
+        'parallel-copy',
+        'local validation record bound exceeded; 3 later phi-copy emissions not validated; local validation allowance exhausted',
+      ],
+    ],
+  );
+  // A fork continues each count without changing the original's records.
+  const fork = session.fork();
+  phiCopy(fork, 3);
+  assert.match(fork.records[257]!.reason!, /; 4 later phi-copy emissions/);
+  assert.match(session.records[257]!.reason!, /; 3 later phi-copy emissions/);
+  for (const record of fork.records) localValidationSchema.parse(record);
+});

@@ -471,8 +471,11 @@ Neither rewrite claims purity or permits motion across memory accesses, calls
 or fences. Unsupported FP-environment effects remain opaque unless the existing
 requirement projection independently applies; memory fences remain explicit.
 At the presentation-record bound the full `boundary(...)` contract remains
-visible, and unknown instructions retain `opaque_effect(...)`. Checked rendering
-is unchanged.
+visible, and unknown instructions retain `opaque_effect(...)`. A call printed as
+a short-circuit comma operand has its `call_effects` record admitted when the
+operand is planned, with the same scope and contract the printed call asks for:
+a call whose record is refused never becomes a comma operand, so its boundary
+statement never lands inside a test. Checked rendering is unchanged.
 
 After inlining, both source dialects may combine an initial single-entry chain
 of expression-only loop tests. Short-circuit conditions preserve load order and
@@ -905,6 +908,24 @@ the wrapped part of a rotation is that field of the rotated operand, and a
 masked field whose mask bits all lie in the non-wrapped part is the same field of
 `x>>k`. Every mask must match exactly (one bit more or fewer keeps the rotate),
 so a true rotate stays a rotate and its helper is still emitted.
+The same rule folds the ARM64 bitfield-move aliases (`SXTB`/`SXTH`/`SXTW`,
+`SBFIZ`, `UBFIZ`: the generic `SBFM`/`UBFM` lowering) as bit-exact field algebra
+for a field of 8, 16 or 32 bits (a native C integer type) that starts at bit 0 of
+its source. Masks are accumulated through nested `and`s, and a rotation masked to
+one run of `n` bits that does not cross the wrap point reads `n` consecutive bits
+of `x`: `ror(x,w-k) & (mask(n)<<k)` with `0<k` and `k+n<w` is
+`zero_extend(trunc_n(x)) << k`, and a field of `n` bits at `k` OR-ed with its own
+top bit selected into exactly the bits above it (`(sign ? ones : 0) & ~mask(k+n)`,
+the condition being that very bit of the same source) is
+`sign_extend(trunc_n(x)) << k`, for example `(uint64_t)(int32_t)count`. A fill that
+leaves a gap or overlaps the field, a sign bit that is not the field's top bit, a
+field of another value, a hole in a mask, a field crossing the wrap point, a field
+of another width (it would print as masks and xor/subtract pairs) and a field not
+starting at bit 0 (`SBFX`/`UBFX`, whose `SBFM` form the division and signed-shift
+recognizers read) keep the original form. The sign extension makes the existing
+narrow-formal/`return_low_word` presentations see an explicit 32-bit extension: an
+operand used only through `(int32_t)` becomes an `int32_t` formal, under their own
+records and ABI requirements.
 The printer applies the width- and signedness-exact rules below only when its
 recorder accepts a presentation record, so checked text never changes:
 `zero_high_join` (constant-zero concat parts are omitted; one remaining lowest
@@ -1166,6 +1187,16 @@ Once the shared source proof-work allowance is exhausted, further speculative
 bitvector candidates retain their original forms without another doomed check.
 One function-level unverified summary counts these unattempted candidates; the
 limitation remains visible rather than consuming one record per skipped rewrite.
+Source phi-copy emission checks after exhaustion fold the same way: one
+function-level `parallel-copy` record states "N later phi-copy emissions not
+validated; local validation allowance exhausted" (each such check charges the
+allowance before any proof step, so its outcome is that limitation), and the
+printed copies are unchanged. Each kind keeps one summary slot; at the record
+bound the summaries take the terminal slots and keep the bound in their reason.
+Without the fold these unverified records filled the 256-record bound in large
+functions, after which every presentation was refused (for example 9, 27 and 23
+`boundary(...)` statements in brotli `main`, `isDate` and
+`sqlite3Fts3Incrmerge`; 0 after).
 Exact source wiring is not speculative and still applies: same-type identity
 operand resolution, offset-zero/same-width bitcasts and extracts reselected from a
 contained slice, extension or extract relocate existing bits without arithmetic.

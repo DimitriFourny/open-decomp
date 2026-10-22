@@ -12,6 +12,8 @@ import { performance } from 'node:perf_hooks';
 import { pathToFileURL } from 'node:url';
 import { binaryPath, corpusBinary, tierFunctions } from './corpus.js';
 import { hostInfo, resetLane, writeLane, writeText } from './store.js';
+import { sampleProcessTree } from './rss.js';
+import { FIRST_FUNCTIONS } from './speed.js';
 import { ODBENCH_DIR } from './types.js';
 import type {
   BinaryTiming,
@@ -22,6 +24,7 @@ import type {
   FunctionWork,
   FunctionState,
   LaneRun,
+  ProcessRss,
   Tier,
 } from './types.js';
 
@@ -47,7 +50,12 @@ export interface OdWorkerRequest {
 }
 
 export type OdWorkerLine =
-  | { readonly kind: 'open'; readonly import_ms: number }
+  | {
+      readonly kind: 'open';
+      readonly import_ms: number;
+      /** The open-time job's own time; set only by a build that has such a job. */
+      readonly open_job_ms?: number;
+    }
   | { readonly kind: 'open_error'; readonly message: string }
   | { readonly kind: 'start'; readonly id: string }
   | {
@@ -56,17 +64,26 @@ export type OdWorkerLine =
       readonly state: FunctionState;
       readonly reason: string | null;
       readonly ms: number;
+      /** Wall time from `openBinary` returning to this result. */
+      readonly at_ms?: number;
       readonly text: string | null;
       readonly work: FunctionWork | null;
       readonly diagnostics: readonly FunctionDiagnostic[];
     }
-  | { readonly kind: 'done'; readonly cold_ms: number; readonly decompile_ms_total: number };
+  | {
+      readonly kind: 'done';
+      readonly cold_ms: number;
+      readonly decompile_ms_total: number;
+      /** The worker process's own exact peak resident set size. */
+      readonly worker_peak_rss_bytes?: number;
+    };
 
 /** One function in one repeat. */
 interface Attempt {
   readonly state: FunctionState;
   readonly reason: string | null;
   readonly ms: number | null;
+  readonly at_ms: number | null;
   readonly text: string | null;
   readonly work: FunctionWork | null;
   readonly diagnostics: readonly FunctionDiagnostic[] | null;
@@ -76,6 +93,9 @@ interface Attempt {
 interface Repeat {
   readonly attempts: ReadonlyMap<string, Attempt>;
   readonly import_ms: number | null;
+  readonly open_job_ms: number | null;
+  readonly first10_ms: number | null;
+  readonly peak_rss: readonly ProcessRss[];
   readonly cold_ms: number;
   readonly decompile_ms_total: number;
 }
@@ -102,7 +122,7 @@ function git(repo: string, args: readonly string[]): string | null {
 async function runWorker(
   request: OdWorkerRequest,
   requestFile: string,
-): Promise<{ exit: string | null; wall_ms: number }> {
+): Promise<{ exit: string | null; wall_ms: number; rss: readonly ProcessRss[] }> {
   await writeFile(requestFile, JSON.stringify(request));
   const start = performance.now();
   // cwd = this checkout so `--import tsx` resolves here whatever checkout is measured.
@@ -115,8 +135,11 @@ async function runWorker(
         stdio: ['ignore', 'ignore', 'inherit'],
       },
     );
-    const finish = (exit: string | null): void =>
-      resolve({ exit, wall_ms: performance.now() - start });
+    const sampler = child.pid === undefined ? null : sampleProcessTree(child.pid);
+    const finish = (exit: string | null): void => {
+      const wall_ms = performance.now() - start;
+      void (sampler?.stop() ?? Promise.resolve([])).then((rss) => resolve({ exit, wall_ms, rss }));
+    };
     child.on('error', (error) => finish(`worker spawn failed: ${error.message}`));
     child.on('close', (code, signal) =>
       finish(
@@ -128,6 +151,34 @@ async function runWorker(
       ),
     );
   });
+}
+
+/** `atMs` is every corpus function's result time (corpus order): the 10th's, or null when there is none. */
+export function firstFunctionsMs(atMs: readonly (number | null)[]): number | null {
+  return atMs.length < FIRST_FUNCTIONS ? null : (atMs[FIRST_FUNCTIONS - 1] ?? null);
+}
+
+/** The worker's exact self-reported peak replaces its sampled one when larger. */
+function withWorkerPeak(
+  sampled: readonly ProcessRss[],
+  exact: number | undefined,
+): readonly ProcessRss[] {
+  if (exact === undefined) return sampled;
+  const worker = sampled.find((process_) => process_.role === 'bench worker');
+  return worker
+    ? sampled.map((process_) =>
+        process_ === worker ? { ...worker, bytes: Math.max(worker.bytes, exact) } : process_,
+      )
+    : [{ role: 'bench worker', bytes: exact }, ...sampled];
+}
+
+/** The repeat whose largest process peak is the greatest (peak RSS is a maximum, never a median). */
+export function largestPeak(repeats: readonly (readonly ProcessRss[])[]): readonly ProcessRss[] {
+  const top = (peak: readonly ProcessRss[]): number => Math.max(0, ...peak.map((p) => p.bytes));
+  return repeats.reduce<readonly ProcessRss[]>(
+    (best, peak) => (top(peak) > top(best) ? peak : best),
+    [],
+  );
 }
 
 async function runRepeat(
@@ -146,18 +197,22 @@ async function runRepeat(
     .map((line) => JSON.parse(line) as OdWorkerLine);
   const attempts = new Map<string, Attempt>();
   let importMs: number | null = null;
+  let openJobMs: number | null = null;
   let done: Extract<OdWorkerLine, { kind: 'done' }> | null = null;
   let openError: string | null = null;
   let started: string | null = null;
   for (const line of lines) {
-    if (line.kind === 'open') importMs = line.import_ms;
-    else if (line.kind === 'open_error') openError = line.message;
+    if (line.kind === 'open') {
+      importMs = line.import_ms;
+      openJobMs = line.open_job_ms ?? null;
+    } else if (line.kind === 'open_error') openError = line.message;
     else if (line.kind === 'start') started = line.id;
     else if (line.kind === 'fn')
       attempts.set(line.id, {
         state: line.state,
         reason: line.reason,
         ms: line.ms,
+        at_ms: line.at_ms ?? null,
         text: line.text,
         work: line.work,
         diagnostics: line.diagnostics,
@@ -178,6 +233,7 @@ async function runRepeat(
       state: 'failed',
       reason,
       ms: null,
+      at_ms: null,
       text: null,
       work: null,
       diagnostics: null,
@@ -187,6 +243,9 @@ async function runRepeat(
   return {
     attempts,
     import_ms: importMs,
+    open_job_ms: openJobMs,
+    first10_ms: firstFunctionsMs(fns.map((fn) => attempts.get(fn.id)?.at_ms ?? null)),
+    peak_rss: withWorkerPeak(process_.rss, done?.worker_peak_rss_bytes),
     cold_ms: done?.cold_ms ?? process_.wall_ms,
     decompile_ms_total: done?.decompile_ms_total ?? measured,
   };
@@ -201,7 +260,13 @@ export async function runOdLane(opts: {
   repeat: number;
   inference: 'proven' | 'likely';
   only: readonly string[] | null;
+  /** Request workers per binary; only 1 until roadmap 4 T9 (parallel requests over one opened project). */
+  jobs: number;
 }): Promise<LaneRun> {
+  if (opts.jobs !== 1)
+    throw new Error(
+      `od: --jobs ${opts.jobs} is not supported yet: decompiling one binary with several request workers needs roadmap 4 T9; only --jobs 1 runs`,
+    );
   const loadStart = [...loadavg()];
   const started = new Date().toISOString();
   const repo = resolve(opts.repo);
@@ -265,12 +330,13 @@ export async function runOdLane(opts: {
     finished: new Date().toISOString(),
     host: hostInfo(loadStart),
     repeat: opts.repeat,
-    jobs: 1,
+    jobs: opts.jobs,
     binaries,
     functions,
     notes: [
       'One worker process per binary and repeat, fresh cache directory, default budgets and structures.',
-      'cold_ms = API module load + openBinary + every decompile (tsx start-up and session close excluded); import_ms = openBinary; per-function ms = median over repeats.',
+      'cold_ms = API module load + openBinary + every decompile (tsx start-up and session close excluded); import_ms = open_ms = openBinary; per-function ms = median over repeats.',
+      'first10_ms = wall time from openBinary returning to the 10th corpus function result (corpus order); peak_rss = peak resident set size per process (ps sampling every 200 ms for the analysis workers, exact maxRSS for the bench worker), largest over repeats.',
       ...freshness,
     ],
   });
@@ -331,11 +397,21 @@ export async function runOdLane(opts: {
     const importTimes = repeats.flatMap((repeat) =>
       repeat.import_ms === null ? [] : [repeat.import_ms],
     );
+    const first10 = repeats.flatMap((repeat) =>
+      repeat.first10_ms === null ? [] : [repeat.first10_ms],
+    );
+    const openJobs = repeats.flatMap((repeat) =>
+      repeat.open_job_ms === null ? [] : [repeat.open_job_ms],
+    );
     binaries[binary.id] = {
       cold_ms: median(repeats.map((repeat) => repeat.cold_ms)),
       import_ms: importTimes.length === 0 ? null : median(importTimes),
       analysis_ms: null,
       decompile_ms_total: median(repeats.map((repeat) => repeat.decompile_ms_total)),
+      open_ms: importTimes.length === 0 ? null : median(importTimes),
+      ...(openJobs.length === 0 ? {} : { open_job_ms: median(openJobs) }),
+      first10_ms: first10.length === 0 ? null : median(first10),
+      peak_rss: largestPeak(repeats.map((repeat) => repeat.peak_rss)),
       ...(opts.repeat > 1 ? { repeats_cold_ms: repeats.map((repeat) => repeat.cold_ms) } : {}),
     };
     const states = fns.map((fn) => functions[fn.id]?.state);
