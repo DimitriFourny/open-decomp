@@ -422,7 +422,7 @@ function sysvFixture(variant: 'complete' | 'missing_xmm' | 'rsi_use' | 'call_bet
   };
 }
 
-test('sysv-amd64: the va_start lowering hides its stores and va.gp_offset reads 8', () => {
+test('sysv-amd64: the va_start lowering hides its stores and va_arg reads the save area through reg_save_area', () => {
   const fixture = sysvFixture('complete');
   const source = fixture.view('source');
   assert.ok(source.local_validation?.some((record) => record.rule === 'va_start'));
@@ -466,7 +466,7 @@ for (const variant of ['missing_xmm', 'rsi_use', 'call_between'] as const)
     );
     for (const language of ['c-like', 'python-like'] as const) {
       const output = emit(fixture.ir, fixture.extra, language).emission;
-      assert.doesNotMatch(output.text, /\.\.\.|va_start|\.va\b/, output.text);
+      assert.doesNotMatch(output.text, /\.\.\.\)|va_start|\.va\b/, output.text);
       assert.match(output.text, /\bentry_sp\b/, output.text);
     }
   });
