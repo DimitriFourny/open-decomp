@@ -278,6 +278,7 @@ const relativeSlot: SourceAddress = {
     name: '_config',
     source_name: 'config',
     offset: 0x80n,
+    evidence_ids: ['config-symbol-evidence'],
   },
   initial_import: 'fstat',
   object: {
@@ -324,6 +325,12 @@ for (const language of ['c-like', 'python-like'] as const)
     assert.ok(
       output.emission.local_validation?.some(
         (record) => record.kind === 'presentation' && record.rule === 'symbol_relative_name',
+      ),
+    );
+    // The preceding symbol's records evidence the printed name.
+    assert.ok(
+      expandEmission(output.emission).mappings.some((mapping) =>
+        mapping.evidence_ids.includes('config-symbol-evidence'),
       ),
     );
     assert.deepEqual(execute(output.emission, new Map(), slotMemory(REWRITTEN)).values, [

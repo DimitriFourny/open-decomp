@@ -122,6 +122,8 @@ export interface SourceAddress {
     /** C spelling of `name`; asserted names stay verbatim. */
     readonly source_name?: string;
     readonly offset: bigint;
+    /** The preceding symbol's records; they evidence only a printed relative name. */
+    readonly evidence_ids: readonly string[];
   };
   /** The loader binds this pointer slot to an imported symbol (C spelling), but the
    * slot lies in writable program data: that is its value at load time only, since

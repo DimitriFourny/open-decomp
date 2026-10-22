@@ -449,7 +449,6 @@ export function recoverDataAddress(
         ...section.evidence_ids,
         ...objects.flatMap((item) => item.evidence_ids),
         ...(hint?.evidence_ids ?? []),
-        ...(relative?.symbol.evidence_ids ?? []),
       ]),
     ],
   };
@@ -460,6 +459,7 @@ export function recoverDataAddress(
       ? {
           symbol_relative: {
             symbol_id: relative.symbol.id,
+            evidence_ids: relative.symbol.evidence_ids,
             name: relative.name,
             offset: va.value - relative.start,
           },

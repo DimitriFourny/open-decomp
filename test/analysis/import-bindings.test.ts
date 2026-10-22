@@ -190,6 +190,7 @@ test('an interior address of a size-less object symbol is named relative to it, 
     symbol_id: symbol.id,
     name: '_fixture_zero_fill',
     offset: 0x10n,
+    evidence_ids: symbol.evidence_ids,
   });
   assert.equal(recovered?.object?.address.value, interior.value);
   assert.equal(recovered?.object?.byte_length, null);

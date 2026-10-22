@@ -2378,7 +2378,7 @@ export class Renderer {
     const used = this.usedGlobals.get(global.key);
     if (used) return used.name;
     if (global.native_name !== undefined) this.names.set(global.key, global.native_name);
-    const relative = global.relative && this.relativeName(global.key, global.relative);
+    const relative = global.relative && this.relativeName(global.relative);
     const name = this.sourceIdentifier(
       global.key,
       relative?.stem ?? global.stem,
@@ -2394,18 +2394,17 @@ export class Renderer {
 
   /** `symbol_0x<offset>` for storage no symbol covers, named after the preceding
    * object symbol of its section (`symbol+0x<offset>` for comments), when the
-   * `symbol_relative_name` record is admitted. */
-  private relativeName(
-    key: string,
-    relative: { readonly symbol: string; readonly offset: bigint },
-  ): { readonly stem: string; readonly text: string } | undefined {
+   * `symbol_relative_name` record is admitted. One record per function states the
+   * rule; the declaration's mapping carries each symbol's evidence. */
+  private relativeName(relative: {
+    readonly symbol: string;
+    readonly offset: bigint;
+  }): { readonly stem: string; readonly text: string } | undefined {
     const offset = `0x${relative.offset.toString(16)}`;
     return this.localValidation.presentation(
       'symbol_relative_name',
       this.input.function.id,
       'image storage that no symbol or data record covers is named after the nearest preceding object symbol of its section plus the exact byte offset, when no other symbol or data record starts in between; naming only, the extent stays unknown',
-      undefined,
-      `${key}: ${relative.symbol}+${offset}`,
     )
       ? {
           stem: `${relative.symbol}_${offset}`,
@@ -3828,7 +3827,12 @@ export class Renderer {
     if (!this.usedGlobals.size) return;
     const python = this.language === 'python-like';
     const lines: string[] = [],
-      spans: { readonly object: GlobalObject; readonly start: number; readonly end: number }[] = [];
+      spans: {
+        readonly object: GlobalObject;
+        readonly start: number;
+        readonly end: number;
+        readonly relative: boolean;
+      }[] = [];
     let offset = at;
     for (const { object: global, name, relative } of this.usedGlobals.values()) {
       this.context.checkpoint(1);
@@ -3885,7 +3889,12 @@ export class Renderer {
             : `extern ${global.object.mutable || global.import ? '' : 'const '}${type} ${name}${global.shape === 'scalar' ? '' : '[]'};${comment}`,
         );
       const length = lines.slice(first).reduce((sum, line) => sum + line.length + 1, 0);
-      spans.push({ object: global, start: offset, end: offset + length });
+      spans.push({
+        object: global,
+        start: offset,
+        end: offset + length,
+        relative: relative !== undefined,
+      });
       offset += length;
     }
     const delta = insert(at, lines);
@@ -3898,6 +3907,7 @@ export class Renderer {
         [
           span.object.object.evidence_ids,
           ...(span.object.import ? [span.object.import.evidence_ids] : []),
+          ...(span.relative && span.object.relative ? [span.object.relative.evidence_ids] : []),
         ],
         span.end,
       );
@@ -3943,7 +3953,7 @@ export class Renderer {
         table.data.source_name === undefined &&
         table.data.name === undefined &&
         object.offset === 0n
-          ? this.relativeName(key, {
+          ? this.relativeName({
               symbol: symbolRelative.source_name,
               offset: symbolRelative.offset,
             })
@@ -4002,7 +4012,17 @@ export class Renderer {
           'Image-backed indexed storage view at the declared VA; no allocation or invented extent. Index units are the declared scalar width. Reads retain original byte order, aliasing and faults; no Python sequence bounds or negative-index rebasing.',
         );
       }
-      this.mapped(node, start, [group.address], [object.evidence_ids]);
+      this.mapped(
+        node,
+        start,
+        [group.address],
+        [
+          object.evidence_ids,
+          ...(group.relative !== undefined && table.data.symbol_relative
+            ? [table.data.symbol_relative.evidence_ids]
+            : []),
+        ],
+      );
     }
   }
 

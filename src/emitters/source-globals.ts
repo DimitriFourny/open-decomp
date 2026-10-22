@@ -23,7 +23,11 @@ export interface GlobalObject {
   /** No symbol covers the base: it lies `offset` bytes after the preceding object
    * symbol (C spelling `symbol`). The renderer may name it `symbol_0x<offset>`
    * under a `symbol_relative_name` record; the extent stays unknown. */
-  readonly relative?: { readonly symbol: string; readonly offset: bigint };
+  readonly relative?: {
+    readonly symbol: string;
+    readonly offset: bigint;
+    readonly evidence_ids: readonly string[];
+  };
   /** C spelling of the import whose exact address the loader stores in this
    * writable pointer slot at load time; program code may rewrite it. */
   readonly initial_import?: string;
@@ -131,6 +135,7 @@ export function planGlobals(
               relative: {
                 symbol: item.symbol_relative.source_name,
                 offset: item.symbol_relative.offset,
+                evidence_ids: item.symbol_relative.evidence_ids,
               },
             }
           : {}),
