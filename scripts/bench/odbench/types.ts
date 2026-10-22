@@ -103,14 +103,36 @@ export interface BinaryTiming {
   /** Ghidra auto-analysis; null for Open Decomp (its analysis happens inside each decompile). */
   readonly analysis_ms: number | null;
   readonly decompile_ms_total: number;
+  /** Open Decomp: `openBinary` wall time (median over repeats; once an open-time job exists, it includes the job). Absent on lanes recorded before roadmap 4 M2 and on other tools. */
+  readonly open_ms?: number | null;
+  /** Open Decomp: the open-time job's own share of `open_ms`. Recorded only when such a job exists (none today). */
+  readonly open_job_ms?: number | null;
+  /** Open Decomp: wall time from `openBinary` returning to the 10th corpus function's result, in corpus order (median over repeats); null for a binary with fewer than 10 corpus functions or without that result. */
+  readonly first10_ms?: number | null;
+  /** Open Decomp: peak resident set size of every process the binary's run used (largest over repeats); absent on lanes recorded before roadmap 4 M2. */
+  readonly peak_rss?: readonly ProcessRss[];
   /** cold_ms of every repeat when `repeat > 1`. */
   readonly repeats_cold_ms?: readonly number[];
+}
+
+/** Peak resident set size of one process of an Open Decomp run. */
+export interface ProcessRss {
+  /** `bench worker` (the odbench process that calls the API) or `analysis worker` (a child the API spawned). */
+  readonly role: string;
+  readonly bytes: number;
 }
 
 /** Work one Open Decomp decompile consumed against the limit its result reported. */
 export interface FunctionWork {
   readonly consumed: number;
   readonly limit: number;
+}
+
+/** One distinct diagnostic of one decompile: severity, code and the first sentence of the message. */
+export interface FunctionDiagnostic {
+  readonly code: string;
+  readonly severity: string;
+  readonly text: string;
 }
 
 export interface FunctionResult {
@@ -135,6 +157,10 @@ export interface FunctionResult {
   readonly work?: FunctionWork | null;
   /** Open Decomp with repeat > 1: every repeat printed byte-identical text. */
   readonly deterministic?: boolean;
+  /** Open Decomp: the result's distinct diagnostics (not part of text identity); null when no result
+   * carried them (worker died before this function). Absent on lanes recorded before this field and
+   * on other tools. */
+  readonly diagnostics?: readonly FunctionDiagnostic[] | null;
 }
 
 export interface LaneRun {

@@ -26,6 +26,7 @@ const INTEGRATION = [
   'test/reconstruction/source-names.test.ts',
   'test/reconstruction/sqlite-cell-constants.test.ts',
   'test/reconstruction/sqlite-interfaces.test.ts',
+  'test/service/analysis/caller-result-use.test.ts',
   'test/service/analysis/native-summary.test.ts',
   'test/service/analysis/request-determinism.test.ts',
   'test/service/likely-inference.test.ts',

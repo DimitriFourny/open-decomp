@@ -314,6 +314,10 @@ export class Parser {
   private readonly structNames = new Set<string>();
   /** Callees the `open arity` comment names: their calls print only the proven arguments. */
   private readonly openCallees: ReadonlySet<string>;
+  /** The comment names an `indirect call`: function-pointer casts print only the proven
+   * arguments, so each such call has the unresolved remainder (a `...` ends only a declared
+   * variadic prototype). */
+  private readonly openIndirect: boolean;
   private readonly tables = new Map<string, { readonly address: bigint; readonly bits: number }>();
   /** Declared scalar globals (`extern T name;`): the name is the object, not a pointer. */
   private readonly scalars = new Set<string>();
@@ -356,6 +360,7 @@ export class Parser {
       /\/\* access stride (\d+), not size \*\/\n(?:\/\*[^\n]*\*\/\n)*struct (\w+) \{/g,
     ))
       this.strides.set(match[2]!, BigInt(match[1]!));
+    this.openIndirect = [...this.openCallees].some((name) => name.startsWith('indirect call'));
     this.voidResult = /^void [A-Za-z_]\w*\(/m.test(text) || /^def .*-> void:/m.test(text);
     // The VA comment is omitted where the printed `data_<hex>` name already states the address.
     const declarations = this.python
@@ -1438,13 +1443,14 @@ export class Parser {
         }
         this.take(')');
         // The function-pointer type states an open arity: the remainder the call does not print.
-        const typed = expression.kind === 'cast' ? expression.open === true : false;
+        const typed =
+          expression.kind === 'cast' ? expression.open === true || this.openIndirect : false;
         const spelled =
           expression.kind === 'call' &&
           expression.name === 'function_pointer' &&
           expression.args[1]?.kind === 'literal' &&
           typeof expression.args[1].value === 'string' &&
-          expression.args[1].value.includes('...');
+          (expression.args[1].value.includes('...') || this.openIndirect);
         if ((typed || spelled) && !this.endsOpen(args))
           args.push({ kind: 'call', name: 'unknown_argument_remainder', args: [] });
         expression = { kind: 'invoke', target: expression, args };

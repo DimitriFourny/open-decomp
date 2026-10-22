@@ -18,7 +18,7 @@ import { LocalValidationSession } from '../../../src/reconstruction/local-valida
 import { SourceStructs } from '../../../src/emitters/source-structs.js';
 import { integer, type SSAForm } from '../../../src/ir/index.js';
 import { builder, image, register, slice } from '../../ir/support.js';
-import { emit, execute } from './support.js';
+import { emit, emittedFormals, execute } from './support.js';
 
 function planner(
   definitions: Record<string, RecoveredType>,
@@ -675,4 +675,72 @@ test('unknown pointer targets receive valid opaque declarations without an inven
     { input: output.emission.text, encoding: 'utf8' },
   );
   assert.equal(compiled.status, 0, compiled.stderr);
+});
+
+test('members accessed through a derived address read only by accesses print through the base', () => {
+  const b = builder('source-derived-members'),
+    block = b.block('entry');
+  const pointer = block.readRegister(register('rdi', 64, 0, 'replace_root', 'x86_64:rdi'));
+  const derived = block.int('add', pointer, block.constant(integer(64), 0x20n));
+  block.store(derived, block.constant(integer(8), 7n));
+  block.store(
+    block.int('add', derived, block.constant(integer(64), 8n)),
+    block.cast(
+      'truncate',
+      integer(32),
+      block.readRegister(register('rsi', 64, 0, 'replace_root', 'x86_64:rsi')),
+    ),
+  );
+  const field = block.load(integer(16), block.int('add', derived, block.constant(integer(64), 4n)));
+  block.return([block.cast('zero_extend', integer(32), field)]);
+  const ssa = constructSSA(b.finish(block, [integer(32)])).value as SSAForm;
+  const types = recoverTypes(ssa, sysvAMD64Abi, createOperationContext(), {
+    slice_id: slice,
+    image_id: image,
+    revision: 1,
+  });
+  const render = (language: 'c-like' | 'python-like', view: 'source' | 'checked' = 'source') =>
+    emit(ssa, { types, source: { abi: sysvAMD64Abi, callees: [], addresses: [] } }, language, view)
+      .emission;
+  const text = render('c-like').text;
+  assert.match(text, /(\w+)->field_0x20 = 7;\n\s*\1->field_0x28 = \w+;\n.*\1->field_0x24\b/, text);
+  assert.doesNotMatch(text, /\+ 0x20\b|uintptr_t/, text);
+  const compiled = spawnSync(
+    'clang',
+    ['-x', 'c', '-fsyntax-only', '-std=c11', '-include', 'stdint.h', '-include', 'stddef.h', '-'],
+    { input: text, encoding: 'utf8' },
+  );
+  assert.equal(compiled.status, 0, compiled.stderr);
+  const bytes = new Map(
+    Array.from({ length: 0x40 }, (_, offset) => [0x1000n + BigInt(offset), offset] as const),
+  );
+  for (const language of ['c-like', 'python-like'] as const) {
+    const run = (view: 'source' | 'checked', memory: Map<bigint, number>) => {
+      const emission = render(language, view),
+        formals = emittedFormals(emission);
+      return execute(
+        emission,
+        new Map([
+          ...formals[0]!.semantic_ids.map((id) => [id, 0x1000n] as const),
+          ...formals[1]!.semantic_ids.map((id) => [id, 0xa1b2c3d4e5n] as const),
+        ]),
+        memory,
+      );
+    };
+    const observed = run('source', new Map(bytes));
+    assert.deepEqual(observed.values, [0x2524n]);
+    assert.deepEqual(observed.events, ['store', 'store', 'load']);
+    assert.equal(observed.memory.get(0x1020n), 7);
+    assert.deepEqual(
+      [0x28n, 0x29n, 0x2an, 0x2bn].map((offset) => observed.memory.get(0x1000n + offset)),
+      [0xe5, 0xd4, 0xc3, 0xb2],
+    );
+    const faulting = new Map(bytes);
+    faulting.delete(0x102bn);
+    const fault = run('source', new Map(faulting)),
+      checked = run('checked', new Map(faulting));
+    assert.equal(fault.exit, 'fault');
+    assert.deepEqual(fault.events, checked.events);
+    assert.deepEqual(fault.memory, checked.memory);
+  }
 });

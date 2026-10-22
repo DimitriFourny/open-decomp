@@ -63,7 +63,7 @@ register transfers establish the independent value input passed to the callback;
 the caller's subsequent 32-bit arithmetic establishes which result bits it
 consumes. Neither fact establishes a complete argument list or defined upper
 result bits. Both dialects retain the known argument, the consumed result and an
-explicit open-argument marker: an indirect call's function-pointer type spells it (C `((T (*)(A, ...))target)(a)`, Python-like `function_pointer(target, "T (*)(A, ...)")(a)`), and a direct callee without an established prototype is named once on the `open arity` comment line while its calls print only the proven arguments. An interface that proves no argument, a callee that also has a closed or guessed call, and a callee with an established prototype keep an inline `...` (the file header states its meaning once). The `unknown_argument_remainder`/`unknown_arguments` helper entries stay in the emission metadata and the checked view keeps the named helper. Unknown callback memory effects
+explicit open-argument marker: an indirect call's function-pointer type names exactly the printed argument positions (C `((T (*)(A))target)(a)`, Python-like `function_pointer(target, "T (*)(A)")(a)`; a trailing `...` would declare a variadic prototype and appears only for a declared variadic signature), and an open indirect call or a direct callee without an established prototype is named once on the `open arity` comment line (`indirect call at 0x…`: the call instruction's virtual address, supplied by the service as `EmissionInput.instruction_address`; synthetic IR without that mapping prints `at file offset 0x…` from its provenance range) while its calls print only the proven arguments. An interface that proves no argument, a callee that also has a closed or guessed call, and a callee with an established prototype keep an inline `...` (the file header states its meaning once). The `unknown_argument_remainder`/`unknown_arguments` helper entries stay in the emission metadata and the checked view keeps the named helper. Unknown callback memory effects
 and potentially outgoing stack storage remain conservative. These observations
 do not follow or execute arbitrary callback targets.
 
@@ -185,7 +185,7 @@ Cached decompilation payloads additionally validate `emission.language === ident
 
 ### Analysis cache and persisted callee summaries
 
-Store schema 6 adds `native_summaries(scope, function_id, revision, seq, allowance, work, bytes, digest, payload)` (migration 5→6 creates it; schemas 1–5 still migrate transactionally; an older application cannot open a schema-6 project). Prepared native callee units (`source-facts.ts`, `PreparedUnitEntry`) are the largest cold cost of a decompilation, and the in-process `WeakMap` that reuses them is lost with every CLI process. The persisted tier sits behind it and obeys exactly the same contract: a unit is stored only when `reusablePreparation` holds (no limit hit, no reason, complete call analysis), together with the work it charged, the smallest allowance under which preparing it provably returns it, and the ordered dependency reads (`TracedRead`) it made. A reuse still requires `allowance ≥ stored allowance`, the instruction/block/node capacities and `fits(work, reads)`, then charges the same work and replays the same reads in the same order as preparing would, so a result and later budgets never depend on what an earlier process prepared. The fresh preparation path is untouched; a stored unit is only an input to the existing reuse check.
+Store schema 6 adds `native_summaries(scope, function_id, revision, seq, allowance, work, bytes, digest, payload)` (migration 5→6 creates it; schemas 1–5 still migrate transactionally; an older application cannot open a schema-6 project). Prepared native callee units (`source-facts.ts`, `PreparedUnitEntry`) are the largest cold cost of a decompilation, and the in-process `WeakMap` that reuses them is lost with every CLI process. The persisted tier sits behind it and obeys exactly the same contract: a unit is stored only when `reusablePreparation` holds (not `limited`, no reason, complete call analysis; summary format 4 stores `limited: false`), together with the work it charged, the smallest allowance under which preparing it provably returns it, and the ordered dependency reads (`TracedRead`) it made. A reuse still requires `allowance ≥ stored allowance`, the instruction/block/node capacities and `fits(work, reads)`, then charges the same work and replays the same reads in the same order as preparing would, so a result and later budgets never depend on what an earlier process prepared. The fresh preparation path is untouched; a stored unit is only an input to the existing reuse check.
 
 - **Identity.** `scope` is the digest of the format, the project **revision**, image SHA-256, selected slice, target, pipeline component versions, lifter, ABI and the supplied native type records; the row key is `(scope, function_id)`. The revision is part of the key because prepared evidence embeds it (evidence IDs and `revision` fields), so a unit prepared at another revision is not the unit preparing would return now; an annotation or any other revision change therefore invalidates every stored unit, and the next write drops the superseded rows. A row is authentic only for exactly its identity: `digest` is SHA-256 over scope, function, revision and the compressed payload, so a swapped, moved or damaged row is a miss (and replaced when the function is prepared again), never served.
 - **Validation.** Before use the payload envelope is schema-checked, its identity fields must equal the request's, dependency targets must resolve in the current function list, and `verifyTracedReads` re-reads every stored dependency read from the project at the current revision (selector well formed, key = digest of the selector, fingerprint equal to the store's value now). Any mismatch is a miss and the unit is prepared normally. Verification never charges the request (only preparing's charges are replayed) and memoizes verified reads per store/revision, so units sharing proof/type/function closures verify each read once. Callee units whose dependencies changed (or whose trace cannot be replayed) fall back to preparing, exactly as in process.
@@ -205,7 +205,7 @@ Discovery returns shared `FunctionGraph` records consumed directly by lifters; n
 
 `src/analysis/types/` consumes SSA plus explicit ABI, debug, library and annotation evidence without rewriting machine IR. Associations retain source status and exact machine/source bit ranges. Observed memory shapes preserve signed, machine-width-wrapped offsets, access widths, alias/escape uncertainty and dynamic strides; their observed extent is not an inferred object size. Declared type and field IDs are valid subjects; a function-anchored type annotation declares a type in scope rather than assigning the function a scalar machine type. Conflicting declarations remain alternatives. A supplied call declaration matches both the exact call node and contract ID, preserving source provenance without leaking a call-local assertion to another call. Retractions recompute from the requested snapshot instead of retaining prior conclusions.
 
-Pointer evidence (`src/analysis/types/pointers.ts`, `recoverPointerEvidence`) runs once per decompilation after local, callee-summary (`refineMemoryShapes`) and image types (`recoverImageTypes`), so declared prototype parameters, library results (allocators included), transferred callee shapes and image flows are already associations. A whole 64-bit value, or each exact register cell of one, holds an address when it is dereferenced (the load/store address or its affine base within ±64 KiB, so `table + i` never makes the index a pointer), carries a declared or observed pointer association, is `pointer ± integer` (`pointer − pointer` is an integer; a variable subtrahend counts only once every other rule settled), is a same-width copy, phi or select of a pointer, or is compared with a pointer. Two integers compared, an integer used in arithmetic and constants never become pointers; stack addresses stay frame storage. Each member gets one analysis-candidate `void *` association with its rule (`pointer-evidence` evidence); a member reached only from pointers to one scalar element by whole-element steps also gets that element pointer (C typing of `p ± k`). Projection (`src/reconstruction/source-types.ts`) resolves alternatives by weight instead of dropping them: a declaration beats analysis except that a declared `void *` is refined by an observed object pointer; an object pointer beats the bare address; equal or nested observed layouts merge into the widest; unrelated views and values conflicted only through a layout keep the bare address their dereferences prove. Overlapping constant/strided accesses of one view compete by access count (then lower offset, narrower width): the layout keeps the heavier member, only the losing member is conflicted and its accesses keep explicit casts; an overlap with a dynamically indexed access still conflicts the whole view. The source view spells an analysis `void *` byte-addressed (`uint8_t*`, `pointer[uint8_t]`; presentation `byte_addressed_pointer`), so `p + k` and `*(T *)(p + k)` are exact byte arithmetic; integer uses of a pointer print `(uintptr_t)p`. On AAPCS64 the hidden-result register (x8) read at entry and stored through anchors the function's own `return` role, so its object is named `<function>_ret`. Library allocators carry their header `alloc_size` parameters (catalog `allocates`); a call whose size arguments are constants gives its whole result value a fresh object of that byte size (`TypeRecoveryResult.allocations`), which sizes the memory shape on that value (`MemoryShape.allocation`, structure `size`) only when every constant-displacement access lies inside it, and names its image class `<function>_alloc_0x<size>` (ranked after argument/result roles, before stack slots). `applyImageTypes` also types every value of the selected body that flows at displacement zero into a class some view dereferences, so caller arguments and call results become pointers without a callee-summary transfer; pointer evidence keeps one object pointer type through exact copies, phis and selects whose other sources are null, and rebuilds a whole value from register cells that each carry the pointer's bits at their own position (concat parts or narrow extracts), keeping the declared type when every cell carries the same one; `x | 0`, `x ^ 0`, `x ± 0` and `x & ~0` are exact copies. An object passed unchanged (displacement zero) where an established declaration expects a pointer records that declared type (`ImageTypeObject.declared`); it confirms the object's argument/result flows like a dereference, and a class with no observed members but one declared pointer type binds flowing caller values to that type (integer declarations prove nothing). Register cells of a whole that carries an object pointer type carry it too at their offsets, so formals built from cells project it. Source-view stack reloads forwarded to exactly one stored value (`forwarded_reloads`) contribute their type evidence to that value. Debug recovery reports `undecoded` when debug data exists that it did not decode; only then is type recovery partial and local types withheld, since unread declarations could contradict them. An ELF image without `.debug_*`/`.zdebug_*` sections keeps debug status `partial` (DWARF recovery stays explicitly unavailable and the analysis coverage partial) but hides no declaration, so its local types are used.
+Pointer evidence (`src/analysis/types/pointers.ts`, `recoverPointerEvidence`) runs once per decompilation after local, callee-summary (`refineMemoryShapes`) and image types (`recoverImageTypes`), so declared prototype parameters, library results (allocators included), transferred callee shapes and image flows are already associations. A whole 64-bit value, or each exact register cell of one, holds an address when it is dereferenced (the load/store address or its affine base within ±64 KiB, so `table + i` never makes the index a pointer), carries a declared or observed pointer association, is `pointer ± integer` (`pointer − pointer` is an integer; a variable subtrahend counts only once every other rule settled), is a same-width copy, phi or select of a pointer, or is compared with a pointer. Two integers compared, an integer used in arithmetic and constants never become pointers; stack addresses stay frame storage. Each member gets one analysis-candidate `void *` association with its rule (`pointer-evidence` evidence); a member reached only from pointers to one scalar element by whole-element steps also gets that element pointer (C typing of `p ± k`). Projection (`src/reconstruction/source-types.ts`) resolves alternatives by weight instead of dropping them: a declaration beats analysis except that a declared `void *` is refined by an observed object pointer; an object pointer beats the bare address; equal or nested observed layouts merge into the widest; unrelated views and values conflicted only through a layout keep the bare address their dereferences prove. Overlapping constant/strided accesses of one view compete by access count (then lower offset, narrower width): the layout keeps the heavier member, only the losing member is conflicted and its accesses keep explicit casts; an overlap with a dynamically indexed access still conflicts the whole view. The source view spells an analysis `void *` byte-addressed (`uint8_t*`, `pointer[uint8_t]`; presentation `byte_addressed_pointer`). In C a variable declared as a byte pointer (`[const] uint8_t*`, `int8_t*`, `char*`) displaced by a constant prints as byte pointer arithmetic with no integer round trip (`byte_pointer_sum`, on the premise `typed_index` subscripts rest on): `*(T *)(p + k)` for an explicit access, `q = p - k` for an assignment to a variable of an accepting pointer type and `q = (T*)(p + k)` for any other pointer type; other integer uses of a pointer print `(uintptr_t)p`. On AAPCS64 the hidden-result register (x8) read at entry and stored through anchors the function's own `return` role, so its object is named `<function>_ret`. Library allocators carry their header `alloc_size` parameters (catalog `allocates`); a call whose size arguments are constants gives its whole result value a fresh object of that byte size (`TypeRecoveryResult.allocations`), which sizes the memory shape on that value (`MemoryShape.allocation`, structure `size`) only when every constant-displacement access lies inside it, and names its image class `<function>_alloc_0x<size>` (ranked after argument/result roles, before stack slots). `applyImageTypes` also types every value of the selected body that flows at displacement zero into a class some view dereferences, so caller arguments and call results become pointers without a callee-summary transfer; pointer evidence keeps one object pointer type through exact copies, phis and selects whose other sources are null, and rebuilds a whole value from register cells that each carry the pointer's bits at their own position (concat parts or narrow extracts), keeping the declared type when every cell carries the same one; `x | 0`, `x ^ 0`, `x ± 0` and `x & ~0` are exact copies. An object passed unchanged (displacement zero) where an established declaration expects a pointer records that declared type (`ImageTypeObject.declared`); it confirms the object's argument/result flows like a dereference, and a class with no observed members but one declared pointer type binds flowing caller values to that type (integer declarations prove nothing). Register cells of a whole that carries an object pointer type carry it too at their offsets, so formals built from cells project it. Source-view stack reloads forwarded to exactly one stored value (`forwarded_reloads`) contribute their type evidence to that value. Debug recovery reports `undecoded` when debug data exists that it did not decode; only then is type recovery partial and local types withheld, since unread declarations could contradict them. An ELF image without `.debug_*`/`.zdebug_*` sections keeps debug status `partial` (DWARF recovery stays explicitly unavailable and the analysis coverage partial) but hides no declaration, so its local types are used.
 
 Image types (`src/analysis/types/image-types.ts`, `src/service/analysis/image-types.ts`) give structure types one image-wide identity. Each function contributes its local object views: memory shapes at displacement zero plus pointer values at exact flows — integer argument registers on entry and at direct calls, the result register at returns and direct calls, entry-SP-relative stack addresses. A bounded, deterministic exploration (12 neighbor bodies, 4 callers per flow, two pointee hops) loads the callees and callers of the selected function's flows through the shared native-unit cache. Views unify (Steensgaard-style; members holding unified pointees unify their pointees) only through flows the callee itself confirms by dereferencing, forwarding or returning the value, so a stale caller register joins nothing. Overlapping incompatible members refuse the union and stay separate classes with recorded conflicts. Classes carry two names. `ImageTypeClass.name` is metadata: the first anchor, from the lowest-address function owning a flow (`OpenFiles_arg0`, `X_ret`, `X_local_40`, pointees `X_arg0_f20`, private views `X_objN`). `ImageTypeClass.label` is the identifier printed everywhere, `struct_<6 hex>`: a digest of the class name (so exactly the classes that shared a name share a label), the same scheme as layout-digest names, so it names no function and is the same in every function's text and in both dialects; classes of one solution whose digests collide extend by two hex digits (`imageTypeLabels`), and a layout-digest name never reuses a reserved image label. The types view and `types.h` print the anchor as a `/* first seen: setSectorSize_arg0; ... */` comment on the declaration; function texts do not. A class with an unexplored flow — exploration cut, absent callee body, or an image reference index that is not complete — is `bounded` and its anchor name carries a 4-hex layout digest, so one printed name never denotes two layouts. The selected function declares the merged layout of every class it has a view of (a pointee class it never dereferences is declared by name only; its layout is in the image types): its own members keep their IDs and types; other members are added where they do not overlap, an unbounded indexed member before others keeps only its first element (indexed accesses stay explicit), and a member another view proves to hold an object pointer becomes that pointer. Single-view private layouts keep layout-digest names (`struct_3fa2c1`), shared by equal layouts. A loop-carried byte offset `c + k*s` beside a lockstep 0-based counter `k` (strength-reduced `a[k].f`) gives the access a constant element stride and the counter as its index, rendered `p->f_20[k].f_8`. `binary_info` view `types` (CLI `open-decomp types`, API `types()` / `typeDeclarations()`) analyzes every function body within the budget and prints all non-private classes as C declarations (`partial` when bodies remain).
 
@@ -330,6 +330,22 @@ temporary, at most four occurrences: `t = x >> 1; x = c ? t : t ^ k` becomes
 or another copy stays a variable. Liveness counts every occurrence as a read at
 the reader.
 
+`address_rematerialization` extends this to several readers for addresses: a
+pointer-width `x ± k` (x a printed variable, or another such sum) read at most
+eight times, every time as a load/store address (directly, through inline
+constant displacements, or through other such sums or inlined `y ± k` whose
+own uses all are), prints at each of those accesses instead of a temporary. The
+access then resolves through `x`: `address->field_0x190 = 0;
+address->field_0x198 = arg2;` instead of `address_1 = (uint8_t*)((uintptr_t)
+address + 0x190); *(uint64_t *)address_1 = 0; *(uint64_t *)((uintptr_t)
+address_1 + 8) = arg2;` (an ARM64 `stp` through a computed base). Liveness
+counts each occurrence as a read of `x` at its reader, so `x`'s variable is
+never reassigned in between; a sum also used as a value (call argument, stored
+value, comparison, edge copy) stays a variable. An explicit address printed
+through two or more constant displacements of one base prints their modular
+total once (`displacement_reassociation`: `(uintptr_t)address + 64`, not
+`+ 48 + 16`), in both dialects.
+
 `single_use_call_inlining` prints a call whose one live result is read once by
 the next printed statement, return, `if` test or `switch` selector as that
 reader's operand (`if (fseek(stream, 0, 2) == 0)`). Its text must occur exactly
@@ -415,7 +431,8 @@ the private frame, a result, an indirect exit, an access at unknown offset)
 contributes the lowest entry-SP offset it can take: exact offsets, constant
 steps, nonnegative (zero-extended, masked or shifted) index addends, cell halves,
 phis and exact spill/reload copies keep that bound; signed or other arithmetic,
-and cycles that keep lowering it, lose it. The stack grows downward, so an object
+and cycles that keep lowering it, lose it. A phi proven to be one frame address on
+every incoming edge prints as that address, so no edge copy assigns it. The stack grows downward, so an object
 designated by an escaped pointer extends toward the entry SP and the caller
 frame: bytes at or above the lowest escaped offset stay explicit frame memory
 (members of the frame object, below), slots wholly below it promote under the recorded
@@ -471,17 +488,29 @@ Neither rewrite claims purity or permits motion across memory accesses, calls
 or fences. Unsupported FP-environment effects remain opaque unless the existing
 requirement projection independently applies; memory fences remain explicit.
 At the presentation-record bound the full `boundary(...)` contract remains
-visible, and unknown instructions retain `opaque_effect(...)`. Checked rendering
-is unchanged.
+visible, and unknown instructions retain `opaque_effect(...)`. A call printed as
+a short-circuit comma operand has its `call_effects` record admitted when the
+operand is planned, with the same scope and contract the printed call asks for:
+a call whose record is refused never becomes a comma operand, so its boundary
+statement never lands inside a test. Checked rendering is unchanged.
 
 After inlining, both source dialects may combine an initial single-entry chain
 of expression-only loop tests. Short-circuit conditions preserve load order and
-all tests leave to the same lexical continuation without exit copies. Assignment,
-comma and copy-smuggling conditional expressions are never introduced into loop
-conditions. Stages needing temporaries, exit copies, effects or shared entries
-remain explicit; unrelated early returns stay inside the body. `loop_form`
-records the conditions and existing control/move validation remains mandatory.
-Checked rendering is unchanged.
+all tests leave to the same lexical continuation without exit copies.
+Copy-smuggling conditional expressions are never introduced into loop
+conditions. The one exception to expression-only tests is the loop header's own
+statement (`loop_comma_condition`, roadmap 4 L1): a header (or the jump block
+that alone enters its test block) printing exactly one assignment, load or
+single-result call its first test reads prints it inside that test, as for
+`comma_condition` (C `while ((x = p->next) != 0)` or `(x = f(), test)`,
+Python-like only `while (x := p.next) != 0:`); the statement still runs once per
+header entry, immediately before the test. A header with a valid C bottom test
+stays `do`/`while` instead, and a `for` counts the statement's operands as test
+reads. Chained stages leaving on their true arm print the exact complement
+(`x == 0`, not `!(x != 0)`). Stages needing temporaries, exit copies, effects or
+shared entries remain explicit; unrelated early returns stay inside the body.
+`loop_form` records the conditions and existing control/move validation remains
+mandatory. Checked rendering is unchanged.
 
 A single-test loop (`while`, `for` or C `do`/`while`) may print its exit edge's
 copies right after the loop when that edge is the only one from inside the loop
@@ -520,7 +549,7 @@ A type inference record carries every `association_ids` member whose assertion d
 
 Parameter roles distinguish observed source inputs, physical-register inputs and explicit entry-storage environment inputs; an entry-SP formal is not evidence of authored arity. Interpretation widths describe reconstructed IR, not necessarily a decoder operand or source declaration. Call constants expose exact unsigned bit patterns with explicit widths, without inventing signedness. Partial fields retain unknown bounds and observed callback targets; local checks retain their bounded scope and counterexamples. Metadata uses the same operation/output budget and cancellation as rendering, and omits evidence IDs when evidence was not requested. Five focused regressions and 12 public both-dialect observations cover these boundaries; they do not establish whole-function equivalence.
 
-Optional `emission.requirements` localize assumptions, unresolved values/effects/calls/control and conflicts at original subjects and instruction-backed output spans. One function-level `fp_environment` explanation names every affected guard/operation and its original state epoch. Source-only `fp_environment_guard` presentation selects the supported edge of an exact lifter guard when its state is an unchanged entry value or call clobber, there are no explicit environment writes, and the unsupported arm is exclusively owned. This is conditional on the recorded requirement at **each** epoch, not proof that calls preserve FP state. Omitted guard/failure provenance maps to the top requirement comment; checked guards and ordered effects remain intact. Computed, loaded, known unsupported, or opaque-written control state retains explicit guards. An opaque effect that is the last statement of a block ending in an unresolved exit changes no recorded epoch (no modeled operation follows it) and does not retain them (`fp_terminal_effect`); an opaque effect elsewhere, such as an unsupported encoding inside the function, still does.
+Optional `emission.requirements` localize assumptions, unresolved values/effects/calls/control and conflicts at original subjects and instruction-backed output spans. One function-level `fp_environment` explanation names every affected guard/operation and its original state epoch. Source-only `fp_environment_guard` presentation selects the supported edge of an exact lifter guard when its state is an entry value or call clobber, unchanged or carried through phis and bitcasts, there are no explicit environment writes, and the unsupported arm is exclusively owned. Transport acceptance is coinductive (a greatest fixpoint over the phi/bitcast web, so loop cycles through a call qualify): a member is accepted when each input is an entry/call epoch or an accepted member; one input of any other kind rejects the guards of the whole function. Each guard record lists the accepted transports its epoch passes through. This is conditional on the recorded requirement at **each** epoch, not proof that calls preserve FP state. Omitted guard/failure provenance maps to the top requirement comment; checked guards and ordered effects remain intact. Computed, loaded, known unsupported, or opaque-written control state retains explicit guards. An opaque effect that is the last statement of a block ending in an unresolved exit changes no recorded epoch (no modeled operation follows it) and does not retain them (`fp_terminal_effect`); an opaque effect elsewhere, such as an unsupported encoding inside the function, still does.
 
 Source-only `fp_native_operations` prints scalar IEEE arithmetic, negation, absolute value, square root, comparisons and compatible conversions under the FP requirement plus the target IEEE representation, no-excess-precision and disabled-contraction (`-ffp-contract=off`) contract. Every operation the recorded `fp_environment` requirement covers prints natively unless a rule below keeps it explicit: C uses `-x`, `__builtin_fabs[f]`/`__builtin_sqrt[f]` (no header, so no clash with an analyzed libm callee) and `(intN_t)x`/`(uintN_t)x`; Python-like prints `-x` and `abs(x)` for binary64. Backwards consumer tracing retains helpers for operations whose arithmetic NaN payload escapes through integer operations, memory, calls or physical boundaries; a promoted local slot is private storage, so a store to it is exactly as observable as the loads that read it back. Comparisons and float-to-integer conversions never observe a payload (a NaN converts to an undefined value, as in the IR), and negation/absolute value change only the sign bit, so none of them forces helpers on their operands or their own result. Float-to-integer conversion truncates toward zero and is undefined for NaN, infinities and out-of-range values, exactly as the IR specifies. Helpers remain for fused and vector operations, payload-escaping arithmetic and square roots, whole functions whose environment is not a recorded default epoch (explicit environment writes or unknown environment effects keep every guard and every FP helper), Python binary32 arithmetic, Python division, square root and float-to-integer conversion (Python raises where the IR yields a value). Finite floating literals retain exact target bits, including integer constants that join an established FP value as a bitcast operand, phi copy or select arm. FP/integer copies preserve representation bitcasts, never numeric assignment conversions. Exhausted presentation records retain the explicit form.
 
@@ -549,9 +578,13 @@ executes both dialects against a host oracle for every ARM64 and x86-64
 condition code, CCMP/CCMN chains and FP ordered/unordered compares with NaN
 inputs.
 
-Call-clobbered FP environment values (FPCR/MXCSR epochs) whose only demand was an
-omitted environment guard print no `unknown_value` placeholder or local; the
-epoch stays in the requirement site and checked view.
+FP environment values (FPCR/MXCSR epochs: entry bindings, call clobbers, their
+phis and the pure definitions between) that only omitted environment guards
+demand print nothing: no `unknown_value` placeholder, local or edge copy
+(`fp_unobserved_epoch` lists the hidden placeholders and phi destinations). A
+mark pass decides it: a value of the web the omitted conditions reach is
+observed when it has a use outside that web or an observed member reads it, so
+cycles release too. The epoch stays in the requirement site and checked view.
 
 Source-only `exit_scratch` presentation keeps exact exit slices and provenance
 in reconstruction facts while summarizing register names once at the function
@@ -777,9 +810,11 @@ that qualifies as a `frame_save` with this exit included; the latter records an
 return address (x86-64) no store may overlap those entry-SP bytes and no store may
 have an unknown address. Accepted exits count as tail exits for frame saves and
 print the indirect-call function-pointer spelling with the observed
-argument-register prefix and an open list: `((R (*)(uint64_t, ...))target)(a)`
-returned when the function has a result type R, else the call and a plain
-`return;` (`function_pointer_call` record). The runtime target is no result
+argument-register prefix, the open list stated on the `open arity` comment line:
+`((R (*)(uint64_t))target)(a)` returned when the function has a result type R, else the call and a plain
+`return;` (`function_pointer_call` record). Tail-call arguments print through the
+routine of an ordinary call's arguments, so a declared pointer local is passed as itself
+rather than as `(uintptr_t)local`. The runtime target is no result
 evidence, so a void-like interface stays void. The checked view keeps
 `indirect_exit`.
 
@@ -901,6 +936,24 @@ the wrapped part of a rotation is that field of the rotated operand, and a
 masked field whose mask bits all lie in the non-wrapped part is the same field of
 `x>>k`. Every mask must match exactly (one bit more or fewer keeps the rotate),
 so a true rotate stays a rotate and its helper is still emitted.
+The same rule folds the ARM64 bitfield-move aliases (`SXTB`/`SXTH`/`SXTW`,
+`SBFIZ`, `UBFIZ`: the generic `SBFM`/`UBFM` lowering) as bit-exact field algebra
+for a field of 8, 16 or 32 bits (a native C integer type) that starts at bit 0 of
+its source. Masks are accumulated through nested `and`s, and a rotation masked to
+one run of `n` bits that does not cross the wrap point reads `n` consecutive bits
+of `x`: `ror(x,w-k) & (mask(n)<<k)` with `0<k` and `k+n<w` is
+`zero_extend(trunc_n(x)) << k`, and a field of `n` bits at `k` OR-ed with its own
+top bit selected into exactly the bits above it (`(sign ? ones : 0) & ~mask(k+n)`,
+the condition being that very bit of the same source) is
+`sign_extend(trunc_n(x)) << k`, for example `(uint64_t)(int32_t)count`. A fill that
+leaves a gap or overlaps the field, a sign bit that is not the field's top bit, a
+field of another value, a hole in a mask, a field crossing the wrap point, a field
+of another width (it would print as masks and xor/subtract pairs) and a field not
+starting at bit 0 (`SBFX`/`UBFX`, whose `SBFM` form the division and signed-shift
+recognizers read) keep the original form. The sign extension makes the existing
+narrow-formal/`return_low_word` presentations see an explicit 32-bit extension: an
+operand used only through `(int32_t)` becomes an `int32_t` formal, under their own
+records and ABI requirements.
 The printer applies the width- and signedness-exact rules below only when its
 recorder accepts a presentation record, so checked text never changes:
 `zero_high_join` (constant-zero concat parts are omitted; one remaining lowest
@@ -1021,13 +1074,18 @@ as `(uintptr_t)"create" + i`. Unnamed data addresses stay numbers.
 
 Indexed read-only tables (`indexed_data_load`) print their contents as
 `static const uintN_t name[N] = {...}` (16 bytes per line, decimal below 2^32). `N`
-is the smaller of the accessed range (width, masks and dominating unsigned
-comparisons bound the index) and the extent: symbol size, else the distance to the next
-symbol/data record/relocation or section end (`object.span_bound`, a bound rather
-than a size). Tables up to 512 bytes print in full; larger ones a 256-byte prefix and
-`/* ... K more */`; an unbounded index over an unsized object shows its first 16 elements
-(`extent not established`). Writable storage, storage with a relocation slot and
-a per-function budget of 1536 content bytes keep the `extern` view. Synthesized
+is an extent only when it comes from a symbol size (capped by the accessed range) or
+from the accessed range itself, which width, masks, dominating unsigned comparisons and
+a guarded `x - c` (`x >= c` and `x <= m` give at most `m - c`) bound; the range must lie
+within the distance to the next symbol/data record/relocation or section end
+(`object.span_bound`, a bound rather than a size). That claim is a
+`table_extent` presentation record. A neighbour distance is never printed as a length:
+past it the extent is not established and the table prints as `name[] = {`, its first
+16 bytes and `/* ... further elements not shown */`. Tables up to 64 bytes print in full;
+larger ones with an established extent print one 16-byte row and `/* ... K more */`
+under the declared `[N]`. The note reads `VA 0x..., read-only; N elements`. Writable
+storage, storage with a relocation slot and a per-function budget of 1536 content bytes
+keep the `extern` view. Synthesized
 struct members are `field_0xOFFSET` and gaps `pad_0xOFFSET`, printed in external declarations and `types.h` (hexadecimal, never `f_36`).
 
 Source-only `constant_pool_literal` replaces exact-width, aligned, nonvolatile
@@ -1162,6 +1220,16 @@ Once the shared source proof-work allowance is exhausted, further speculative
 bitvector candidates retain their original forms without another doomed check.
 One function-level unverified summary counts these unattempted candidates; the
 limitation remains visible rather than consuming one record per skipped rewrite.
+Source phi-copy emission checks after exhaustion fold the same way: one
+function-level `parallel-copy` record states "N later phi-copy emissions not
+validated; local validation allowance exhausted" (each such check charges the
+allowance before any proof step, so its outcome is that limitation), and the
+printed copies are unchanged. Each kind keeps one summary slot; at the record
+bound the summaries take the terminal slots and keep the bound in their reason.
+Without the fold these unverified records filled the 256-record bound in large
+functions, after which every presentation was refused (for example 9, 27 and 23
+`boundary(...)` statements in brotli `main`, `isDate` and
+`sqlite3Fts3Incrmerge`; 0 after).
 Exact source wiring is not speculative and still applies: same-type identity
 operand resolution, offset-zero/same-width bitcasts and extracts reselected from a
 contained slice, extension or extract relocate existing bits without arithmetic.
@@ -1399,6 +1467,31 @@ view. Native written-result storage that the rule rejects stops counting as
 result evidence for exit overlays. Vector-typed FP carriers, supplied signatures
 and checked views keep the existing projection.
 
+Caller result use (`caller_result_use`, `tail_result_width`; source view only, no
+premise). Where the void-like `incidental_result` rule would apply, or a tail's
+callee has no result types and no prepared caller already demands the integer
+result root, the planner asks for positive caller evidence once per request
+(`SourceEvidence.caller_result_demands`). A per-image direct call-site index
+(`src/analysis/calls/caller-sites.ts`; ARM64: a linear sweep of instruction
+sections outside data-in-code for BL/B to a function entry; x86-64: the
+discovered reference index) lists the sites; up to 32 `call` sites, smallest
+callers first, are classified until the first semantic one: a prepared caller
+unit's semantic demand, otherwise a lifted window of the call plus at most 64
+instructions after it (direct and conditional branches followed; calls,
+function entries, indirect branches, returns, tails and traps end a path) whose
+SSA demand observer reaches the call's result from a load, store, branch,
+switch, indirect target or explicit return value. Its registers join
+`function_return_demands`: a void-like selection is redone with that demand
+(recorded as `caller_result_use` with the reading call sites), and an
+unresolved tail is typed at the demanded width, or at the wider integer type
+the other exits already return (`tail_result_width`). The index (one charge per
+swept word, function, range and hint) and the windows run in a quarter of the
+request's remaining work and abstain when it is spent; absence of evidence never
+makes a function void. `sqlite3GetToken`, `getConstraintToken`,
+`sqlite3BtreeOpen`, `sessionRetryConstraints` and `sqlite3PagerSavepoint` print
+integer results this way, and `rtreeInsertCell` types its `rowidWrite` /
+`parentWrite` tails.
+
 A context-specialized callee summary (constant/alias call-site assumptions)
 keeps the callee's result root. The context unit carries the baseline body's
 result, proven on every baseline exit, where an FP/vector exit whose write is
@@ -1440,7 +1533,7 @@ A callee-side variadic area prints as `...` and `va` in the source view (`va_sta
 
 SysV AMD64 callee-side variadics (S7, `classifySysvVaStart` in `source-variadic.ts`) match the exact `va_start` lowering: for the `g` named integer and `f` named vector argument registers, one unconditional 64-bit store of each anonymous integer argument register at R + 8i of a 16-aligned register save area R, one 128-bit store of each anonymous vector argument register at R + 48 + 16j in the one block the entry block's `al != 0` test enters, and the `va_list` at v (`gp_offset = 8g`, `fp_offset = 48 + 16f` as one 64-bit or two 32-bit stores, `overflow_arg_area` = entry SP + 8 + s, `reg_save_area` = R), all before any other access to these areas, call, escape or unknown effect; the saved registers and `al` have no other use, every other `va_list` access is exactly one field, and no save-area address is used except as the base of another printed address. The source view then prints the named formals and `...`, hides those stores (`va_start` presentation record listing them, ABI premise `variadic_convention`), drops the `al` guard (no liveness root, no printed test; both arms must print nothing), keeps the `va_list` as the frame-object member `va` (`va_list va;`, Python-like `frame.va: va_list  # at entry-SP offset -0xN`), prints `va_start(frame.va, <last named>);` in place of the last hidden store, and spells its fields `frame.va[0].gp_offset` / `fp_offset` / `overflow_arg_area` / `reg_save_area` (C reads the two pointers as `(uintptr_t)` and stores them from `(void *)`). The register save area is no frame member: `va_arg` reaches it only through `reg_save_area`. Anything else keeps today's output; the checked view is unchanged.
 
-Callers see a callee's variadic interface (S8). A native unit whose body passes a cheap SSA gate (an incoming-stack address escapes, or on Darwin/Win64 a non-constant access derives from an address at or above the first possible anonymous slot) runs the same source-view classification (`reconstruct` with physical calls, so every register a call may receive counts as a use) and keeps its `va_start` footprint with the prepared unit (`nativeVariadicFootprint`, `src/service/analysis/native-variadic.ts`): the named argument registers in position order (Darwin: the observed register prefix) and the named stack bytes. `NativeInterface.variadic` = `{named_integer, named_vector, named_stack_bytes, named}`; the physical interface fields and the checked view are unchanged. In the source view the planner (`createVariadicCallBinder`) binds the named prefix exactly and appends the anonymous arguments the caller provably sets up for that call or tail: SysV, the integer argument registers after the named ones that this body writes (a prefix: an untouched entry value or a call's clobber ends it), then the vector registers after the named ones up to the constant `al`, each as its low double; Win64, the positions after the named ones whose integer register this body writes, as the double of the FP register when it holds the same bits, else the integer; Darwin, the outgoing stack slots from SP + named stack bytes (`planVariadicStackArguments`), only when the call writes no integer argument register beyond the bound prefix. A store whose own value has unknown initialization counts as a slot's owner only when no call, unknown effect or unknown-offset store lies between it and the call in one block. The list stays open (the `open arity` comment): a forwarded entry value may still be an argument. Records: `variadic_call_arguments` presentation, `variadic_call_convention` ABI premise (SysV: anonymous vector arguments are doubles, at most `al` of them; Win64: FP anonymous arguments are duplicated in their integer register; Darwin: anonymous arguments in consecutive slots after the named stack bytes).
+Callers see a callee's variadic interface (S8). A native unit whose body passes a cheap SSA gate (an incoming-stack address escapes, or on Darwin/Win64 a non-constant access derives from an address at or above the first possible anonymous slot) runs the same source-view classification (`reconstruct` with physical calls, so every register a call may receive counts as a use) and keeps its `va_start` footprint with the prepared unit (`nativeVariadicFootprint`, `src/service/analysis/native-variadic.ts`): the named argument registers in position order (Darwin: the observed register prefix) and the named stack bytes. The stage runs under the unit's optional type/stack limit but sees no remaining-work figure, so its own structuring and validation allowances never depend on the allowance; when that limit cuts it, the unit is `limited`: it has no footprint, never closes its argument list (`arity_complete` is false, callers keep the open-arity form) and is never retained. `NativeInterface.variadic` = `{named_integer, named_vector, named_stack_bytes, named}`; the physical interface fields and the checked view are unchanged. In the source view the planner (`createVariadicCallBinder`) binds the named prefix exactly and appends the anonymous arguments the caller provably sets up for that call or tail: SysV, the integer argument registers after the named ones that this body writes (a prefix: an untouched entry value or a call's clobber ends it), then the vector registers after the named ones up to the constant `al`, each as its low double; Win64, the positions after the named ones whose integer register this body writes, as the double of the FP register when it holds the same bits, else the integer; Darwin, the outgoing stack slots from SP + named stack bytes (`planVariadicStackArguments`), only when the call writes no integer argument register beyond the bound prefix. A store whose own value has unknown initialization counts as a slot's owner only when no call, unknown effect or unknown-offset store lies between it and the call in one block. The list stays open (the `open arity` comment): a forwarded entry value may still be an argument. Records: `variadic_call_arguments` presentation, `variadic_call_convention` ABI premise (SysV: anonymous vector arguments are doubles, at most `al` of them; Win64: FP anonymous arguments are duplicated in their integer register; Darwin: anonymous arguments in consecutive slots after the named stack bytes).
 
 A function's own declaration (DWARF, user annotation) with stack, variadic or hidden-result parameters (S9) binds in the source view only where these rules confirm it: a declared scalar stack parameter is the incoming formal S1 binds at its ABI slot (same width, `incoming_formal`), one declared by-value aggregate is the S4 incoming object (named and placed as declared, `incoming_object`), a declared `...` needs the S6/S7 `va_start` footprint of exactly its named formals (named registers, first anonymous offset; `va_start`), and a declared hidden result (sret) binds its pointer register at entry as the first formal `result`, typed as a pointer to the declared result type; the function then returns that pointer where the ABI returns it (SysV, Win64: `struct_X* f(struct_X* result, …)`) and otherwise nothing (`void`). The `declared_signature` presentation record covers the bound signature. When any declared part is not confirmed (an undeclared or differently sized incoming read, an incoming address through the entry SP, a missing or different footprint), the function is reconstructed again without these parts: the output is exactly the output without them, and the signature is dropped as before. The checked view never takes them.
 

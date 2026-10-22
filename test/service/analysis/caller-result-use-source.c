@@ -1,0 +1,25 @@
+/* SPDX-License-Identifier: MIT
+ * Copyright (c) 2026 Open Decomp contributors.
+ * Source-known corpus for positive caller result-use evidence. Compiled with -O1 and never
+ * analyzed as source. Every analyzed function is `static noinline`, called directly and
+ * stripped of debug info.
+ *
+ *   - `scale`: a plain result; its caller consumes it.
+ *   - `post_call`: the result is the call result left in w0 while a store follows, so the callee
+ *     alone is void-like (`incidental_result`); `use_post` stores the result, which refutes that.
+ *   - `post_ignored`: the same body, but its only caller never reads w0, so it stays void.
+ *   - `bump`: a real void function.
+ */
+volatile int g_vol, g_out;
+
+__attribute__((noinline)) static int scale(int a) { return a * 7 + g_vol; }
+__attribute__((noinline)) static int post_call(int a) { int r = scale(a); g_vol = r; return r; }
+__attribute__((noinline)) static int post_ignored(int a) { int r = scale(a + 1); g_vol = r; return r; }
+__attribute__((noinline)) static void bump(int a) { g_vol = g_vol + a; }
+
+__attribute__((noinline)) int use_scale(int a) { g_out = scale(a) + 1; return a; }
+__attribute__((noinline)) int use_post(int a) { g_out = post_call(a) + 1; return a; }
+__attribute__((noinline)) int use_ignored(int a) { post_ignored(a); return a + 2; }
+__attribute__((noinline)) int use_bump(int a) { bump(a); return a + 3; }
+
+int main(void) { return use_scale(1) + use_post(4) + use_ignored(5) + use_bump(6); }

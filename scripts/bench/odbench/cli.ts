@@ -23,7 +23,7 @@ const USAGE = `Usage: bench <command> [flags]
 Commands:
   inputs                       verify every corpus binary/source hash in the data store
   select [--check]             rebuild corpus.json (--check: verify the committed one reproduces)
-  run od --label L [--repo PATH] [--tier quick|full] [--repeat N] [--inference proven|likely] [--only BINARY,...]
+  run od --label L [--repo PATH] [--tier quick|full] [--repeat N] [--jobs 1] [--inference proven|likely] [--only BINARY,...]
   run ghidra [--tier] [--install DIR] [--java-home DIR] [--force] [--only BINARY,...]
   run source [--tier]
   judge --lanes A,B,... [--pairs A:B,...] [--tier] [--tasks tokens,readability,comprehension,qa]
@@ -32,7 +32,7 @@ Commands:
   report --lanes A,B,... [--reference ghidra] [--pairs A:B,...] [--tier] [--model M] [--out DIR]
         [--qa-samples N] [--comprehension-samples N]
   all --label L [--repo PATH] [--base LANE] [--tier quick] [--no-judge] [--model M]
-        [--repeat N] [--inference proven|likely] [--only BINARY,...] [--install DIR] [--java-home DIR]
+        [--repeat N] [--jobs 1] [--inference proven|likely] [--only BINARY,...] [--install DIR] [--java-home DIR]
         [--force] [--backend omp|anthropic|cmd] [--command CMD] [--concurrency N]
         [--qa-samples N] [--comprehension-samples N] [--out DIR]
         run od, source and ghidra (cached), judge od-L/ghidra/source[/base], write the report
@@ -50,6 +50,7 @@ const FLAG_TYPES = {
   repo: 'string',
   tier: 'string',
   repeat: 'string',
+  jobs: 'string',
   inference: 'string',
   only: 'string',
   install: 'string',
@@ -83,7 +84,15 @@ const JUDGE_FLAGS: readonly FlagName[] = [
   'qa-samples',
   'comprehension-samples',
 ];
-const OD_FLAGS: readonly FlagName[] = ['label', 'repo', 'tier', 'repeat', 'inference', 'only'];
+const OD_FLAGS: readonly FlagName[] = [
+  'label',
+  'repo',
+  'tier',
+  'repeat',
+  'jobs',
+  'inference',
+  'only',
+];
 const GHIDRA_FLAGS: readonly FlagName[] = ['tier', 'install', 'java-home', 'force', 'only'];
 
 const COMMAND_FLAGS: Record<string, readonly FlagName[]> = {
@@ -236,6 +245,7 @@ async function runOd(flags: Flags, loaded: Loaded): Promise<LaneRun> {
     repo: resolve(text(flags, 'repo') ?? resolve(ODBENCH_DIR, '../../..')),
     tier: choice<Tier>(flags, 'tier', ['quick', 'full'], 'quick'),
     repeat: integer(flags, 'repeat', 1),
+    jobs: integer(flags, 'jobs', 1),
     inference: choice(flags, 'inference', ['proven', 'likely'], 'proven'),
     only: list(flags, 'only'),
   });
