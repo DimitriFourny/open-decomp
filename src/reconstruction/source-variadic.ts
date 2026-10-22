@@ -246,11 +246,12 @@ export interface VariadicArea {
 /** Source view, Darwin arm64 and Win64: the callee's `va_start` area. `floor`
  * is the lowest entry-SP offset an escaping or indexing address derived from
  * the incoming area can take (`incomingFloor`); `based` holds the floors of
- * such exposures whose known bases include that very offset. The area starts
- * at `a = floor` when
+ * such exposures derived from the incoming area alone (every base known and
+ * at or above the entry SP). The area starts at `a = floor` when
  * - Darwin: `a` is 0 or the end of the named stack formals, which tile
  *   `[0, a)` in 8-byte slots; Win64: `a = 8 + 8n` with 1 <= n <= 4;
- * - a value based at `a` is dereferenced at non-constant offsets or escapes
+ * - a value derived from the incoming area alone is dereferenced at
+ *   non-constant offsets or escapes, and the lowest byte it can reach is `a`
  *   (a base read only at constant offsets is no variadic area);
  * - every known-offset access below `a` is a bound named formal (`bound`);
  * - Win64 only: for each i in [n, 4) exactly one store of the entry value of

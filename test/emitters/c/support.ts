@@ -593,6 +593,9 @@ export class Parser {
       ? ({ kind: 'float', bits: name === 'float' || name === 'ieee32_t' ? 32 : 64 } as const)
       : null;
     if (type.pointers === 0 && floating) return floating;
+    // `va_list` is `char *` on every supported ABI (Darwin arm64, Win64).
+    if (name === 'va_list' && type.pointers === 0)
+      return { kind: 'pointer', to: { kind: 'int', bits: 8, signed: true } };
     const scalar: CType =
       name === 'bool'
         ? { kind: 'int', bits: 1, signed: false, bool: true }
@@ -670,7 +673,7 @@ export class Parser {
     if (this.peek() === 'const') this.take('const');
     const token = this.take();
     const scalar =
-      /^(?:bits\d+_t|u?int\d+_t|uintptr_t|bool|char|void|float|double|ieee\d+_t|vector_[if]\d+x\d+_t|effect_t|type_\d+)$/;
+      /^(?:bits\d+_t|u?int\d+_t|uintptr_t|bool|char|void|float|double|ieee\d+_t|vector_[if]\d+x\d+_t|effect_t|type_\d+|va_list)$/;
     let pointers = 0;
     if (python && token === 'pointer' && this.peek() === '[') {
       this.take('[');
@@ -904,6 +907,24 @@ export class Parser {
         names: [name],
         tuple: false,
         expression: { kind: 'call', name: 'stack_storage', args: [size, alignment] },
+      });
+      return;
+    }
+    // `va_start(va, last);` sets `va` to the first anonymous argument's address.
+    if (token === 'va_start') {
+      this.take('(');
+      const name = this.take();
+      if (this.peek() === ',') {
+        this.take(',');
+        this.expression();
+      }
+      this.take(')');
+      this.take(';');
+      this.ops.push({
+        kind: 'assign',
+        names: [name],
+        tuple: false,
+        expression: { kind: 'call', name: 'va_start', args: [] },
       });
       return;
     }
@@ -1947,6 +1968,12 @@ export function execute(
           ? BigInt.asUintN(Number(sourceCast[2]), number(args[0]))
           : BigInt.asIntN(Number(sourceCast[2]), number(args[0]));
     if (name === '__pointer') return args[0]!;
+    // The caller laid the anonymous arguments out at `inputs.get('...')`.
+    if (name === 'va_start') {
+      const area = inputs.get('...');
+      assert.ok(area !== undefined, 'Missing explicit variadic area input (...)');
+      return area;
+    }
     if (
       /^(?:bv_|fp_|cast_|flag_|vector_|extract_bits$|insert_bits$|concat_low_first$|signed_value$|wrap$)/.test(
         name,

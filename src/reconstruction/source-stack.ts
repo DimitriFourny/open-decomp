@@ -588,9 +588,10 @@ export function planSourceStack(
     incomingFloor: bigint | undefined,
     reachAll = false;
   const exposedOffsets = new Set<bigint>(),
-    // Source view: floors of incoming-area exposures whose known bases include
-    // that floor itself (a pointer to that slot, stepped or indexed upward).
-    basedFloors = new Set<bigint>();
+    // Source view: floors of exposures derived from the incoming area alone:
+    // every base is known and at or above the entry SP (a pointer into the
+    // incoming arguments, stepped or indexed).
+    incomingBased = new Set<bigint>();
   // Known frame offsets of every address a tainted value is derived from (cell
   // halves, indexed/phi'd pointers, pointers spilled to the frame and reloaded),
   // or null when some tainted leaf has no known origin.
@@ -793,7 +794,7 @@ export function planSourceStack(
       if (reachFloor === undefined || floor < reachFloor) reachFloor = floor;
       if (bases === null || floor >= 0n || bases.some((offset) => offset >= 0n)) {
         if (incomingFloor === undefined || floor < incomingFloor) incomingFloor = floor;
-        if (bases?.includes(floor)) basedFloors.add(floor);
+        if (bases?.length && bases.every((offset) => offset >= 0n)) incomingBased.add(floor);
       }
     }
     return bases;
@@ -1908,7 +1909,7 @@ export function planSourceStack(
         accesses,
         bound: incomingFormalLoads,
         floor: incomingFloor,
-        based: basedFloors,
+        based: incomingBased,
         unknownOffset: (node) => tainted.has(node.address.id) && !addresses.has(node.address.id),
         reentered: (predecessors.get(input.function.entry)?.length ?? 0) > 0,
       },
