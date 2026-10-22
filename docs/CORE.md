@@ -1458,6 +1458,31 @@ view. Native written-result storage that the rule rejects stops counting as
 result evidence for exit overlays. Vector-typed FP carriers, supplied signatures
 and checked views keep the existing projection.
 
+Caller result use (`caller_result_use`, `tail_result_width`; source view only, no
+premise). Where the void-like `incidental_result` rule would apply, or a tail's
+callee has no result types and no prepared caller already demands the integer
+result root, the planner asks for positive caller evidence once per request
+(`SourceEvidence.caller_result_demands`). A per-image direct call-site index
+(`src/analysis/calls/caller-sites.ts`; ARM64: a linear sweep of instruction
+sections outside data-in-code for BL/B to a function entry; x86-64: the
+discovered reference index) lists the sites; up to 32 `call` sites, smallest
+callers first, are classified until the first semantic one: a prepared caller
+unit's semantic demand, otherwise a lifted window of the call plus at most 64
+instructions after it (direct and conditional branches followed; calls,
+function entries, indirect branches, returns, tails and traps end a path) whose
+SSA demand observer reaches the call's result from a load, store, branch,
+switch, indirect target or explicit return value. Its registers join
+`function_return_demands`: a void-like selection is redone with that demand
+(recorded as `caller_result_use` with the reading call sites), and an
+unresolved tail is typed at the demanded width, or at the wider integer type
+the other exits already return (`tail_result_width`). The index (one charge per
+swept word, function, range and hint) and the windows run in a quarter of the
+request's remaining work and abstain when it is spent; absence of evidence never
+makes a function void. `sqlite3GetToken`, `getConstraintToken`,
+`sqlite3BtreeOpen`, `sessionRetryConstraints` and `sqlite3PagerSavepoint` print
+integer results this way, and `rtreeInsertCell` types its `rowidWrite` /
+`parentWrite` tails.
+
 A context-specialized callee summary (constant/alias call-site assumptions)
 keeps the callee's result root. The context unit carries the baseline body's
 result, proven on every baseline exit, where an FP/vector exit whose write is

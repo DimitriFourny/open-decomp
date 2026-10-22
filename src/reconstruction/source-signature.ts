@@ -24,6 +24,7 @@ export function permitsVoidSourceSignature(
     !source.return_pointer &&
     !source.return_source_type &&
     !input.source?.function_return_demands?.length &&
+    !source.caller_result_demands?.length &&
     (source.void_like_result !== undefined ||
       (!input.source?.function_returns?.registers.length &&
         !input.source?.function_returns?.types.length)) &&
@@ -947,9 +948,10 @@ export function projectSourceSignature(
   )
     return result;
   if (
-    input.source.function_return_demands?.some(
-      (register) => register.offset_bits + register.width_bits > 32,
-    )
+    [
+      ...(input.source.function_return_demands ?? []),
+      ...(program.source.caller_result_demands ?? []),
+    ].some((register) => register.offset_bits + register.width_bits > 32)
   )
     return result;
   const returned = [...program.returns.values()];
