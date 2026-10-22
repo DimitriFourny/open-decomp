@@ -215,6 +215,7 @@ export function createNativeUnitPersistence(
         allowance: entry.allowance,
         work: entry.work,
         value: summary,
+        weight: entry.size,
       })
     ) {
       entry.stored = entry.allowance;

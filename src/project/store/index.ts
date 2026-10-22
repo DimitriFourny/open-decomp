@@ -111,11 +111,14 @@ const STORE_SCHEMA_VERSION = 7;
 /** Per-project cap on persisted prepared-callee summaries (compressed payload bytes). Entries
  * of superseded revisions go first, then the oldest write; see `flushNativeSummaries`. */
 export const DEFAULT_NATIVE_SUMMARY_BYTES = 64 * 1024 * 1024;
-/** Queued summaries are written at the next publication; a long computation that queues more
- * than this flushes by itself. */
 /** Delivery-only artifacts (analysis caching disabled) kept in memory for this connection. */
 const MAX_TRANSIENT_ARTIFACT_BYTES = 64 * 1024 * 1024;
-const MAX_PENDING_SUMMARY_BYTES = 8 * 1024 * 1024;
+/** Queued summaries are encoded and written later (idle slices, close, or this pressure bound),
+ * never inside a request's commit. They keep their value graphs alive until then, so the queue
+ * is bounded by the caller-reported retained size (`NativeSummaryRow.weight`), the same bound
+ * as the analysis tier that holds the same graphs (`MAX_PREPARED_UNIT_SIZE`). A row without a
+ * weight counts as 1. */
+const MAX_PENDING_SUMMARY_WEIGHT = 1 << 18;
 /** One persisted summary larger than this is not stored; loading it would cost about what preparing does. */
 const MAX_NATIVE_SUMMARY_ROW_BYTES = 16 * 1024 * 1024;
 const NATIVE_SUMMARIES_TABLE = `CREATE TABLE native_summaries(scope TEXT NOT NULL, function_id TEXT NOT NULL, revision INTEGER NOT NULL, seq INTEGER NOT NULL, allowance INTEGER NOT NULL, work INTEGER NOT NULL, bytes INTEGER NOT NULL, digest TEXT NOT NULL, payload BLOB NOT NULL, PRIMARY KEY(scope,function_id)) STRICT;
@@ -262,8 +265,16 @@ interface PendingSummary {
   readonly revision: number;
   readonly allowance: number;
   readonly work: number;
-  readonly digest: string;
-  readonly payload: Uint8Array;
+  readonly weight: number;
+  readonly value: unknown;
+  /** Readable like a written row. A request's rows become readable at its end
+   * (`releaseNativeSummaries`), exactly when they used to be written. */
+  visible: boolean;
+  /** The visible row this one replaced while still unwritten: what reads see until release. */
+  shadow?: PendingSummary;
+  /** The stored form, built at most once: by a read of the queued row or by its write. `null`:
+   * not encodable or above the per-row cap, so it is never stored. */
+  encoded?: { readonly digest: string; readonly payload: Uint8Array } | null;
 }
 /** A row is authentic only for exactly the identity it was written under. */
 function summaryDigest(
@@ -296,7 +307,9 @@ export class SqliteProjectStore implements ProjectStore {
   readonly #summaryCap: number;
   // Summaries awaiting the next batched write, by `scope\0function`.
   readonly #pendingSummaries = new Map<string, PendingSummary>();
-  #pendingSummaryBytes = 0;
+  #pendingSummaryWeight = 0;
+  // The connection's `synchronous` level, restored after a derived-data write lowers it.
+  #synchronous = 2;
   // Analysis artifacts delivered with analysis caching disabled: memory only, newest kept.
   readonly #transientArtifacts = new Map<string, { artifact: Artifact; bytes: Uint8Array }>();
   #transientBytes = 0;
@@ -307,6 +320,7 @@ export class SqliteProjectStore implements ProjectStore {
     if (!Number.isSafeInteger(summaryCap) || summaryCap < 0)
       fail('invalid_input', 'Invalid native summary byte cap');
     this.#summaryCap = summaryCap;
+    this.#synchronous = numberField(db.prepare('PRAGMA synchronous').get(), 'synchronous');
     this.project_id = projectIdSchema.parse(
       stringField(
         db.prepare('SELECT project_id FROM metadata WHERE singleton=1').get(),
@@ -1397,13 +1411,13 @@ export class SqliteProjectStore implements ProjectStore {
         artifacts: [artifact],
         published_revision: current,
       });
-      this.#writeNativeSummaries();
       this.#db.exec('COMMIT');
     } catch (error) {
       this.#db.exec('ROLLBACK');
       unlinkSync(path);
       throw error;
     }
+    this.releaseNativeSummaries();
     return { state: 'published', artifact };
   }
 
@@ -1484,84 +1498,163 @@ export class SqliteProjectStore implements ProjectStore {
     });
   }
 
-  /** Inside an open transaction: write every queued summary of the current revision, drop those
-   * of superseded revisions (never reusable: their scope names the revision) and evict
-   * deterministically past the byte cap, oldest revision then oldest write first. Failure to
-   * write leaves the enclosing transaction intact. */
-  #writeNativeSummaries(): void {
-    if (this.#pendingSummaries.size === 0) return;
-    const current = this.#current();
-    const rows = [...this.#pendingSummaries.values()].filter((row) => row.revision === current);
-    this.#pendingSummaries.clear();
-    this.#pendingSummaryBytes = 0;
-    if (rows.length === 0) return;
-    this.#db.exec('SAVEPOINT native_summaries');
+  /** The stored form of a queued row, built once (null: never stored). */
+  #encodeSummary(row: PendingSummary): { digest: string; payload: Uint8Array } | null {
+    if (row.encoded !== undefined) return row.encoded;
     try {
-      this.#prepare('DELETE FROM native_summaries WHERE revision<?').run(current);
-      let seq = numberField(
-        this.#prepare('SELECT COALESCE(MAX(seq),0) AS seq FROM native_summaries').get(),
-        'seq',
-      );
-      const insert = this.#prepare(
-        'INSERT OR REPLACE INTO native_summaries(scope,function_id,revision,seq,allowance,work,bytes,digest,payload) VALUES (?,?,?,?,?,?,?,?,?)',
-      );
-      for (const row of rows)
-        insert.run(
-          row.scope,
-          row.function_id,
-          row.revision,
-          ++seq,
-          row.allowance,
-          row.work,
-          row.payload.length,
-          row.digest,
-          row.payload,
-        );
-      let total = numberField(
-        this.#prepare('SELECT COALESCE(SUM(bytes),0) AS total FROM native_summaries').get(),
-        'total',
-      );
-      if (total > this.#summaryCap) {
-        const oldest = this.#prepare(
-          'SELECT scope,function_id,bytes FROM native_summaries ORDER BY revision,seq LIMIT 64',
-        );
-        const drop = this.#prepare('DELETE FROM native_summaries WHERE scope=? AND function_id=?');
-        while (total > this.#summaryCap) {
-          const victims = oldest.all();
-          if (victims.length === 0) break;
-          for (const victim of victims) {
-            if (total <= this.#summaryCap) break;
-            drop.run(stringField(victim, 'scope'), stringField(victim, 'function_id'));
-            total -= numberField(victim, 'bytes');
-          }
-        }
-      }
-      this.#db.exec('RELEASE native_summaries');
+      const encoded = encodeStoredGraph(row.value);
+      const payload = brotliCompressSync(encoded, {
+        params: {
+          [zlib.BROTLI_PARAM_QUALITY]: 4,
+          [zlib.BROTLI_PARAM_SIZE_HINT]: encoded.length,
+        },
+      });
+      row.encoded =
+        payload.length > Math.min(this.#summaryCap, MAX_NATIVE_SUMMARY_ROW_BYTES)
+          ? null
+          : { digest: summaryDigest(row.scope, row.function_id, row.revision, payload), payload };
     } catch {
-      this.#db.exec('ROLLBACK TO native_summaries; RELEASE native_summaries');
+      row.encoded = null;
     }
+    return row.encoded;
+  }
+
+  /** Outside any transaction: write the oldest `limit` queued summaries of the current revision
+   * in one transaction, drop queued rows of other revisions, drop rows of superseded
+   * revisions (never reusable: their scope names the revision) and evict deterministically past
+   * the byte cap, oldest revision then oldest write first. The write is a cache write: it runs
+   * with `synchronous` lowered (in WAL mode the commit then issues no fsync; the frames become
+   * durable with the next full commit, checkpoint or close) and a failure to write never
+   * propagates. Returns the number of rows still queued. */
+  #writeNativeSummaries(limit: number): number {
+    if (this.#pendingSummaries.size === 0) return 0;
+    const current = this.#current();
+    const batch: PendingSummary[] = [];
+    for (const [key, row] of this.#pendingSummaries) {
+      if (batch.length >= limit) break;
+      this.#pendingSummaries.delete(key);
+      this.#pendingSummaryWeight -= row.weight;
+      if (row.revision === current) batch.push(row);
+    }
+    const rows = batch.flatMap((row) => {
+      const encoded = this.#encodeSummary(row);
+      return encoded ? [{ row, ...encoded }] : [];
+    });
+    if (rows.length > 0) {
+      let lowered = false;
+      try {
+        if (this.#synchronous > 1) {
+          this.#db.exec('PRAGMA synchronous=NORMAL');
+          lowered = true;
+        }
+        this.#db.exec('BEGIN IMMEDIATE');
+        try {
+          this.#prepare('DELETE FROM native_summaries WHERE revision<?').run(current);
+          let seq = numberField(
+            this.#prepare('SELECT COALESCE(MAX(seq),0) AS seq FROM native_summaries').get(),
+            'seq',
+          );
+          const insert = this.#prepare(
+            'INSERT OR REPLACE INTO native_summaries(scope,function_id,revision,seq,allowance,work,bytes,digest,payload) VALUES (?,?,?,?,?,?,?,?,?)',
+          );
+          for (const { row, digest, payload } of rows)
+            insert.run(
+              row.scope,
+              row.function_id,
+              row.revision,
+              ++seq,
+              row.allowance,
+              row.work,
+              payload.length,
+              digest,
+              payload,
+            );
+          let total = numberField(
+            this.#prepare('SELECT COALESCE(SUM(bytes),0) AS total FROM native_summaries').get(),
+            'total',
+          );
+          if (total > this.#summaryCap) {
+            const oldest = this.#prepare(
+              'SELECT scope,function_id,bytes FROM native_summaries ORDER BY revision,seq LIMIT 64',
+            );
+            const drop = this.#prepare(
+              'DELETE FROM native_summaries WHERE scope=? AND function_id=?',
+            );
+            while (total > this.#summaryCap) {
+              const victims = oldest.all();
+              if (victims.length === 0) break;
+              for (const victim of victims) {
+                if (total <= this.#summaryCap) break;
+                drop.run(stringField(victim, 'scope'), stringField(victim, 'function_id'));
+                total -= numberField(victim, 'bytes');
+              }
+            }
+          }
+          this.#db.exec('COMMIT');
+        } catch (error) {
+          this.#db.exec('ROLLBACK');
+          throw error;
+        }
+      } catch {
+        // A cache write never fails a request; the rows are recomputed when next needed.
+      } finally {
+        if (lowered) this.#db.exec(`PRAGMA synchronous=${this.#synchronous}`);
+      }
+    }
+    return this.#pendingSummaries.size;
   }
 
   readNativeSummary(scope: string, functionId: string): NativeSummaryRow | null {
-    this.#current();
+    const current = this.#current();
+    // A queued row is served as if it had been written: same bytes, same digest check.
+    const pending = this.#pendingSummaries.get(`${scope}\0${functionId}`);
+    const queued = pending && (pending.visible ? pending : pending.shadow);
+    if (queued) {
+      const encoded = queued.revision === current ? this.#encodeSummary(queued) : null;
+      return encoded
+        ? this.#decodeSummary(scope, functionId, queued.revision, {
+            allowance: queued.allowance,
+            work: queued.work,
+            digest: encoded.digest,
+            payload: encoded.payload,
+          })
+        : null;
+    }
     const row = this.#prepare(
       'SELECT revision,allowance,work,digest,payload FROM native_summaries WHERE scope=? AND function_id=?',
     ).get(scope, functionId);
     if (!row) return null;
     try {
-      const revision = numberField(row, 'revision'),
-        payload = row['payload'];
+      return this.#decodeSummary(scope, functionId, numberField(row, 'revision'), {
+        allowance: numberField(row, 'allowance'),
+        work: numberField(row, 'work'),
+        digest: row['digest'],
+        payload: row['payload'],
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  #decodeSummary(
+    scope: string,
+    functionId: string,
+    revision: number,
+    stored: { allowance: number; work: number; digest: unknown; payload: unknown },
+  ): NativeSummaryRow | null {
+    try {
+      const { payload } = stored;
       if (
         !(payload instanceof Uint8Array) ||
-        summaryDigest(scope, functionId, revision, payload) !== row['digest']
+        summaryDigest(scope, functionId, revision, payload) !== stored.digest
       )
         return null;
       return {
         scope,
         function_id: functionId,
         revision,
-        allowance: numberField(row, 'allowance'),
-        work: numberField(row, 'work'),
+        allowance: stored.allowance,
+        work: stored.work,
         value: decodeStoredGraph(
           brotliDecompressSync(payload, { maxOutputLength: MAX_GRAPH_BYTES }),
         ),
@@ -1581,51 +1674,49 @@ export class SqliteProjectStore implements ProjectStore {
       !Number.isSafeInteger(row.allowance) ||
       row.allowance < 0 ||
       !Number.isSafeInteger(row.work) ||
-      row.work < 0
+      row.work < 0 ||
+      (row.weight !== undefined && (!Number.isSafeInteger(row.weight) || row.weight < 0))
     )
       return false;
     entityIdSchema.parse(row.function_id);
-    let payload: Uint8Array;
-    try {
-      const encoded = encodeStoredGraph(row.value);
-      payload = brotliCompressSync(encoded, {
-        params: {
-          [zlib.BROTLI_PARAM_QUALITY]: 4,
-          [zlib.BROTLI_PARAM_SIZE_HINT]: encoded.length,
-        },
-      });
-    } catch {
-      return false;
-    }
-    if (payload.length > Math.min(this.#summaryCap, MAX_NATIVE_SUMMARY_ROW_BYTES)) return false;
     const key = `${row.scope}\0${row.function_id}`;
     const prior = this.#pendingSummaries.get(key);
-    if (prior) this.#pendingSummaryBytes -= prior.payload.length;
+    if (prior) this.#pendingSummaryWeight -= prior.weight;
+    const shadow = prior && (prior.visible ? prior : prior.shadow);
+    // Encoding and compression happen at the write, not here: the row stays a live reference to
+    // `row.value`, which the caller must not mutate after queueing (prepared units are
+    // immutable once built).
+    const weight = row.weight ?? 1;
     this.#pendingSummaries.set(key, {
       scope: row.scope,
       function_id: row.function_id,
       revision: row.revision,
       allowance: row.allowance,
       work: row.work,
-      digest: summaryDigest(row.scope, row.function_id, row.revision, payload),
-      payload,
+      weight,
+      value: row.value,
+      visible: false,
+      ...(shadow ? { shadow } : {}),
     });
-    this.#pendingSummaryBytes += payload.length;
-    if (this.#pendingSummaryBytes > MAX_PENDING_SUMMARY_BYTES) this.flushNativeSummaries();
+    this.#pendingSummaryWeight += weight;
+    if (this.#pendingSummaryWeight > MAX_PENDING_SUMMARY_WEIGHT) this.flushNativeSummaries();
     return true;
   }
 
-  flushNativeSummaries(): void {
-    if (this.#pendingSummaries.size === 0 || this.#db.isTransaction) return;
-    this.#db.exec('BEGIN IMMEDIATE');
-    try {
-      this.#writeNativeSummaries();
-      this.#db.exec('COMMIT');
-    } catch {
-      this.#db.exec('ROLLBACK');
-      this.#pendingSummaries.clear();
-      this.#pendingSummaryBytes = 0;
+  /** A request boundary: every row queued so far becomes readable. */
+  releaseNativeSummaries(): void {
+    for (const row of this.#pendingSummaries.values()) {
+      row.visible = true;
+      delete row.shadow;
     }
+  }
+
+  /** Write queued summaries: all of them, or the oldest `maxRows` (idle slices). Returns how
+   * many rows are still queued. A no-op inside a transaction. */
+  flushNativeSummaries(maxRows = Infinity): number {
+    if (this.#pendingSummaries.size === 0 || this.#db.isTransaction)
+      return this.#pendingSummaries.size;
+    return this.#writeNativeSummaries(maxRows);
   }
 
   saveJob(job: Job): void {
