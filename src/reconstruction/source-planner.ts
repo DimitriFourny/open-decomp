@@ -1004,6 +1004,11 @@ export function planSource(
     );
   let returnType: DataType | null = null;
   const possibleReturnStorage = possibleAbiReturnStorage(abi);
+  // Exits whose result is the low part of the integer ABI return location.
+  const integerExits = new Map<
+    string,
+    { readonly block: BlockRegion; readonly location: Extract<AbiLocation, { kind: 'register' }> }
+  >();
   for (const block of blocks.values())
     if (block.control.kind === 'return') {
       const control = block.control;
@@ -1135,7 +1140,10 @@ export function planSource(
               type,
               block.id,
             );
-            if (value) returned = [value];
+            if (value) {
+              returned = [value];
+              integerExits.set(control.id, { block, location });
+            }
           }
         }
       }
@@ -1231,23 +1239,65 @@ export function planSource(
       (boundary) => boundary.results.length === 1 && boundary.results[0]!.type.kind === 'integer',
     )
   ) {
+    // The function width is decided from every exit before any exit is rebound.
     const width = Math.max(
       ...[...returns.values()].map((boundary) => bitWidth(boundary.results[0]!.type)),
     );
     returnType = integer(width);
     for (const [id, boundary] of returns) {
       const value = boundary.results[0]!;
-      if (bitWidth(value.type) !== width)
-        returns.set(id, {
-          ...boundary,
-          results: [
-            make(`${id}:return-width`, returnType, owner.get(value.id)!, {
-              kind: 'cast',
-              op: 'zero_extend',
-              value,
-            }),
-          ],
-        });
+      const narrow = bitWidth(value.type);
+      if (narrow === width) continue;
+      // A join of a narrow and a full-width write leaves the bits above the
+      // narrow result as this exit's only other changed cells of the return
+      // root. When those cells cover exactly [narrow, width), the exit returns
+      // the whole register: their concatenation, not a zero extension.
+      const exit = view === 'source' ? integerExits.get(id) : undefined;
+      if (exit && width <= exit.location.width_bits) {
+        const { register } = exit.location;
+        const upper = boundary.outputs
+          .filter((binding) => binding.register.root === register.root)
+          .sort((left, right) => left.register.offset_bits - right.register.offset_bits);
+        let cursor = register.offset_bits + narrow;
+        for (const binding of upper)
+          cursor = binding.register.offset_bits === cursor ? cursor + binding.register.width_bits : -1;
+        const whole =
+          upper.length && cursor === register.offset_bits + width
+            ? bind(
+                `${id}:result-width`,
+                exit.block.register_exit,
+                [{ ...exit.location, width_bits: width }],
+                returnType,
+                exit.block.id,
+              )
+            : null;
+        if (
+          whole &&
+          validation.presentation(
+            'exit_result_width',
+            id,
+            'an exit whose integer result is narrower than the function result width W, and whose remaining changed cells of the integer return root are exactly the bits from that narrow width up to W, returns the concatenation of all its return-root cells up to W: the exact register value, no bits invented or dropped',
+            [id, value.id, ...upper.map((binding) => binding.value.id)],
+          )
+        ) {
+          returns.set(id, {
+            ...boundary,
+            results: [whole],
+            outputs: boundary.outputs.filter((binding) => !upper.includes(binding)),
+          });
+          continue;
+        }
+      }
+      returns.set(id, {
+        ...boundary,
+        results: [
+          make(`${id}:return-width`, returnType, owner.get(value.id)!, {
+            kind: 'cast',
+            op: 'zero_extend',
+            value,
+          }),
+        ],
+      });
     }
   }
   // Tails into proven-void callees contribute no result; the renderer declares
