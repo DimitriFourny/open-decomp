@@ -472,7 +472,7 @@ Files that several items touch:
 
 ### K6: Call spelling: no `...` in open-arity casts; tail arguments printed like ordinary arguments
 
-- [ ] **Problem:**
+- [x] **Done** (measured on the full OD lane `od-rm4-k6` vs `od-main-afb7691`: 51 texts changed, `, ...` casts 77 → 0, `(uintptr_t)` in `return f(` tail lines 46 → 0 in 21 functions, 30 `open arity` header lines gained `indirect call at file offset 0x…`, nothing else, states and work unchanged, checked view byte-identical; emitters 86). **Problem:**
   - 77 function-pointer casts spell open arity as `(T (*)(A, B, ...))`, which in C declares a variadic prototype. This caused 4 wrong claims (`matrix_callback` ×2, `sub@0x100000450`, `sub@0x1400010f0`).
   - 46 `(uintptr_t)` casts on tail-call arguments in 21 functions: `return sqlite3SrcListDelete((uintptr_t)address_2, (uintptr_t)address_1)`, where `address_1` is a declared pointer.
   - **Root cause:**
