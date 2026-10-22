@@ -152,8 +152,11 @@ export function planSourceInlining(
       return;
     }
     const stack = program.source?.stack;
-    if (program.source?.stack_addresses.has(value.id)) {
+    const offset = program.source?.stack_addresses.get(value.id);
+    if (offset !== undefined) {
       if (stack?.kind === 'entry') use(stack.base, at, depth + 1);
+      else if (stack?.kind === 'object' && stack.entry && offset >= 0n)
+        use(stack.entry, at, depth + 1);
       return;
     }
     const expression = program.inline.has(value.id) ? program.expressions.get(value.id) : undefined;

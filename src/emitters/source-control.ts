@@ -198,8 +198,10 @@ export class VariableLiveness {
       const current = pending.pop()!;
       if (seen.has(current.id)) continue;
       seen.add(current.id);
-      if (this.program.source?.stack_addresses.has(current.id)) {
+      const offset = this.program.source?.stack_addresses.get(current.id);
+      if (offset !== undefined) {
         if (stack?.kind === 'entry') pending.push(stack.base);
+        else if (stack?.kind === 'object' && stack.entry && offset >= 0n) pending.push(stack.entry);
         continue;
       }
       const inlined = this.inlined.get(current.id)?.node;

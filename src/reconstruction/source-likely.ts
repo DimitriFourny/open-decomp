@@ -2,10 +2,11 @@ import { LIKELY_GATE, type LikelyHeuristic, type OperationContext } from '../cor
 import { bitWidth, type Expression, type Value } from '../ir/index.js';
 import type { EmissionInput } from '../emitters/model.js';
 import type { Reconstruction } from './model.js';
-import type {
-  LikelyTypeGuess,
-  LikelyTypePresentation,
-  SourcePresentation,
+import {
+  stackEntry,
+  type LikelyTypeGuess,
+  type LikelyTypePresentation,
+  type SourcePresentation,
 } from './source-model.js';
 
 /** How a formal is used inside this body, through unchanged copies of its bits. */
@@ -226,7 +227,7 @@ export function projectLikelyTypes(
       register.offset_bits !== 0 ||
       value.type.kind !== 'integer' ||
       bitWidth(value.type) !== register.width_bits ||
-      (source.stack?.kind === 'entry' && source.stack.base.id === value.id) ||
+      stackEntry(source.stack)?.id === value.id ||
       source.formal_types?.has(value.id) ||
       source.float_values?.has(value.id) ||
       conflicts.has(value.id) ||

@@ -7,6 +7,7 @@ import type {
   StructuredFunction,
 } from '../presentation/index.js';
 import type { Reconstruction } from './model.js';
+import { stackEntry } from './source-model.js';
 import { validateEmittedUses } from './validate-uses.js';
 import {
   crossSilently,
@@ -89,7 +90,13 @@ export function validateReconstruction(program: Reconstruction, context: Operati
         const bytes = BigInt(
           Math.ceil(bitWidth(node.kind === 'load' ? node.result.type : node.value.type) / 8),
         );
-        if (offset !== undefined && offset + bytes > 0n)
+        // Beside a frame object, bytes at or above the live entry SP stay
+        // entry-SP memory; no access spans the entry SP.
+        if (
+          offset !== undefined &&
+          offset + bytes > 0n &&
+          (storage.kind !== 'object' || !storage.entry || offset < 0n)
+        )
           invalid(
             node,
             'callee-entry incoming bytes were projected as newly allocated private storage',
@@ -168,10 +175,10 @@ export function validateReconstruction(program: Reconstruction, context: Operati
       invalid(program.function, 'a synthesized local is used without an emitted definition');
     if (expression) for (const operand of expressionOperands(expression)) checkValue(operand);
   }
+  const entry = stackEntry(storage);
   if (
-    storage?.kind === 'entry' &&
-    (!program.parameters.some((value) => value.id === storage.base.id) ||
-      !program.live.has(storage.base.id))
+    entry &&
+    (!program.parameters.some((value) => value.id === entry.id) || !program.live.has(entry.id))
   )
     invalid(program.function, 'entry-backed storage has no live explicit incoming base');
   if (storage?.kind === 'object') {

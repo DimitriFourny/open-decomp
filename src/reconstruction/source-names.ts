@@ -4,6 +4,7 @@ import { bitWidth, expressionOperands, type IntegerPredicate, type Value } from 
 import type { ParallelTransfer, Region } from '../presentation/index.js';
 import type { Reconstruction } from './model.js';
 import { libraryCallNames, type LibraryResultName } from './library-names.js';
+import { stackEntry } from './source-model.js';
 
 type Role =
   'address' | 'callback' | 'count' | 'index' | 'accumulator' | 'shift_count' | 'limit' | 'operand';
@@ -955,7 +956,7 @@ export function planSourceNames(
     if (!program.live.has(value.id) && !parameters.has(value.id)) continue;
     context.checkpoint(1);
     if (
-      (program.source.stack?.kind === 'entry' && program.source.stack.base.id === value.id) ||
+      stackEntry(program.source.stack)?.id === value.id ||
       program.parameter_registers.get(value.id)?.role === 'stack_pointer'
     ) {
       preferred.set(value.id, 'entry_sp');
