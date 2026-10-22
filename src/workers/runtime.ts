@@ -109,6 +109,11 @@ export async function describeProject(store: ProjectStore): Promise<WorkerSnapsh
   return { ...snapshot, images };
 }
 
+/** Idle write-back of queued callee summaries: wait this long after the last command, then write
+ * this many rows per slice, so a command arriving meanwhile waits for one slice at most. */
+const IDLE_FLUSH_DELAY_MS = 200;
+const IDLE_FLUSH_ROWS = 8;
+
 /** Trusted in-process observation seam for deterministic fault injection at real durable boundaries.
  * It is never selected or configured by an IPC request. */
 export interface WorkerRuntimeObserver {
@@ -123,6 +128,23 @@ export function runProjectWorker(handler?: WorkerHandler, observer?: WorkerRunti
   const admitted = new Map<string, { request: WorkRequest; deadline: number }>();
   let chain = Promise.resolve();
   let pending = 0;
+  // Queued callee summaries are cache data: they are written in small slices while no command
+  // is waiting, after the response that produced them was sent. A crash loses them, never a
+  // job or artifact (those commit before their response; docs/internals/project-cache.md).
+  let idleFlush: ReturnType<typeof setTimeout> | undefined;
+  const scheduleIdleFlush = (delay: number): void => {
+    if (idleFlush !== undefined) clearTimeout(idleFlush);
+    idleFlush = setTimeout(() => {
+      idleFlush = undefined;
+      if (!store || stopping || pending > 0) return;
+      try {
+        if (store.flushNativeSummaries(IDLE_FLUSH_ROWS) > 0) scheduleIdleFlush(0);
+      } catch {
+        // A cache write never fails the worker.
+      }
+    }, delay);
+    idleFlush.unref();
+  };
   const send = async (event: WorkerEvent): Promise<void> => {
     const bytes = frame(eventSchema.parse(event));
     await new Promise<void>((resolve, reject) =>
@@ -450,8 +472,10 @@ export function runProjectWorker(handler?: WorkerHandler, observer?: WorkerRunti
               ? {}
               : { max_result_bytes: work.request.max_result_bytes }),
           });
-          // Prepared callee summaries this request queued and no publication wrote.
-          db.flushNativeSummaries();
+          // Prepared callee summaries this request queued and no publication released: readable
+          // from here on. They are written later (idle slices, queue pressure, close), never
+          // on the request's path.
+          db.releaseNativeSummaries();
           // A handler that parsed and size-checked its result under these very limits
           // (queryWorkerHandler) has marked it; do not repeat the parse and serialization.
           if (!isSchemaValidated(result)) {
@@ -491,6 +515,10 @@ export function runProjectWorker(handler?: WorkerHandler, observer?: WorkerRunti
   const decoder = new FrameDecoder((value) => {
     const command = commandSchema.parse(value);
     if (++pending > 1028) throw new Error('Too many pending worker commands');
+    if (idleFlush !== undefined) {
+      clearTimeout(idleFlush);
+      idleFlush = undefined;
+    }
     chain = chain
       .then(async () => {
         try {
@@ -502,7 +530,7 @@ export function runProjectWorker(handler?: WorkerHandler, observer?: WorkerRunti
             diagnostic: encodeDiagnostic(workerDiagnostic(error)),
           });
         } finally {
-          pending--;
+          if (--pending === 0 && store && !stopping) scheduleIdleFlush(IDLE_FLUSH_DELAY_MS);
         }
       })
       .catch(() => {
