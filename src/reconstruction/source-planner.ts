@@ -936,7 +936,7 @@ export function planSource(
     block.control.kind === 'return' ? [block.control.id] : [],
   );
   const primaryScope =
-    'primary result register defined on every exit path: unknown entry values, unprojected call clobbers and returning-frame addresses disqualify; FP needs typed IEEE writes (literal bits or a typed argument may join); when both qualify: caller demand, then the register written last on every exit path, then a native written-result interface naming exactly one';
+    'primary result register defined on every exit path: unknown entry values, unprojected call clobbers and returning-frame addresses disqualify; FP needs typed IEEE writes (literal bits or a typed argument may join), or an untyped scalar FP value consumed only by exits (literal-zero upper cells, one 32/64-bit width, literal exits neutral) written after the integer register on every exit path; when both qualify: caller demand, then the register written last on every exit path, then a native written-result interface naming exactly one';
   // The untyped FP carrier holds only a vector copy or fill temporary: the
   // integer register decides alone (an exact result, or void-like below).
   const incidentalFloating =
@@ -979,7 +979,11 @@ export function planSource(
       validation.requireAbi(
         'primary_result',
         exitIds,
-        `Present the ABI ${floating ? 'floating-point' : 'integer'} return register as the single result; callers read no ${floating ? 'integer' : 'floating-point'} result register. The rejected register keeps its exact exit value in the exit metadata and checked view.`,
+        `${
+          primaryResult.kind === 'float' && primaryResult.untyped
+            ? 'Present the untyped scalar value of the ABI floating-point return register as the single IEEE result (no write types it): a scalar FP-bank result is IEEE; callers read no integer result.'
+            : `Present the ABI ${floating ? 'floating-point' : 'integer'} return register as the single result; callers read no ${floating ? 'integer' : 'floating-point'} result register.`
+        } The rejected register keeps its exact exit value in the exit metadata and checked view.`,
       );
     else primaryResult = { kind: 'explicit', written: true, reason: 'presentation record bound' };
   } else if (primaryResult?.kind === 'none' && primaryResult.void_like === 'incidental_result') {

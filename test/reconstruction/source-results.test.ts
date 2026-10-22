@@ -1076,3 +1076,185 @@ test('a vector-typed 128-bit copy in xmm0 keeps the typed vector path', () => {
     assert.equal(projection.results[0]!.type.kind, 'vector');
   }
 });
+
+/** AAPCS64 `double from_bits(uint64_t m, uint64_t p, uint64_t *out)` that builds
+ * its result in integer registers like `sqlite3Fp10Convert2`: `p == 0` returns
+ * `movi v0.2d, #0`; otherwise x0 first receives the scratch value `p + 1`, then
+ * `fmov d0, x8` moves `m ^ p` into the FP result register (zeroing the upper
+ * lane). `float` moves the low 32 bits with `fmov s0, w8`. The negatives also
+ * store the value through `out`, pass it to a call, write literal bits
+ * instead, set a non-zero literal upper lane, or record caller demand for x0
+ * (which then also holds 0 on the early exit: a demanded x0 left unchanged on
+ * some exit fails the source return invariant, also without this rule). */
+type IntegerBuilt = 'double' | 'float' | 'stored' | 'call' | 'literal' | 'upper' | 'demanded';
+function integerBuiltFloat(variant: IntegerBuilt) {
+  const abi = darwinArm64Abi;
+  const layout = abi.classifyCall({
+    returns: word,
+    parameters: [word, word, { kind: 'pointer' }],
+    variadic: false,
+    fixed_parameter_count: 3,
+  });
+  const [x0, x1, x2] = layout.parameters.map((parameter) => register(parameter.locations[0]));
+  const v0 = register(
+    abi.classifyCall({ returns: f64, parameters: [], variadic: false, fixed_parameter_count: 0 })
+      .returns[0],
+  );
+  const v0Slice = (
+    id: string,
+    offset: number,
+    width: number,
+    rule: RegisterDescriptor['write_rule'],
+  ): RegisterDescriptor => ({
+    ...v0,
+    id,
+    offset_bits: offset,
+    width_bits: width,
+    root_width_bits: 128,
+    write_rule: rule,
+  });
+  const b = builder(`integer-built-float-${variant}`),
+    entry = b.block('entry'),
+    zero = b.block('zero'),
+    build = b.block('build');
+  const m = entry.readRegister(x0!),
+    p = entry.readRegister(x1!);
+  entry.branch(
+    entry.compare('eq', p, entry.constant(u64, 0n)),
+    entry.edge(zero),
+    entry.edge(build),
+  );
+  if (variant === 'demanded') zero.writeRegister(x0!, zero.constant(u64, 0n));
+  zero.writeRegister(v0Slice('arm64:q0', 0, 128, 'replace_root'), zero.constant(integer(128), 0n));
+  zero.return([]);
+  const value = build.int('xor', m, p);
+  if (variant === 'stored') build.store(build.readRegister(x2!), value);
+  if (variant === 'call')
+    build.call(
+      { kind: 'direct', address: { image_id: image, space: 'va', value: 0x2000n } },
+      [value],
+      [],
+      abi.unknown_call_clobbers,
+    );
+  build.writeRegister(x0!, build.int('add', p, build.constant(u64, 1n)));
+  if (variant === 'float')
+    build.writeRegister(
+      v0Slice('arm64:s0', 0, 32, 'zero_extend_root'),
+      build.cast('truncate', integer(32), value),
+    );
+  else
+    build.writeRegister(
+      v0Slice('arm64:d0', 0, 64, 'zero_extend_root'),
+      variant === 'literal' ? build.constant(u64, bits(1.5)) : value,
+    );
+  if (variant === 'upper')
+    build.writeRegister(
+      v0Slice('arm64:v0:64:64', 64, 64, 'preserve_other_bits'),
+      build.constant(u64, 1n),
+    );
+  build.return([]);
+  const ir = constructSSA(b.finish(entry, [])).value as SSAForm;
+  const source: SourceEvidence = {
+    abi,
+    callees: [],
+    addresses: [],
+    ...(variant === 'demanded' ? { function_return_demands: [x0!] } : {}),
+  };
+  const view = (kind: 'source' | 'checked') =>
+    reconstruct(
+      { function: structureControlFlow(ir, createOperationContext()).value!, source },
+      createOperationContext(),
+      kind,
+    );
+  return { ir, source, view };
+}
+
+const isUntypedScalar = (record: { rule?: string; reason?: string }): boolean =>
+  record.rule === 'primary_result' &&
+  record.reason?.includes('untyped scalar FP value consumed only by exits') === true;
+
+for (const [variant, type, targets] of [
+  [
+    'double',
+    f64,
+    [
+      0x7ff8000000000123n, // quiet NaN with payload
+      0x7ff0000000000001n, // signaling NaN
+      0xfff8dead0000beefn, // negative NaN with payload
+      0x8000000000000000n, // -0.0
+      0x7ff0000000000000n, // +inf
+      0xfff0000000000000n, // -inf
+      bits(-2.75),
+    ],
+  ],
+  [
+    'float',
+    { kind: 'float', bits: 32 } as const,
+    [0x7fc00123n, 0x7f800001n, 0xffc0beefn, 0x80000000n, 0x7f800000n, 0xff800000n],
+  ],
+] as const)
+  test(`darwin-arm64 an integer-built ${variant} in the FP register written after x0 is the ${variant} result`, () => {
+    const fixture = integerBuiltFloat(variant);
+    const source = fixture.view('source');
+    for (const projection of source.returns.values()) {
+      assert.equal(projection.results.length, 1);
+      assert.deepEqual(projection.results[0]!.type, type);
+      assert.equal(projection.outputs.length, 0);
+    }
+    assert.ok(source.local_validation?.some(isUntypedScalar));
+    assert.ok(
+      source.local_validation_session?.abiConformance.some(
+        (site) =>
+          site.rule === 'primary_result' &&
+          site.explanation.includes(
+            'a scalar FP-bank result is IEEE; callers read no integer result',
+          ),
+      ),
+    );
+    // The checked view keeps the exact physical exit state.
+    const checked = fixture.view('checked');
+    assert.ok(!checked.local_validation?.some(isUntypedScalar));
+    for (const projection of checked.returns.values())
+      assert.ok(!projection.results.some((value) => value.type.kind === 'float'));
+    for (const language of ['c-like', 'python-like'] as const) {
+      const { emission } = emit(fixture.ir, { source: fixture.source }, language);
+      assert.match(
+        emission.text,
+        language === 'c-like' ? new RegExp(`^${variant} fn_`, 'm') : new RegExp(`-> ${variant}:`),
+      );
+      assert.doesNotMatch(emission.text, /physical_return/);
+      const formals = emittedFormals(emission);
+      assert.equal(formals.length, 2);
+      const mask = (1n << BigInt(type.bits)) - 1n;
+      for (const [m, p, expected] of [
+        [0x1234n, 0n, 0n],
+        ...targets.map((target) => [target ^ 0x5a5a00000001n, 0x5a5a00000001n, target] as const),
+      ] as const) {
+        const observed = execute(
+          emission,
+          new Map([
+            [formals[0]!.statement_id, m],
+            [formals[1]!.statement_id, p],
+          ]),
+        );
+        assert.deepEqual(observed.values, [expected & mask]);
+      }
+    }
+  });
+
+for (const variant of ['stored', 'call', 'literal', 'upper', 'demanded'] as const)
+  test(`darwin-arm64 an integer-built FP value that is ${variant === 'stored' ? 'also stored' : variant === 'call' ? 'also passed to a call' : variant === 'literal' ? 'a literal on every exit' : variant === 'upper' ? 'below a non-zero upper lane' : 'beside a demanded x0'} is no FP result`, () => {
+    const fixture = integerBuiltFloat(variant);
+    const source = fixture.view('source');
+    assert.ok(!source.local_validation?.some(isUntypedScalar));
+    for (const projection of source.returns.values())
+      assert.ok(!projection.results.some((value) => value.type.kind === 'float'));
+    for (const language of ['c-like', 'python-like'] as const) {
+      const { emission } = emit(fixture.ir, { source: fixture.source }, language);
+      assert.doesNotMatch(emission.text, /^(double|float) fn_|-> (double|float):/m);
+      // Without the rule the FP register written after x0 stays explicit;
+      // caller demand for x0 makes x0 the result instead.
+      if (variant === 'demanded') assert.match(emission.text, /^uint64_t fn_|-> uint64_t:/m);
+      else assert.match(emission.text, /physical_return\(/);
+    }
+  });
