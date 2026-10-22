@@ -269,7 +269,7 @@ Files that several items touch:
 
 ### V1: Caller result-use evidence (correctness)
 
-- [x] **Problem.** Four value-returning functions print `void` although callers in the image read the result: _(done: OD lane `od-rm4-v1` prints integer results for the five functions plus `sqlite3PagerSavepoint` (source `int`), no other text changes, checked view identical; about +340k work on the 38 SQLite functions where the scan runs, near-limit functions unchanged)_
+- [x] **Problem.** Four value-returning functions print `void` although callers in the image read the result: _(done: source-built fixture `test/service/analysis/caller-result-use.test.ts` (a `static noinline` void-like `post_call` kept non-void by its reading caller, `post_ignored`/`bump` stay `void`); OD lane `od-rm4-v1b` prints integer results for the five functions plus `sqlite3PagerSavepoint` (source `int`), no other text changes, checked view identical; about +340k work on the 38 SQLite functions where the scan runs, near-limit functions unchanged)_
   - `sqlite3GetToken` (17 of 18 BL sites read w0/x0; OD's own `getConstraintToken` text reads it);
   - `getConstraintToken` (11/11);
   - `sqlite3BtreeOpen` (5/5);
@@ -881,7 +881,7 @@ Files that several items touch:
 
 ### P4: Struct class names without another function's name
 
-- [ ] **Problem.** 250 of 418 struct names are `<fn>_arg<N>_<hash>` (`sqlite3VdbeAddOp3_arg0_e84e`, `setSectorSize_arg0_f48_f0_2620`), 1,190 occurrences and 34.5 KB. 141 of them name a function other than the one printed, which the judge called "misleading sqlite3DbFree_arg1 type name".
+- [x] **Problem.** 250 of 418 struct names are `<fn>_arg<N>_<hash>` (`sqlite3VdbeAddOp3_arg0_e84e`, `setSectorSize_arg0_f48_f0_2620`), 1,190 occurrences and 34.5 KB. 141 of them name a function other than the one printed, which the judge called "misleading sqlite3DbFree_arg1 type name".
   - **Root cause:** `src/analysis/types/image-types.ts:395-452` names a class after its first anchor.
   - **Change:**
     - Function texts print `struct_<6hex>` (already used for 146 classes; `source-structs.ts:241`).
@@ -890,6 +890,7 @@ Files that several items touch:
   - **Tests:** `test/analysis/types/image-types.test.ts`, `test/emitters/c/source-structs.test.ts`, `test/reconstruction/image-types-source.test.ts`, the docs/CORE.md image-type section.
   - **Acceptance:** only struct names change; lexical tokens unchanged.
   - **Expected effect:** Claude tokens −9.3k, geomean about −0.035 [estimate].
+  - **Done (`wt/rm4-p4`):** OD lane: 97 of 237 texts change, every one only by struct identifiers (identical after renaming; lexical token counts unchanged); `<fn>_arg<N>_` struct names 219 (1,109 occurrences) → 0, and `_ret`/`_obj`/`_local`/`_alloc` names → `struct_<hex>` too (368 names before and after); checked view unchanged on the 4 sampled functions; versions types/16, reconstruction/79, emitters 85.
 
 ## L: Loops
 
@@ -965,7 +966,7 @@ Files that several items touch:
 
 ### T1: Incremental hash of the dependency ledger
 
-- [ ] **Problem.** `fingerprint(readset)` (`source-facts.ts:1817-1837`, inside the dependency loop at `:1786`) rebuilds and hashes the whole append-only ledger (about 10.9k reads) for every context-specialized dependency: 11.0 s of profile plus GC.
+- [x] **Problem.** `fingerprint(readset)` (`source-facts.ts:1817-1837`, inside the dependency loop at `:1786`) rebuilds and hashes the whole append-only ledger (about 10.9k reads) for every context-specialized dependency: 11.0 s of profile plus GC. _Done (`wt/rm4-t1`): all 237 lane texts and states identical to `od-rm3-final`; SQLite `decompile_ms_total` back-to-back at similar load: base 139.3 / 125.6 s → 117.2 / 106.9 s._
   - **Change:**
     - `src/core/identity.ts`: an append-only canonical hasher that produces exactly `fingerprint({version: 1, complete: true, reads})` for a growing array, with `canonicalIdentity` per element (no second format).
     - `src/project/cache/dependencies.ts`: `AnalysisDependencyCollector.readsetFingerprint(readset)` absorbs only new reads. `finish()` snapshots are prefixes (`:410-415`). Fall back to the full hash for foreign readsets.
