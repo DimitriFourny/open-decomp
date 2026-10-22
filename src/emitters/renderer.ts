@@ -288,6 +288,9 @@ export class Renderer {
   private readonly consumed = new Set<ParallelTransfer>();
   private readonly fallthrough = new Set<ParallelTransfer>();
   private readonly loopTests = new Map<string, LoopForm>();
+  /** Source view: the one statement a while/for head test holds (LoopFacts.comma
+   * and carrier), by test control id; it prints inside the loop test. */
+  private readonly loopCommaTests = new Map<string, Instruction>();
   private clones: ReadonlySet<BlockRegion> = new Set();
   private cloneIds: ReadonlySet<string> = new Set();
   /** Source view: a block that prints nothing but its jump (see planSourceControl). */
@@ -5509,8 +5512,9 @@ export class Renderer {
   }
 
   /** Side conditions of a `for` header (see LoopFacts.induction). Records the
-   * hoisted copies when they hold. */
-  private acceptFor(loop: Parameters<LoopFacts['induction']>[0]): boolean {
+   * hoisted copies when they hold. `held`: the one statement a top test holds
+   * (it prints inside the test, so its operands count as test reads). */
+  private acceptFor(loop: Parameters<LoopFacts['induction']>[0], held?: Instruction): boolean {
     const liveness = this.liveness;
     if (!liveness) return false;
     const key = (value: Value): string => this.variableKey(value);
@@ -5527,7 +5531,7 @@ export class Renderer {
           .leaves(copy.source)
           .every((index) => !others.has(key(liveness.values[index]!)));
       });
-    if (!steps.length) return this.acceptStatementFor(loop);
+    if (!steps.length) return this.acceptStatementFor(loop, held);
     if (!independent(steps) || !independent(inits)) return false;
     const induction = new Set<string>();
     for (const copy of steps) {
@@ -5547,7 +5551,7 @@ export class Renderer {
       ? restated
         ? [key(restated.left)]
         : []
-      : liveness.leaves(loop.test.condition).map((index) => key(liveness.values[index]!));
+      : this.testLeaves(loop.test, held).map((index) => key(liveness.values[index]!));
     if (!reads.some((variable) => induction.has(variable))) return false;
     // Nothing inside the loop writes an induction variable except the step.
     for (const id of loop.inside) {
@@ -5574,12 +5578,24 @@ export class Renderer {
     return true;
   }
 
+  /** Variable leaves a loop's top test reads: its condition and, when it holds
+   * one (see loopCommaTests), the operands of the statement printed inside it. */
+  private testLeaves(test: Extract<Control, { kind: 'if' }>, held?: Instruction): number[] {
+    const liveness = this.liveness!;
+    const leaves = [...liveness.leaves(test.condition)];
+    if (held) for (const value of liveness.operands(held)) leaves.push(...liveness.leaves(value));
+    return leaves;
+  }
+
   /** A top-tested `for` whose step is the loop body's last statement and assigns
    * a variable the test reads; its init, when the loop's entry block ends with
    * one, is the statement assigning that variable just before the loop. The
    * step still runs last in every iteration: the sole repeat edge prints
    * nothing and follows it, and nothing else in the loop writes the variable. */
-  private acceptStatementFor(loop: Parameters<LoopFacts['induction']>[0]): boolean {
+  private acceptStatementFor(
+    loop: Parameters<LoopFacts['induction']>[0],
+    held?: Instruction,
+  ): boolean {
     const liveness = this.liveness;
     if (!liveness || loop.bottom) return false;
     const step = this.trailingStatement(loop.step);
@@ -5587,7 +5603,7 @@ export class Renderer {
     const variable = this.variableKey(step.result);
     const writes = (ids: readonly number[]): boolean =>
       ids.some((index) => this.variableKey(liveness.values[index]!) === variable);
-    if (!writes(liveness.leaves(loop.test.condition))) return false;
+    if (!writes(this.testLeaves(loop.test, held))) return false;
     let definitions = 0;
     for (const id of loop.inside) {
       const block = this.program.blocks.get(id);
@@ -6007,31 +6023,29 @@ export class Renderer {
       const stage = form.chain.find((item) => item.test === control.id)!;
       if (control.id === form.test) {
         const start = this.writer.offset;
+        // The header's one statement prints inside the first test (operandTerm).
+        const held = this.loopCommaTests.get(form.test);
         const operands = form.chain.map((item) => {
           const flag = this.flagTests.get(item.test);
           if (flag) {
             const merged = this.flagCondition(flag);
             return `(${(item.enter ? merged.positive : merged.negative).text})`;
           }
-          const block = this.program.blocks.get(item.block)!;
-          const test = block.control;
-          if (test.kind !== 'if') this.invalid('A loop condition lost its branch');
-          const predicate = this.printed(test.condition);
-          const condition = item.enter
-            ? predicate.text
-            : c
-              ? `!(${predicate.text})`
-              : `not (${predicate.text})`;
-          return `(${condition})`;
+          const test = this.controls.get(item.test);
+          if (test?.kind !== 'if') this.invalid('A loop condition lost its branch');
+          if (held && item.test === form.test)
+            return this.printer.group(this.operandTerm(test, item.enter, held).printed, PRIMARY);
+          return `(${this.testPrinted(test, item.enter).text})`;
         });
         this.writer.line(
           depth - 1,
           c ? `while (${operands.join(' && ')}) {` : `while ${operands.join(' and ')}:`,
         );
+        this.mapHeaded(start);
         for (const item of form.chain) {
           const block = this.program.blocks.get(item.block)!;
           for (const node of block.statements)
-            if (this.program.retained.has(node.id)) this.map(node, start);
+            if (this.program.retained.has(node.id) && node !== held) this.map(node, start);
           this.map(block.control, start, [block.control.effect.id]);
         }
       }
@@ -6046,17 +6060,22 @@ export class Renderer {
         exit = form.enter ? control.when_false : control.when_true,
         header = this.forLoops.get(control.id),
         statements = form.kind === 'for' ? this.forStatements.get(control.id) : undefined;
+      // The header's one statement prints inside the test (see operandTerm).
+      const held = this.loopCommaTests.get(control.id);
+      const head = (): string =>
+        held ? this.operandTerm(control, form.enter, held).printed.text : test(form.enter);
       const start = this.writer.offset;
       this.writer.line(
         depth - 1,
         statements
-          ? `for (${statements.init ? this.headerStatement(statements.init) : statements.copies ? this.hoistedText(statements.copies) : ''}; ${test(form.enter)}; ${this.headerStatement(statements.step)}) {`
+          ? `for (${statements.init ? this.headerStatement(statements.init) : statements.copies ? this.hoistedText(statements.copies) : ''}; ${head()}; ${this.headerStatement(statements.step)}) {`
           : form.kind === 'for' && header
-            ? `for (${this.hoistedText(header.init)}; ${test(form.enter)}; ${this.hoistedText(header.step)}) {`
+            ? `for (${this.hoistedText(header.init)}; ${head()}; ${this.hoistedText(header.step)}) {`
             : c
-              ? `while (${test(form.enter)}) {`
-              : `while ${test(form.enter)}:`,
+              ? `while (${head()}) {`
+              : `while ${head()}:`,
       );
+      this.mapHeaded(start);
       for (const node of statements ? [statements.init, statements.step] : [])
         if (node) {
           this.map(node, start);
@@ -6948,7 +6967,12 @@ export class Renderer {
         ? `${chained ? '} else ' : ''}if (${text}) {`
         : `${chained ? 'el' : ''}if ${text}:`,
     );
-    // Operand statements printed inside this test map to its line.
+    this.mapHeaded(start);
+  }
+
+  /** Operand statements printed inside the head line starting at `start` (an
+   * `if` or loop test) map to that line. */
+  private mapHeaded(start: number): void {
     for (const origin of this.headed.splice(0)) {
       const node = this.statements.get(origin.id);
       this.inferenceSites.set(origin.id, { start, end: this.writer.offset });
@@ -7830,6 +7854,13 @@ export class Renderer {
         for (const control of flag.controls) this.flagStages.add(control);
         for (const access of flag.accesses) this.flagAccesses.add(access);
       }
+    // The one statement a non-silent loop header prints, when its test (or the
+    // test of the block its carrier jump enters) holds it (commaOperands).
+    const headStatement = (header: string): Instruction | undefined => {
+      const block = program.blocks.get(header);
+      if (!block || silent(block)) return undefined;
+      return this.commaOperands.get(this.commaCarriers.get(header) ?? header) ?? undefined;
+    };
     const shaped = planLoopForms(
       body,
       this.language,
@@ -7840,6 +7871,11 @@ export class Renderer {
             liveness.leaves(copy.source).map((index) => key(liveness.values[index]!)),
           ),
         silent,
+        comma: (block) => {
+          const node = this.commaOperands.get(block.id);
+          return !!node && block.statements.includes(node);
+        },
+        carrier: (block) => this.commaCarriers.get(block.id),
         plain: (control) => !this.requirementPredicates.has(control.id),
         reads: (control) => {
           const flag = this.flagTests.get(control.id);
@@ -7862,14 +7898,16 @@ export class Renderer {
           );
         },
         rebase: (control, repeat) => this.restateTest(control, repeat),
-        induction: (loop) => this.acceptFor(loop),
+        induction: (loop) =>
+          this.acceptFor(loop, loop.bottom ? undefined : headStatement(loop.header)),
       },
       this.context,
     );
     const tests: string[] = [],
       fors: string[] = [],
       exits: string[] = [],
-      exitCopyLoops = new Set<string>();
+      exitCopyLoops = new Set<string>(),
+      commas = new Map<string, Instruction>();
     const forms = (region: Region): void => {
       if (region.kind === 'sequence') region.regions.forEach(forms);
       else if (region.kind === 'loop') {
@@ -7880,6 +7918,13 @@ export class Renderer {
               : [region.form.test]),
           );
         if (region.form?.kind === 'for') fors.push(region.form.test);
+        // A top test of a header printing one statement holds it.
+        const held =
+          region.form &&
+          (region.form.kind === 'while' || (region.form.kind === 'for' && !region.form.bottom))
+            ? headStatement(region.header)
+            : undefined;
+        if (region.form && held) commas.set(region.form.test, held);
         const control = region.form && this.controls.get(region.form.test);
         const leave =
           region.form &&
@@ -7914,6 +7959,13 @@ export class Renderer {
           subject,
           "a single-test loop's exit edge prints its copies right after the loop: it is the only edge from inside the loop to the continuation, and outer-loop exit flags are tested before them; a do-while's repeat copies (moved before its test) are not read by them",
           exits,
+        )) &&
+      (!commas.size ||
+        this.localValidation.presentation(
+          'loop_comma_condition',
+          subject,
+          'a while or for loop whose header prints exactly one statement before its first test (an assignment, load or single-result call defining a value that test reads; a jump block alone entering the test may hold it) prints that statement inside the test: C `(x = f(), test)`, or `test` with its one direct read of x replaced by `(x = f())`; Python-like only the direct `(x := f())`. The comma operator is a sequence point, so the statement runs once per header entry, immediately before the test, as in the header block; a header that also has a valid bottom test stays do-while',
+          [...commas.values()].map((node) => node.id),
         ))
         ? shaped
         : body;
@@ -7923,7 +7975,7 @@ export class Renderer {
       this.forLoops.clear();
       this.forStatements.clear();
       this.headerStatements.clear();
-    }
+    } else for (const [test, node] of commas) this.loopCommaTests.set(test, node);
     // Short-circuit tests sharing one arm print as if/else.
     const loopTests = new Set(this.body === body ? [] : tests);
     const sharedArms = planSharedArms(
@@ -8694,8 +8746,11 @@ export class Renderer {
       const carried = this.sourceView ? this.commaCarriers.get(region.id) : undefined;
       const test = carried ? this.program.blocks.get(carried)!.control : region.control;
       const comma = this.sourceView ? this.commaOperands.get(carried ?? region.id) : undefined;
+      // A loop header's one statement prints inside its while/for test.
+      const looped = this.loopCommaTests.get(test.id);
       const merged =
         comma &&
+        !looped &&
         (this.joinedPlan !== undefined ||
           this.conjunct !== undefined ||
           (this.sharedPlan !== undefined && controlArms(test).some((arm) => arm.joins)))
@@ -8703,7 +8758,7 @@ export class Renderer {
           : undefined;
       if (merged) this.commaHeld = { control: test.id, node: merged };
       for (const node of region.statements) {
-        if (node === merged) continue;
+        if (node === merged || node === looped) continue;
         this.context.checkpoint(1);
         if (this.headerStatements.has(node.id)) {
           this.sourceDefinitions(node.id, depth);
