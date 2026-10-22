@@ -356,7 +356,6 @@ export function prepareNativeUnit(
   };
   let types: TypeRecoveryResult | null = null;
   const reasons: string[] = [...graph.coverage.reasons];
-  let optionalWorkComplete = true;
   try {
     types = recoverTypes(ir, abi, local, {
       image_id: image.id,
@@ -411,7 +410,6 @@ export function prepareNativeUnit(
     )
       throw error;
     context.checkpoint(0);
-    optionalWorkComplete = false;
     limited = true;
     reasons.push(`native optional type/stack work limit (${workLimit})`);
     types = null;
@@ -483,7 +481,8 @@ export function prepareNativeUnit(
     reasons,
     limited,
     arity_complete:
-      optionalWorkComplete &&
+      // A limit may have cut the footprint stage, which can hide a `...`.
+      !limited &&
       // Discovery reports an indirect call as unresolved control flow, but the
       // call returns and the lifted graph is still complete. Unknown and
       // non-tail indirect terminators (other than the lifter's conditional FP
