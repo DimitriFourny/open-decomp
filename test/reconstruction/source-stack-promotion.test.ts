@@ -982,7 +982,9 @@ for (const abi of targets)
             );
             assert.deepEqual(observation.values, [oracle], `${view} ${language}\n${output.text}`);
             assert.equal(received.length, 1);
-            if (formals.some(({ name }) => name === 'entry_sp'))
+            // The checked view addresses the frame from the entry SP; beside a
+            // live entry SP the source view passes the frame object's member (S2).
+            if (view === 'checked' && formals.some(({ name }) => name === 'entry_sp'))
               assert.deepEqual(received, [entrySp - 32n]);
             observed.set(`${view} ${language}`, observation.events);
           }
