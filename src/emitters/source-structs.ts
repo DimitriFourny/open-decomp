@@ -39,6 +39,9 @@ export const usedMemberKey = (member: ObservedMember): string =>
 export class SourceStructs {
   private readonly names = new Map<string, string>();
   private readonly canonical = new Map<string, string>();
+  /** Every printed `struct_<hex>`: image-wide names are reserved up front, so a
+   * layout digest never reuses one. */
+  private readonly digests = new Set<string>();
   private readonly scalars = new Map<string, string | null>();
   private readonly layouts = new Map<string, readonly ObservedMember[] | null>();
   readonly strides = new Map<string, bigint | null>();
@@ -50,6 +53,7 @@ export class SourceStructs {
     shapes: readonly MemoryShape[] = [],
     private readonly images: ReadonlyMap<string, ImageTypeBinding> = new Map(),
   ) {
+    for (const binding of images.values()) this.digests.add(binding.name);
     for (const shape of shapes) {
       context.checkpoint(1 + shape.fields.length);
       const stride = shape.fields[0]?.stride;
@@ -238,7 +242,12 @@ export class SourceStructs {
     const key = record?.source === 'analysis' ? this.key(id) : `declared:${id}`;
     let name = tag ?? image ?? this.canonical.get(key);
     if (!name) {
-      name = `struct_${fingerprint(key).slice(0, 6)}`;
+      const digest = fingerprint(key);
+      let length = 6;
+      while (length < digest.length && this.digests.has(`struct_${digest.slice(0, length)}`))
+        length += 2;
+      name = `struct_${digest.slice(0, length)}`;
+      this.digests.add(name);
       this.canonical.set(key, name);
     }
     this.names.set(id, name);
