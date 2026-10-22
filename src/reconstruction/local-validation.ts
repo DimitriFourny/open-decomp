@@ -44,6 +44,7 @@ export function rejectTranslation(record: LocalValidationRecord, origin: Origin)
 }
 
 class Unsupported extends Error {}
+const EXHAUSTED = 'local validation work allowance exhausted';
 /** Local limits are deliberately separate from the shared operation limits. Only
  * this exception is caught; cancellation/deadline/outer exhaustion propagate. */
 export class ValidationAllowance {
@@ -63,7 +64,7 @@ export class ValidationAllowance {
   charge(): void {
     if (this.work >= this.limit) {
       this.context.checkpoint(0);
-      throw new Unsupported('local validation work allowance exhausted');
+      throw new Unsupported(EXHAUSTED);
     }
     this.context.checkpoint(1);
     this.work++;
@@ -457,7 +458,9 @@ export class LocalValidationSession {
   >();
   constructor(
     context: OperationContext,
-    private readonly aggregateBitvectors = false,
+    /** Source-view session: verified bitvector records are batched, and what is
+     * not attempted after the allowance runs out is summarized (see exhausted). */
+    private readonly aggregate = false,
     private readonly functionSubject?: string,
     allowance?: ValidationAllowance,
   ) {
@@ -473,7 +476,7 @@ export class LocalValidationSession {
     context.checkpoint(1 + this.records.length + this.abiConformance.length);
     const copy = new LocalValidationSession(
       context,
-      this.aggregateBitvectors,
+      this.aggregate,
       this.functionSubject,
       this.allowance.fork(),
     );
@@ -507,30 +510,58 @@ export class LocalValidationSession {
       });
     for (const id of this.rejectedRewrites) copy.rejectedRewrites.add(id);
     for (const key of this.#recorded) copy.#recorded.add(key);
-    copy.skippedBitvectors = this.skippedBitvectors;
-    copy.skippedRecord = this.skippedRecord;
+    for (const [kind, summary] of this.exhaustedSummaries)
+      copy.exhaustedSummaries.set(kind, { ...summary });
     return copy;
   }
 
-  private skippedBitvectors = 0;
-  private skippedRecord: number | undefined;
+  /** One terminal limitation record per kind of candidate not attempted after
+   * the allowance ran out: its count and its record slot. */
+  private readonly exhaustedSummaries = new Map<
+    'bitvector' | 'parallel-copy',
+    { count: number; readonly slot: number }
+  >();
+
+  /** Count one candidate of `kind` not attempted because the allowance is
+   * exhausted into that kind's single limitation record. Index 256 is the
+   * existing terminal limitation-record slot, not extra proof capacity: a
+   * summary placed there keeps the record-bound limitation in its reason, and
+   * the second summary kind takes the slot after it. */
+  private exhausted(
+    kind: 'bitvector' | 'parallel-copy',
+    subject: string,
+    scope: string,
+    reason: (count: number) => string,
+  ): void {
+    this.allowance.context.checkpoint(0);
+    let summary = this.exhaustedSummaries.get(kind);
+    if (!summary) {
+      let slot = Math.min(this.records.length, 256);
+      for (const other of this.exhaustedSummaries.values()) if (other.slot === slot) slot++;
+      summary = { count: 0, slot };
+      this.exhaustedSummaries.set(kind, summary);
+    }
+    summary.count++;
+    this.records[summary.slot] = {
+      kind,
+      subject: this.functionSubject ?? subject,
+      status: 'unverified',
+      scope,
+      reason: `${summary.slot >= 256 ? 'local validation record bound exceeded; ' : ''}${reason(summary.count)}`,
+    };
+  }
 
   /** Source-only candidate admission: after shared work runs out, retain the
    * original form instead of repeatedly attempting a guaranteed-failing proof. */
   skipExhaustedBitvector(subject: string): boolean {
-    if (!this.aggregateBitvectors || !this.allowance.exhausted) return false;
-    this.allowance.context.checkpoint(0);
-    this.skippedBitvectors++;
-    // Index256 is the existing terminal limitation-record slot, not extra proof
-    // capacity. If present, preserve its record-bound limitation in the summary.
-    this.skippedRecord ??= Math.min(this.records.length, 256);
-    this.records[this.skippedRecord] = {
-      kind: 'bitvector',
-      subject: this.functionSubject ?? subject,
-      status: 'unverified',
-      scope: 'source bitvector candidates not attempted; original forms retained',
-      reason: `${this.skippedRecord === 256 ? 'local validation record bound exceeded; ' : ''}${this.skippedBitvectors} later candidates were not attempted because the local validation allowance was exhausted`,
-    };
+    if (!this.aggregate || !this.allowance.exhausted) return false;
+    this.exhausted(
+      'bitvector',
+      subject,
+      'source bitvector candidates not attempted; original forms retained',
+      (count) =>
+        `${count} later candidates were not attempted because the local validation allowance was exhausted`,
+    );
     return true;
   }
 
@@ -542,6 +573,19 @@ export class LocalValidationSession {
     subjectIds?: readonly string[],
   ): LocalValidationRecord {
     this.allowance.context.checkpoint(0);
+    // A phi-copy check charges the allowance before any proof step, so once it
+    // is exhausted each check's outcome is this same limitation. One record
+    // states them all and leaves the record bound to later presentations.
+    if (kind === 'parallel-copy' && this.aggregate && this.allowance.exhausted) {
+      this.exhausted(
+        kind,
+        subject,
+        'actual phi-copy emissions after the allowance ran out; printed copies unchanged',
+        (count) =>
+          `${count} later phi-copy emissions not validated; local validation allowance exhausted`,
+      );
+      return { kind, subject, scope, status: 'unverified', reason: EXHAUSTED };
+    }
     if (this.records.length >= 256) {
       const record: LocalValidationRecord = {
         kind,
@@ -561,7 +605,7 @@ export class LocalValidationSession {
     const checked = bounded({ kind, subject, scope }, action);
     let record = subjectIds ? { ...checked, subject_ids: subjectIds.slice(0, 64) } : checked;
     if (
-      this.aggregateBitvectors &&
+      this.aggregate &&
       kind === 'bitvector' &&
       record.status === 'verified' &&
       record.counterexample === undefined

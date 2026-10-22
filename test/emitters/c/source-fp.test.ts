@@ -8,7 +8,7 @@ import { darwinArm64Abi } from '../../../src/abi/darwin-arm64/index.js';
 import { sysvAMD64Abi } from '../../../src/abi/sysv-amd64/index.js';
 import { constructSSA } from '../../../src/analysis/ssa/index.js';
 import { createOperationContext, type AbiProfile } from '../../../src/core/index.js';
-import { integer, type SSAForm } from '../../../src/ir/index.js';
+import { integer, type BlockBuilder, type SSAForm, type Value } from '../../../src/ir/index.js';
 import {
   fpEnvironmentGuard,
   stateRegister,
@@ -408,4 +408,318 @@ test('FP presentation record exhaustion retains original guards and helpers', ()
   );
   assert.equal(projected.guards.size, 0);
   assert.equal(projected.expressions.size, 0);
+});
+
+/** The exact lifter environment guard of `abi` at the end of `current`: an
+ * unsupported state exits through an unknown terminal, otherwise control
+ * continues in the returned block. */
+function environmentGuard(
+  b: ReturnType<typeof builder>,
+  abi: AbiProfile,
+  current: BlockBuilder,
+  label: string,
+): BlockBuilder {
+  const supported = b.block(`${label}-supported`),
+    failure = b.block(`${label}-failure`);
+  const arm = abi.id === darwinArm64Abi.id;
+  const state = current.readRegister(environmentRegister(abi));
+  const condition = arm
+    ? current.compare(
+        'eq',
+        current.int('and', state, current.constant(integer(32), fpEnvironmentGuard.mask)),
+        current.constant(integer(32), 0n),
+      )
+    : current.compare(
+        'ne',
+        state,
+        current.constant(integer(10), x86FpEnvironmentGuard.supported_bits),
+      );
+  current.branch(
+    condition,
+    current.edge(arm ? supported : failure),
+    current.edge(arm ? failure : supported),
+  );
+  if (arm) failure.unknown(fpEnvironmentGuard.unsupported_effect, unknownClobbers);
+  failure.terminate({
+    kind: 'unknown',
+    reason: arm ? fpEnvironmentGuard.unsupported_exit : x86FpEnvironmentGuard.unsupported_exit,
+  });
+  return supported;
+}
+
+function environmentRegister(abi: AbiProfile) {
+  return abi.id === darwinArm64Abi.id
+    ? stateRegister('fpcr')
+    : {
+        ...stateRegister('fpcr'),
+        id: 'x86_64:mxcsr[6:16]',
+        root: 'x86_64:mxcsr',
+        offset_bits: 6,
+        width_bits: 10,
+        write_rule: 'preserve_other_bits' as const,
+      };
+}
+
+const CALLEE = {
+  kind: 'direct' as const,
+  address: { image_id: image, space: 'va' as const, value: 0x1234n },
+};
+
+function sourceOf(abi: AbiProfile, ir: SSAForm) {
+  return {
+    abi,
+    callees: ir.blocks
+      .flatMap((block) => block.instructions)
+      .filter((node) => node.kind === 'call')
+      .map((node) => ({
+        call_id: node.id,
+        parameters: [],
+        returns: [],
+        argument_list_complete: true,
+        evidence_ids: [],
+      })),
+    addresses: [],
+  };
+}
+
+/** `acc = x; for (i = 0; i < 3; i++) { guard; acc *= 1.5; if (!(i & 1)) f(); guard; acc += 0.25; }`
+ * On Darwin the environment phi after the optional call joins the call
+ * clobber with the loop header's phi, which joins the entry state with it: a
+ * cycle whose only inputs are epochs. `write` adds an explicit environment
+ * write after the call. */
+function loopFixture(abi: AbiProfile, write: boolean) {
+  const fp = { kind: 'float' as const, bits: 64 as const };
+  const i32 = integer(32);
+  const location = abi.classifyCall({
+    returns: fp,
+    parameters: [fp],
+    variadic: false,
+    fixed_parameter_count: 1,
+  }).parameters[0]!.locations[0]!;
+  if (location.kind !== 'register') throw new Error('Expected FP register');
+  const b = builder(`fp-epoch-loop-${abi.id}-${write}`);
+  const entry = b.block('entry'),
+    head = b.block('head', [fp, i32]),
+    calling = b.block('calling'),
+    rejoin = b.block('rejoin'),
+    exit = b.block('exit');
+  entry.jump(head, [
+    entry.cast('bitcast', fp, entry.readRegister({ ...location.register, width_bits: 64 })),
+    entry.constant(i32, 0n),
+  ]);
+  const [accumulator, index] = head.parameters as [Value, Value];
+  const before = environmentGuard(b, abi, head, 'before');
+  const product = before.fp('mul', accumulator, before.constant(fp, 0x3ff8000000000000n));
+  before.branch(
+    before.compare(
+      'eq',
+      before.int('and', index, before.constant(i32, 1n)),
+      before.constant(i32, 0n),
+    ),
+    before.edge(calling),
+    before.edge(rejoin),
+  );
+  calling.call(CALLEE, [], [], abi.unknown_call_clobbers);
+  if (write)
+    calling.writeRegister(
+      environmentRegister(abi),
+      calling.constant(
+        integer(environmentRegister(abi).width_bits),
+        abi.id === darwinArm64Abi.id ? 1n << 22n : 0n,
+      ),
+    );
+  calling.jump(rejoin);
+  const after = environmentGuard(b, abi, rejoin, 'after');
+  const sum = after.fp('add', product, after.constant(fp, 0x3fd0000000000000n));
+  const next = after.int('add', index, after.constant(i32, 1n));
+  after.branch(
+    after.compare('ult', next, after.constant(i32, 3n)),
+    after.edge(head, [sum, next]),
+    after.edge(exit),
+  );
+  exit.return([sum]);
+  const ir = constructSSA(b.finish(entry, [fp])).value as SSAForm;
+  return { ir, source: sourceOf(abi, ir) };
+}
+
+/** `if (*(uint64_t *)0x3000) f(); guard; return x * 1.5;`: on Darwin the
+ * guard reads a phi of the entry state and the call clobber, and nothing else
+ * reads it. */
+function joinFixture(abi: AbiProfile) {
+  const fp = { kind: 'float' as const, bits: 64 as const };
+  const location = abi.classifyCall({
+    returns: fp,
+    parameters: [fp],
+    variadic: false,
+    fixed_parameter_count: 1,
+  }).parameters[0]!.locations[0]!;
+  if (location.kind !== 'register') throw new Error('Expected FP register');
+  const b = builder(`fp-epoch-join-${abi.id}`);
+  const entry = b.block('entry'),
+    calling = b.block('calling'),
+    join = b.block('join');
+  const input = entry.cast(
+    'bitcast',
+    fp,
+    entry.readRegister({ ...location.register, width_bits: 64 }),
+  );
+  const flag = entry.load(integer(64), entry.constant(integer(64), 0x3000n));
+  entry.branch(
+    entry.compare('ne', flag, entry.constant(integer(64), 0n)),
+    entry.edge(calling),
+    entry.edge(join),
+  );
+  calling.call(CALLEE, [], [], abi.unknown_call_clobbers);
+  calling.jump(join);
+  const supported = environmentGuard(b, abi, join, 'join');
+  const product = supported.fp('mul', input, supported.constant(fp, 0x3ff8000000000000n));
+  supported.return([product]);
+  const ir = constructSSA(b.finish(entry, [fp])).value as SSAForm;
+  return { ir, source: sourceOf(abi, ir) };
+}
+
+const bitsOf = (value: number): bigint => {
+  const view = new DataView(new ArrayBuffer(8));
+  view.setFloat64(0, value);
+  return view.getBigUint64(0);
+};
+
+for (const abi of [darwinArm64Abi, sysvAMD64Abi])
+  test(`${abi.id}: a call in a loop keeps its environment epochs assumed`, () => {
+    const directory = mkdtempSync(join(tmpdir(), 'open-decomp-fp-epoch-'));
+    try {
+      for (const write of [false, true]) {
+        const f = loopFixture(abi, write);
+        for (const language of ['c-like', 'python-like'] as const) {
+          const { emission } = emit(f.ir, { source: f.source }, language);
+          assert.equal(emission.text.includes('requirement_predicate('), write, emission.text);
+          if (!write) assert.doesNotMatch(emission.text, /unknown_value|call clobbers/);
+          assert.equal(
+            emission.local_validation?.some((item) => item.rule === 'fp_environment_guard'),
+            !write,
+          );
+          const result = execute(
+            emission,
+            new Map(
+              emittedFormals(emission).flatMap((formal) =>
+                formal.semantic_ids.map((id) => [id, bitsOf(2)] as const),
+              ),
+            ),
+            new Map(),
+            0n,
+            new Map(),
+            new Map(),
+            new Map([['sub_1234', () => []]]),
+          );
+          // The retained guards read an unknown entry state: no defined result.
+          if (write) assert.notEqual(result.exit, 'machine_return');
+          else {
+            assert.deepEqual(result.values, [bitsOf(((2 * 1.5 + 0.25) * 1.5 + 0.25) * 1.5 + 0.25)]);
+            assert.deepEqual(result.events, ['call', 'call']);
+          }
+          assert.match(
+            emit(f.ir, { source: f.source }, language, 'checked').emission.text,
+            /requirement_predicate\(/,
+          );
+        }
+        if (write) continue;
+        const output = emit(f.ir, { source: f.source });
+        const name = output.identifiers.find((item) => item.entity_id === f.ir.id)!.identifier;
+        const path = join(directory, 'loop.c'),
+          binary = join(directory, 'loop');
+        writeFileSync(
+          path,
+          `#include <stdint.h>\n#include <math.h>\n#include <string.h>\nstatic int calls;\nvoid sub_1234(void) { calls++; }\n${output.emission.text}\nint main(void) { return !(${name}(2.0) == 7.9375 && calls == 2); }\n`,
+        );
+        execFileSync('clang', [
+          '-std=c11',
+          '-O2',
+          '-ffp-contract=off',
+          '-Werror=implicit-function-declaration',
+          path,
+          '-o',
+          binary,
+        ]);
+        execFileSync(binary);
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+for (const abi of [darwinArm64Abi, sysvAMD64Abi])
+  test(`${abi.id}: an entry/call environment phi read only by an omitted guard prints nothing`, () => {
+    const directory = mkdtempSync(join(tmpdir(), 'open-decomp-fp-epoch-join-'));
+    try {
+      const f = joinFixture(abi);
+      for (const language of ['c-like', 'python-like'] as const) {
+        const { emission } = emit(f.ir, { source: f.source }, language);
+        assert.doesNotMatch(emission.text, /requirement_predicate|unknown_value|environment"/);
+        const unobserved = emission.local_validation?.find(
+          (item) => item.rule === 'fp_unobserved_epoch',
+        );
+        // Darwin: the phi, its entry binding and the call clobber are hidden.
+        assert.equal(unobserved !== undefined, abi.id === darwinArm64Abi.id);
+        for (const flag of [0n, 1n]) {
+          const memory = new Map(
+            Array.from({ length: 8 }, (_, i) => [0x3000n + BigInt(i), i ? 0 : Number(flag)]),
+          );
+          const result = execute(
+            emission,
+            new Map(
+              emittedFormals(emission).flatMap((formal) =>
+                formal.semantic_ids.map((id) => [id, bitsOf(2)] as const),
+              ),
+            ),
+            memory,
+            0n,
+            new Map(),
+            new Map(),
+            new Map([['sub_1234', () => []]]),
+          );
+          assert.deepEqual(result.values, [bitsOf(3)]);
+          assert.deepEqual(result.events, flag ? ['load', 'call'] : ['load']);
+        }
+      }
+      const output = emit(f.ir, { source: f.source });
+      const name = output.identifiers.find((item) => item.entity_id === f.ir.id)!.identifier;
+      // It reads the flag at a fixed address: compile only, `execute()` ran it.
+      const path = join(directory, 'join.c');
+      writeFileSync(
+        path,
+        `#include <stdint.h>\n#include <math.h>\n#include <string.h>\nvoid sub_1234(void) {}\n${output.emission.text}\ndouble probe(void) { return ${name}(2.0); }\n`,
+      );
+      execFileSync('clang', [
+        '-std=c11',
+        '-fsyntax-only',
+        '-ffp-contract=off',
+        '-Werror=implicit-function-declaration',
+        path,
+      ]);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+test('an epoch web with one input that is not an entry or call epoch keeps its guards', () => {
+  for (const abi of [darwinArm64Abi, sysvAMD64Abi]) {
+    const f = loopFixture(abi, false);
+    const context = createOperationContext();
+    const fn = structureControlFlow(f.ir, context).value!;
+    const program = reconstruct({ function: fn, source: f.source }, context, 'source');
+    assert.equal(sourceFpPresentation(program, context).guards.size, 2);
+    // The same web with an entry state that is not an environment epoch: on
+    // Darwin one input of the loop's phi cycle, on SysV the guards' state.
+    const entry = program.blocks.get(program.function.entry)!;
+    const blocks = new Map(program.blocks);
+    blocks.set(entry.id, {
+      ...entry,
+      register_entry: entry.register_entry.filter(
+        (binding) => !['arm64:fpcr', 'x86_64:mxcsr'].includes(binding.register.root),
+      ),
+    });
+    const projected = sourceFpPresentation({ ...program, blocks }, context);
+    assert.equal(projected.guards.size, 0);
+    assert.equal(projected.unobserved.size, 0);
+  }
 });

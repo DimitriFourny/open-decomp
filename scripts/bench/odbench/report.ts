@@ -19,6 +19,16 @@ import {
   quantile,
   signTest,
 } from './stats.js';
+import {
+  D8_FIRST10_BINARY,
+  D8_FIRST10_MS,
+  D8_RATIO,
+  FIRST_FUNCTIONS,
+  d8Rows,
+  laneSpeedFacts,
+  largestRss,
+} from './speed.js';
+import type { D8Row, LaneSpeedFacts } from './speed.js';
 import { readLane, readText } from './store.js';
 import { DIMENSIONS } from './types.js';
 import type {
@@ -30,6 +40,7 @@ import type {
   Dimension,
   HostInfo,
   LaneRun,
+  ProcessRss,
   QaJudgment,
   Tier,
 } from './types.js';
@@ -131,6 +142,8 @@ export interface LaneScore {
     readonly median_ms: number | null;
     readonly p90_ms: number | null;
     readonly n: number;
+    /** D8 figures (see `speed.ts`); null on lanes recorded without them. */
+    readonly d8: LaneSpeedFacts;
   };
 }
 
@@ -231,6 +244,12 @@ export interface BinarySpeed {
   readonly import_ms: number | null;
   readonly analysis_ms: number | null;
   readonly decompile_ms_total: number;
+  /** Null on lanes recorded before roadmap 4 M2 (and on Ghidra). */
+  readonly open_ms: number | null;
+  readonly open_job_ms: number | null;
+  readonly first10_ms: number | null;
+  /** Peak RSS of every process of the run; null when not recorded. */
+  readonly peak_rss: readonly ProcessRss[] | null;
 }
 
 /** Counted work (what `budget.work` bounds) of one function in one lane that recorded it. */
@@ -319,6 +338,8 @@ export interface Report {
     readonly determinism_failures: readonly { readonly lane: string; readonly fn: string }[];
     /** Lanes that recorded counted work (Open Decomp lanes recorded since M1). */
     readonly work: readonly LaneWork[];
+    /** D8 rows per Open Decomp lane against the reference's cold time: per binary, then the total. */
+    readonly d8: readonly D8Row[];
   };
   readonly warnings: readonly string[];
   readonly per_function: readonly PerFunction[];
@@ -806,6 +827,7 @@ export async function buildReport(opts: {
         median_ms: times.length === 0 ? null : finite(median(times)),
         p90_ms: times.length === 0 ? null : finite(quantile(times, 0.9)),
         n: times.length,
+        d8: laneSpeedFacts(run, runs.get(reference) as LaneRun, timedBinaries),
       },
     };
   });
@@ -976,6 +998,7 @@ export async function buildReport(opts: {
   const loadWarnings: string[] = [];
   const determinism: { lane: string; fn: string }[] = [];
   const laneWork: LaneWork[] = [];
+  const d8: D8Row[] = [];
   const tierBinaries = [...new Set(tierFns.map((fn) => fn.binary))];
   for (const lane of lanes) {
     const run = runs.get(lane) as LaneRun;
@@ -989,8 +1012,13 @@ export async function buildReport(opts: {
           import_ms: timing.import_ms,
           analysis_ms: timing.analysis_ms,
           decompile_ms_total: timing.decompile_ms_total,
+          open_ms: timing.open_ms ?? null,
+          open_job_ms: timing.open_job_ms ?? null,
+          first10_ms: timing.first10_ms ?? null,
+          peak_rss: timing.peak_rss ?? null,
         });
     }
+    d8.push(...d8Rows(run, runs.get(reference) as LaneRun, tierBinaries));
     const load = run.host.loadavg_start[0];
     if (load !== undefined && load > run.host.cores / 2)
       loadWarnings.push(
@@ -1141,6 +1169,7 @@ export async function buildReport(opts: {
       load_warnings: loadWarnings,
       determinism_failures: determinism,
       work: laneWork,
+      d8,
     },
     warnings,
     per_function: perFunction,
@@ -1195,6 +1224,28 @@ function fmtMs(value: number | null): string {
   if (value < 60_000) return `${fmtFixed(value / 1000, 2)} s`;
   const seconds = Math.round(value / 1000);
   return `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, '0')}s`;
+}
+
+/** Seconds with one decimal: the D8 rows compare long runs, where `2m01s` hides the 0.1 s. */
+function fmtSec(value: number | null): string {
+  return value === null ? DASH : `${fmtFixed(value / 1000, 1)} s`;
+}
+
+function fmtBytes(value: number | null): string {
+  return value === null ? DASH : `${fmtFixed(value / 2 ** 20, 0)} MB`;
+}
+
+/** `3.13× (over 1.25×)`: a ratio with its D8 verdict. */
+function fmtRatio(value: number | null): string {
+  return value === null
+    ? DASH
+    : `${fmtFixed(value, 2)}× (${value <= D8_RATIO ? 'within' : 'over'} ${D8_RATIO}×)`;
+}
+
+function fmtFirst10(value: number | null): string {
+  return value === null
+    ? DASH
+    : `${fmtMs(value)} (${value <= D8_FIRST10_MS ? 'within' : 'over'} ${fmtMs(D8_FIRST10_MS)})`;
 }
 
 function fmtPct(value: number | null): string {
@@ -1277,6 +1328,15 @@ function scorecardRows(report: Report): { header: string[]; rows: string[][] } {
         : DASH,
     ),
     row('cold time, all binaries', (card) => fmtMs(card.speed.cold_ms)),
+    row('decompile time after open, all binaries', (card) => fmtSec(card.speed.d8.decompile_ms)),
+    row(`decompile time after open ÷ ${report.reference} cold time (D8)`, (card) =>
+      fmtRatio(card.speed.d8.d8_ratio),
+    ),
+    row(`first ${FIRST_FUNCTIONS} functions after open, ${D8_FIRST10_BINARY} (D8)`, (card) =>
+      fmtFirst10(card.speed.d8.first10_ms),
+    ),
+    row('open time, all binaries', (card) => fmtMs(card.speed.d8.open_ms)),
+    row('peak RSS, largest process', (card) => fmtBytes(card.speed.d8.peak_rss_bytes)),
     row('per-function ms: median / p90 (paired)', (card) =>
       card.speed.n === 0 ? DASH : `${fmtMs(card.speed.median_ms)} / ${fmtMs(card.speed.p90_ms)}`,
     ),
@@ -1581,7 +1641,17 @@ export function renderMarkdown(report: Report): string {
     report.speed.binaries.length === 0
       ? 'No timings recorded.'
       : table(
-          ['binary', 'lane', 'cold', 'import', 'analysis', 'decompile total'],
+          [
+            'binary',
+            'lane',
+            'cold',
+            'import',
+            'analysis',
+            'decompile total',
+            'open',
+            `first ${FIRST_FUNCTIONS}`,
+            'peak RSS',
+          ],
           report.speed.binaries.map((item) => [
             item.binary,
             item.lane,
@@ -1589,10 +1659,32 @@ export function renderMarkdown(report: Report): string {
             fmtMs(item.import_ms),
             fmtMs(item.analysis_ms),
             fmtMs(item.decompile_ms_total),
+            fmtMs(item.open_ms),
+            fmtMs(item.first10_ms),
+            fmtBytes(item.peak_rss === null ? null : largestRss(item.peak_rss)),
           ]),
           [1],
         ),
   );
+  if (report.speed.d8.length > 0) {
+    push(
+      `D8: decompile time after open against ${report.reference}'s cold time (its whole run: JVM start, import, analysis, decompiles); threshold ${D8_RATIO}×. Open time and peak RSS are reported, not targeted; the first ${FIRST_FUNCTIONS} functions of ${D8_FIRST10_BINARY} must be done within ${fmtMs(D8_FIRST10_MS)} of open.`,
+    );
+    push(
+      table(
+        ['binary', 'lane', 'decompile after open', `${report.reference} cold`, 'ratio', 'D8'],
+        report.speed.d8.map((row) => [
+          row.binary ?? 'total',
+          row.lane,
+          fmtSec(row.decompile_ms),
+          fmtSec(row.reference_ms),
+          `${fmtFixed(row.ratio, 2)}×`,
+          row.within ? 'within' : 'over',
+        ]),
+        [1],
+      ),
+    );
+  }
   for (const warning of report.speed.load_warnings) push(`WARNING: ${warning}`);
   const repeated = report.header.lanes.filter((lane) => lane.kind === 'od' && lane.repeat > 1);
   push(
