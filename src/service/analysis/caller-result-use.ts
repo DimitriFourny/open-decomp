@@ -237,8 +237,24 @@ export function callerResultConsensus(
       ? new Arm64Decoder()
       : new X86Decoder({ formatting: false });
   try {
-    // Entries a loader record makes reachable from outside the enumerated sites.
-    local.checkpoint(image.exports.length + image.symbols.length + image.relocations.length);
+    // Entries a loader record makes reachable from outside the enumerated sites: exports,
+    // global and weak symbols, fixup targets, image entry points and unwind handlers.
+    // Objective-C relative method lists and Swift metadata hold code addresses as
+    // relative offsets without fixups: such images abstain.
+    local.checkpoint(
+      image.exports.length +
+        image.symbols.length +
+        image.relocations.length +
+        image.entry_points.length +
+        image.hints.length +
+        image.sections.length,
+    );
+    if (
+      image.sections.some(
+        (section) => section.name === '__objc_methlist' || section.name.startsWith('__swift5'),
+      )
+    )
+      return undefined;
     const named = new Set<bigint>();
     for (const item of image.exports)
       if (item.address?.space === 'va') named.add(item.address.value);
@@ -247,6 +263,9 @@ export function callerResultConsensus(
         named.add(symbol.address.value);
     for (const relocation of image.relocations)
       if (relocation.target?.space === 'va') named.add(relocation.target.value);
+    for (const entry of image.entry_points) if (entry.space === 'va') named.add(entry.value);
+    for (const hint of image.hints)
+      if (hint.kind === 'unwind' && hint.handler?.space === 'va') named.add(hint.handler.value);
     const sites: Address[] = [];
     const visiting = new Set<string>();
     let total = 0;
@@ -264,8 +283,11 @@ export function callerResultConsensus(
       visiting.add(callee.id);
       const found = callerSites(index, callee.entry, local);
       total += found.sites.length;
+      // A function no listed site reaches is reached only from outside the enumerated
+      // world (or never): no caller consensus.
       if (
         !found.complete ||
+        !found.sites.length ||
         found.sites.length > MAX_CONSENSUS_SITES ||
         total > MAX_CONSENSUS_TOTAL_SITES
       )

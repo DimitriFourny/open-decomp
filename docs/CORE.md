@@ -1511,15 +1511,17 @@ without an indirect result would still present a result (a non-void-like
 selection, an unresolved or typed tail, or tail transfers only), the planner asks
 once per request for `SourceEvidence.function_result_use`. It is proven for the
 function and, recursively, for every caller its result reaches: no export, global
-or weak symbol names the entry; no relocation, rebase, bind or chained fixup
-targets it, in an image whose loader reported no warning other than undecoded
+or weak symbol, image entry point or unwind handler names the entry; no
+relocation, rebase, bind or chained fixup targets it, in an image without
+Objective-C relative method lists or Swift metadata (relative code offsets), whose loader reported no warning other than undecoded
 semantics and whose absolute pointers all carry fixups (Mach-O PIE or dylib, ELF
 `ET_DYN`, PE dynamic base); no instruction materializes or reaches the entry other
 than through a listed BL/B (ARM64: an ADR to it, an ADRP of its page whose
 followed register is added to its page offset or escapes the scan, a conditional
 branch from another function, a fallthrough from a preceding non-terminator;
 x86-64: any non-call reference); the direct site set is complete (ARM64 sweep;
-x86-64 only with a complete reference index) and every site has a caller
+x86-64 only with a complete reference index), not empty (a function no listed
+site reaches is reached only from outside, or never), and every site has a caller
 (`next_entry` attribution only when every loader function start is an entry);
 after each call site the integer result register (and the FP one unless the
 FP carrier is unchanged or undefined on every exit and every tail callee's
