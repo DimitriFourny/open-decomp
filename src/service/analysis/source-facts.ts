@@ -13,7 +13,10 @@ import type {
 } from '../../core/index.js';
 import { fingerprint, OperationError, U64_LIMIT, type CanonicalValue } from '../../core/index.js';
 import type { CallAnalysisResult, SuppliedCallContract } from '../../analysis/calls/index.js';
-import { observePreparedCallInterfaces } from '../../analysis/calls/observed.js';
+import {
+  observePreparedCallInterfaces,
+  observePreparedTailInterfaces,
+} from '../../analysis/calls/observed.js';
 import { createCallResultDemandIndex } from '../../analysis/calls/result-demands.js';
 import {
   recoverDataAddress,
@@ -1572,6 +1575,10 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
       context,
     ).map((callee) => [callee.call_id, callee]),
   );
+  // Argument prefixes at unresolved indirect exits, for the exits the source
+  // reconstruction proves to be tail calls (`classifyIndirectTails`).
+  for (const tail of observePreparedTailInterfaces(input.ir, abi, context, demand_index))
+    sourceCallees.set(tail.call_id, tail);
   let dependencies = nativeDependencies(input, input.ir, context, undefined, false, demand_index);
   const targets = new Map<string, FunctionRecord>();
   for (const dependency of dependencies) targets.set(dependency.target.id, dependency.target);
@@ -2060,6 +2067,9 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
     diagnostics,
     evidence,
     addresses,
+    executable_ranges: image.mappings
+      .filter((mapping) => mapping.permissions.includes('execute'))
+      .map((mapping) => ({ start: mapping.va, end: mapping.va + mapping.memory_size })),
     ...(objc.facts ? { objc: objc.facts } : {}),
     memory_transfers,
     function_return_demands: [...functionReturnDemands.values()],
