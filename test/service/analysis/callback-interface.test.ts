@@ -39,7 +39,11 @@ for (const fixture of [
           : /function_pointer\(\w+, "[^".]*\(\*\)\([^".]*\)"\)\([^.\n]*\)/,
       );
       assert.doesNotMatch(emission.text, /\.\.\./);
-      assert.match(emission.text, /open arity \([^)]*\): indirect call at /);
+      // The note names the call instruction by its virtual address, inside the function.
+      const note = /open arity \([^)]*\): indirect call at (0x[0-9a-f]+)/.exec(emission.text);
+      assert.ok(note, emission.text);
+      const at = BigInt(note[1]!);
+      assert.ok(at > fn.entry.value && at < fn.entry.value + 0x100n, emission.text);
       const declared = emittedFormals(emission);
       const formals = declared.filter((formal) => formal.name !== 'entry_sp');
       assert.equal(
