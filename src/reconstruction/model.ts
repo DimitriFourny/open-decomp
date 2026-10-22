@@ -34,14 +34,15 @@ export interface ExitScratchSlice {
   /** Locally computed value, moved under an explicit ABI/result-use assumption. */
   readonly computed?: true;
 }
-/** Terminal call: results belong to the callee, not invented caller SSA cells. */
-export interface TailProjection {
-  readonly target: Address;
+/** Terminal call: results belong to the callee, not invented caller SSA cells.
+ * `target: null` (source view only) is an indirect exit proven to be a tail
+ * call (`classifyIndirectTails`) of the runtime `target_value`. */
+export type TailProjection = {
   readonly boundary: BoundaryProjection;
   readonly result_types: readonly DataType[];
   /** Source view: the established callee interface returns nothing. */
   readonly result_void?: true;
-}
+} & ({ readonly target: Address } | { readonly target: null; readonly target_value: Value });
 export interface MemoryView {
   readonly shape: MemoryShape;
   readonly field: ObservedField;
