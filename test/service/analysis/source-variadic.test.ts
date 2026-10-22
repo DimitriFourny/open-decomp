@@ -3,7 +3,11 @@ import test from 'node:test';
 import { darwinArm64Abi } from '../../../src/abi/darwin-arm64/index.js';
 import { sysvAMD64Abi } from '../../../src/abi/sysv-amd64/index.js';
 import { windowsX64Abi } from '../../../src/abi/windows-x64/index.js';
-import { createOperationContext, type AbiSignature, type Address } from '../../../src/core/index.js';
+import {
+  createOperationContext,
+  type AbiSignature,
+  type Address,
+} from '../../../src/core/index.js';
 import type { LibraryContracts } from '../../../src/metadata/library-contracts/index.js';
 import type { SourceAddress } from '../../../src/reconstruction/source-model.js';
 import {
@@ -82,9 +86,8 @@ test('a format that could be either of two literals with different actual types 
   assert.equal(facts([0x9000n, 0x9010n]).size, 0);
   assert.equal(facts([0x9000n, 0x9010n, 0x9020n]).size, 0);
   // The same candidate set with one shared actual list does close.
-  assert.deepEqual(
-    facts([0x9000n, 0x9020n]).get('call')?.parameters?.slice(2),
-    [{ kind: 'integer', bits: 32, signed: true }],
-  );
+  assert.deepEqual(facts([0x9000n, 0x9020n]).get('call')?.parameters?.slice(2), [
+    { kind: 'integer', bits: 32, signed: true },
+  ]);
   assert.deepEqual(facts([0x9000n]).get('call')?.argument_list_complete, true);
 });

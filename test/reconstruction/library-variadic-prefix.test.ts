@@ -79,7 +79,11 @@ function fixture(abi: AbiProfile, withContract: boolean, conflicting = false) {
     right = b.block('right'),
     join = b.block('join', [u64, u64]);
   const selector = entry.readRegister(argumentRegister(abi, 0));
-  entry.branch(entry.compare('eq', selector, entry.constant(u64, 0n)), entry.edge(left), entry.edge(right));
+  entry.branch(
+    entry.compare('eq', selector, entry.constant(u64, 0n)),
+    entry.edge(left),
+    entry.edge(right),
+  );
   for (const [block, index] of [
     [left, 0],
     [right, 1],
@@ -110,7 +114,12 @@ function fixture(abi: AbiProfile, withContract: boolean, conflicting = false) {
           contracts: [
             contract('fprintf', fprintfSignature),
             ...(conflicting
-              ? [contract('other', { ...fprintfSignature, parameters: [{ kind: 'pointer' as const }] })]
+              ? [
+                  contract('other', {
+                    ...fprintfSignature,
+                    parameters: [{ kind: 'pointer' as const }],
+                  }),
+                ]
               : []),
           ],
         }
@@ -121,9 +130,7 @@ function fixture(abi: AbiProfile, withContract: boolean, conflicting = false) {
     source: {
       abi,
       callees: [],
-      addresses: [
-        ...formats.map(([value, text]) => stringAt(value, text)),
-      ],
+      addresses: [...formats.map(([value, text]) => stringAt(value, text))],
     },
   };
   const structured = structureControlFlow(ir, createOperationContext());
@@ -152,7 +159,11 @@ for (const abi of [darwinArm64Abi, sysvAMD64Abi, windowsX64Abi]) {
     assert.equal(projection.arguments.length, 2);
     assert.deepEqual(projection.results, []);
     assert.ok(rules(source).includes('library_fixed_prefix'));
-    assert.ok(source.local_validation_session?.abiConformance.some((site) => site.rule === 'library_fixed_prefix'));
+    assert.ok(
+      source.local_validation_session?.abiConformance.some(
+        (site) => site.rule === 'library_fixed_prefix',
+      ),
+    );
     assert.ok(!rules(view('checked')).includes('library_fixed_prefix'));
 
     for (const language of ['c-like', 'python-like'] as const) {
@@ -167,9 +178,12 @@ for (const abi of [darwinArm64Abi, sysvAMD64Abi, windowsX64Abi]) {
       const formal = emittedFormals(output)[0]!;
       for (const [index, selector] of [0n, 1n].entries()) {
         const memory = new Map<bigint, number>();
-        for (const [slot, value] of streams.entries())
+        for (const slot of streams.keys())
           for (let byte = 0n; byte < 8n; byte++)
-            memory.set(streams[slot]! + byte, Number((streamPointers[slot]! >> (8n * byte)) & 0xffn));
+            memory.set(
+              streams[slot]! + byte,
+              Number((streamPointers[slot]! >> (8n * byte)) & 0xffn),
+            );
         const observed: (readonly bigint[])[] = [];
         let open = false;
         execute(
