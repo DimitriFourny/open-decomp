@@ -251,6 +251,21 @@ export function prepareNativeContext(
         'native context evidence capacity: conservative generic interface',
       ],
     };
+  // The context-free storage classification of the whole body: it must hold on
+  // every baseline exit (no seeding), so it holds on the context's surviving
+  // subset of them. A literal-zero FP exit counts as a write of its root.
+  const generic_result = nativeReturnInterface(
+    baseline.ir,
+    input.components.abi,
+    baseline.analysis,
+    interfaces,
+    context,
+    false,
+    [],
+    false,
+    baseline.interface_index,
+    true,
+  );
   return {
     ...baseline,
     ir,
@@ -261,6 +276,7 @@ export function prepareNativeContext(
     required_nodes: nodes,
     blocks: ir.blocks.length,
     context_assumptions: assumptions,
+    generic_result,
     dependencies,
     reasons,
     demand_index,

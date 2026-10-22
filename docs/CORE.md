@@ -1328,7 +1328,20 @@ every direct store holds typed FP bits, literal bits or a reload of another such
 slot (an O0 slot-to-slot copy, also through same-width bitcasts) counts as a
 typed write. When only the integer register qualifies but the FP register is
 written on every exit, after the integer register on every exit path, the
-explicit form remains instead of an integer result.
+explicit form remains instead of an integer result, unless the untyped FP
+register is an incidental vector copy or fill temporary: no caller demands it
+and, on every exit, each slice leaf of every FP-root cell is the datum of a store
+of at least 128 bits (through lossless transport), a constant whose defining
+instruction also defines such a datum (folding gives each cell of a `movi`
+zero-fill its own constant), or a call result left in place before later
+effects; unchanged and undefined cells are neutral and typed FP cells
+disqualify. A scalar FP value stored at its own width stays explicit. The
+integer register then decides as if the FP register were undefined: an echoed
+hidden result pointer (SysV `rdi`, Win64 `rcx` in `rax`) is the exact pointer
+result, otherwise the void-like `incidental_result` rule applies. This records
+an `incidental_result` presentation inference and an `abi_conformance`
+requirement that callers read no FP result register; the FP register keeps its
+exact exit value in exit metadata and the checked view.
 When both qualify, positive caller demand decides; then the register written last
 on every path into every exit wins: a definition whose block is dominated by the
 other's definition (or follows it in the same block) is later, and merges compare
@@ -1343,6 +1356,19 @@ exit metadata (moved out of line only under `exit_scratch`) and in the checked
 view. Native written-result storage that the rule rejects stops counting as
 result evidence for exit overlays. Vector-typed FP carriers, supplied signatures
 and checked views keep the existing projection.
+
+A context-specialized callee summary (constant/alias call-site assumptions)
+keeps the callee's result root. The context unit carries the baseline body's
+result, proven on every baseline exit, where an FP/vector exit whose write is
+proven but has no IEEE type of its own (a literal zero) counts as a write of the
+root another exit types. When the context's own result and that generic result
+are both non-empty and name different roots, the context summary and its
+`source_interface` take the generic roots; widths and types on a root both prove
+stay the context's, and an empty context result stays empty. Values at the call
+stay context-precise; only the storage classification is inherited, because the
+context's exits are a subset of the baseline exits. Thus both tail calls of the
+SysV/Win64 `-O2` `matrix_variadic_call` (`matrix_variadic(0)` returns through
+`xorpd %xmm0,%xmm0` alone) return the callee's `double`.
 
 Bounded native parameter summaries refine the caller's existing memory shapes without rerunning its ABI/stack analysis. Compatible partial fields accumulate; overlapping alternatives, unknown size/alignment, dynamic indices, aliases and escapes remain explicit. Exact full-width copies and split entry cells retain one original pointer identity, while distinct incoming pointer bases remain distinct phi views. Callback fields retain the actual target and prepared whole argument carriers, not a guessed prototype. Source-built caller regressions cover alias/non-alias storage, strides, union conflicts and callback effects in both dialects.
 

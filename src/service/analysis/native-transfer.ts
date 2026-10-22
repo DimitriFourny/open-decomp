@@ -220,6 +220,11 @@ export function nativeReturnInterface(
   demandedReturns: readonly RegisterDescriptor[] = [],
   assumedEntry = false,
   index?: NativeInterfaceIndex,
+  /** Accept an FP/vector exit whose proven write has no IEEE type of its own (a
+   * literal zero) as storage of the root, typed by the root's other exits. This
+   * classifies the storage of the whole body for context units; at least one
+   * exit must still type the root, and every typed exit must agree. */
+  untypedFloatWrites = false,
 ): Pick<NativeInterface, 'returns' | 'return_types' | 'written_result'> {
   const prepared = index ?? createNativeInterfaceIndex(ir, abi, context);
   const {
@@ -377,7 +382,7 @@ export function nativeReturnInterface(
         if (register.root === location.register.root)
           resultEnds.add(register.offset_bits + register.width_bits);
       }
-    const observations: { readonly register: RegisterDescriptor; readonly type: DataType }[] = [];
+    const observations: { readonly register: RegisterDescriptor; readonly type?: DataType }[] = [];
     for (const exit of exits) {
       const bindings = states.get(exit.id)?.exit ?? [];
       const cells = bindings
@@ -449,12 +454,12 @@ export function nativeReturnInterface(
           }
         }
       }
-      if (floating && !type) continue;
+      if (floating && !type && (!untypedFloatWrites || !width)) continue;
       if (type) width = Math.min(width, bitWidth(type));
       if (width)
         observations.push({
           register: { ...location.register, width_bits: width },
-          type: type ?? { kind: 'integer', bits: width },
+          ...(type || !floating ? { type: type ?? { kind: 'integer', bits: width } } : {}),
         });
     }
     for (const tail of tails) {
@@ -475,15 +480,21 @@ export function nativeReturnInterface(
     }
     if (!observations.length || (!seed && observations.length !== exits.length + tails.length))
       continue;
+    const first = observations.find((item) => item.type);
+    const firstType = first?.type;
+    if (!first || !firstType) continue;
     const width = Math.min(...observations.map((item) => item.register.width_bits));
-    const first = observations[0]!;
     if (
-      first.type.kind !== 'integer' &&
-      observations.some((item) => !sameType(item.type, first.type))
+      firstType.kind !== 'integer' &&
+      observations.some((item) =>
+        item.type
+          ? !sameType(item.type, firstType)
+          : item.register.width_bits < bitWidth(firstType),
+      )
     )
       continue;
     returns.push({ ...first.register, width_bits: width });
-    types.push(first.type.kind === 'integer' ? { kind: 'integer', bits: width } : first.type);
+    types.push(firstType.kind === 'integer' ? { kind: 'integer', bits: width } : firstType);
   }
   // The independently typed primary FP/vector view takes precedence over an
   // integer root demanded only by a conservative physical return snapshot.
@@ -496,4 +507,44 @@ export function nativeReturnInterface(
     types.length = 1;
   }
   return { returns, return_types: types, written_result: { registers: returns, types } };
+}
+
+/** A context unit keeps its callee's result storage. `generic` is the baseline
+ * body's result with `untypedFloatWrites` (`prepareNativeContext`); it covers
+ * every baseline exit, and the context's exits are a subset of them. When both
+ * results are non-empty but name different roots (a literal-zero FP exit has
+ * no IEEE type of its own, so the context alone falls back to an integer
+ * root), the generic roots hold here as well. Widths and types on a root the
+ * context proves too stay the context's; an empty context result (a context
+ * that writes no result) never acquires one. */
+export function inheritGenericResult<T extends NativeInterface>(
+  observed: T,
+  generic: Pick<NativeInterface, 'returns' | 'return_types'> | undefined,
+): T {
+  if (!generic?.returns.length || !observed.returns.length) return observed;
+  const roots = new Set(observed.returns.map((register) => register.root));
+  if (
+    generic.returns.length === roots.size &&
+    generic.returns.every((register) => roots.has(register.root))
+  )
+    return observed;
+  const returns: RegisterDescriptor[] = [],
+    types: DataType[] = [];
+  for (const [index, register] of generic.returns.entries()) {
+    const local = observed.returns.findIndex((item) => item.root === register.root);
+    const result = local >= 0 ? observed.returns[local]! : register;
+    returns.push(result);
+    types.push(
+      (local >= 0 ? observed.return_types?.[local] : generic.return_types?.[index]) ?? {
+        kind: 'integer',
+        bits: result.width_bits,
+      },
+    );
+  }
+  return {
+    ...observed,
+    returns,
+    return_types: types,
+    written_result: { registers: returns, types },
+  };
 }

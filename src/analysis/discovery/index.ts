@@ -21,12 +21,14 @@ import {
   type ResolvedJumpTable,
 } from '../../core/index.js';
 import { buildCFG, instructionSuccessors } from '../cfg/index.js';
-import { proveJumpTable, type JumpTableProof } from './jump-tables.js';
+import { jumpTableChain, proveJumpTable, type JumpTableProof } from './jump-tables.js';
 import { reconcileGraphs, type DiscoveryLineage } from './lineage.js';
 export type { DiscoveryLineage } from './lineage.js';
 
 /** Same entry cap as indirect-table target recovery; larger tables stay unresolved. */
 const MAX_JUMP_TABLE_ENTRIES = 256;
+const JUMP_TABLE_RULE =
+  'indirect branch targets from immutable table entries under a dominating unsigned index bound';
 /** Linker-synthesized import trampoline sections (ELF PLT variants, Mach-O stub sections). */
 const STUB_SECTION = /(^|[.,])(plt|plt\.sec|plt\.got|iplt)$|__(auth_|objc_)?stubs$|__stub_helper$/;
 
@@ -257,15 +259,26 @@ export function discoverFunctions(
     seeds.get(value) ?? index.seeds.get(value);
   const decoded = new Map<bigint, DecodedInstruction>();
   const gaps = new Map<bigint, DecodeGap>();
-  // Decoded control predecessors, including proven table edges, for single-entry proofs.
+  // Decoded control predecessors, including proven table edges, for single-entry proofs. Edges
+  // are never removed (a replaced or dropped table keeps its old ones), so every address's
+  // predecessor count only grows and chains settle.
   const incoming = new Map<bigint, DecodedInstruction[]>();
+  // Provisional proofs by branch address; each graph re-validates them on its final members.
+  const tables = new Map<bigint, { readonly proof: JumpTableProof; readonly evidence: string }>();
+  // The chain each unconditional indirect branch was last proved on, the branches whose chain
+  // contains an address, and the branches whose chain context changed since their last proof.
+  const chains = new Map<bigint, readonly DecodedInstruction[]>();
+  const watchers = new Map<bigint, Set<bigint>>();
+  const stale = new Set<bigint>();
+  const touch = (value: bigint): void => {
+    for (const branch of watchers.get(value) ?? []) stale.add(branch);
+  };
   const addIncoming = (target: bigint, from: DecodedInstruction): void => {
     const list = incoming.get(target);
     if (list) list.push(from);
     else incoming.set(target, [from]);
+    touch(target);
   };
-  // Provisional proofs by branch address; each graph re-validates them on its final members.
-  const tables = new Map<bigint, { readonly proof: JumpTableProof; readonly evidence: string }>();
   const resume = selected ? undefined : input.resume;
   // A continuation traverses roots one at a time (each its own intraprocedural flow, calls
   // deferred), so every root it finishes is progress however small the instruction limit.
@@ -338,6 +351,8 @@ export function discoverFunctions(
       };
       seeds.set(address.value, item);
       created.add(address.value);
+      // A new root ends every chain through it.
+      if (!original) touch(address.value);
       if (resume) deferred.push(address);
       else if (!selected) enqueue(address);
     }
@@ -420,9 +435,69 @@ export function discoverFunctions(
     };
   };
   let cursor = 0;
+  const isEntry = (value: bigint): boolean =>
+    value === selected?.value || seedAt(value) !== undefined;
+  /** (Re)prove one unconditional indirect branch on its current chain. Unchanged chains keep
+   * their result; otherwise the table entry is replaced or dropped and new targets are queued. */
+  const prove = (instruction: DecodedInstruction): void => {
+    const branch = instruction.address.value;
+    const chain = jumpTableChain({ branch: instruction, incoming, is_entry: isEntry }, context);
+    const previous = chains.get(branch);
+    if (
+      previous &&
+      previous.length === chain.length &&
+      previous.every((member, position) => member === chain[position])
+    )
+      return;
+    chains.set(branch, chain);
+    for (const member of chain) {
+      const set = watchers.get(member.address.value);
+      if (set) set.add(branch);
+      else watchers.set(member.address.value, new Set([branch]));
+    }
+    const proof = proveJumpTable(
+      {
+        image,
+        branch: instruction,
+        incoming,
+        is_entry: isEntry,
+        executable: (value) => executableEnd(value) > value,
+        max_entries: MAX_JUMP_TABLE_ENTRIES,
+        chain,
+      },
+      context,
+    );
+    if (!proof) {
+      tables.delete(branch);
+      return;
+    }
+    const evidenceId = derive(
+      JUMP_TABLE_RULE,
+      instruction.address,
+      proof.chain.flatMap((id) => instructionEvidence.get(id) ?? []),
+    );
+    tables.set(branch, { proof, evidence: evidenceId });
+    for (const target of proof.targets) {
+      if (!incoming.get(target.value)?.includes(instruction))
+        addIncoming(target.value, instruction);
+      enqueue(target);
+    }
+  };
+  /** Re-prove, in VA order, every branch whose chain changed since its last proof (a member
+   * gained a predecessor or became a root) until none did; true when targets await decoding. */
+  const reprove = (): boolean => {
+    while (stale.size) {
+      const branches = [...stale].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+      stale.clear();
+      for (const branch of branches) prove(decoded.get(branch)!);
+    }
+    return cursor < queue.length;
+  };
   const drain = (): void => {
     for (;;) {
-      drainQueue();
+      // Proofs settle on the decoded predecessors before another root starts.
+      do drainQueue();
+      while (reprove());
       if (deferredCursor >= deferred.length || exhausted) return;
       const root = deferred[deferredCursor]!;
       if (finalEntries.has(root.value)) {
@@ -539,31 +614,8 @@ export function discoverFunctions(
         addIncoming(successor.value, instruction);
         enqueue(successor);
       }
-      if (instruction.flow.kind === 'indirect_branch' && !instruction.flow.conditional) {
-        const proof = proveJumpTable(
-          {
-            image,
-            branch: instruction,
-            incoming,
-            is_entry: (value) => value === selected?.value || seedAt(value) !== undefined,
-            executable: (value) => executableEnd(value) > value,
-            max_entries: MAX_JUMP_TABLE_ENTRIES,
-          },
-          context,
-        );
-        if (proof) {
-          const evidenceId = derive(
-            'indirect branch targets from immutable table entries under a dominating unsigned index bound',
-            instruction.address,
-            proof.chain.flatMap((id) => instructionEvidence.get(id) ?? []),
-          );
-          tables.set(address.value, { proof, evidence: evidenceId });
-          for (const target of proof.targets) {
-            addIncoming(target.value, instruction);
-            enqueue(target);
-          }
-        }
-      }
+      if (instruction.flow.kind === 'indirect_branch' && !instruction.flow.conditional)
+        prove(instruction);
       if (
         instruction.flow.kind === 'indirect_branch' &&
         instruction.payload?.architecture === 'x86_64'
@@ -785,12 +837,17 @@ export function discoverFunctions(
         }
     }
     let conflict = claimConflict;
-    // A table proof holds for this graph only if its chain stays single-entry and
-    // every target decodes inside it. Rejection only removes edges, so this ends.
+    // A table proof holds for this graph only if its chain stays single-entry and every target
+    // decodes inside it. A failed chain is re-proved on the graph's own predecessors; the result
+    // replaces it only with a subset of its targets, so validation only removes edges and ends.
     const rejected = new Set<bigint>();
+    const reproved = new Map<
+      bigint,
+      { readonly proof: JumpTableProof; readonly evidence: string }
+    >();
     const tableAt = (instruction: DecodedInstruction) =>
       instruction.flow.kind === 'indirect_branch' && !rejected.has(instruction.address.value)
-        ? tables.get(instruction.address.value)
+        ? (reproved.get(instruction.address.value) ?? tables.get(instruction.address.value))
         : undefined;
     for (;;) {
       members = [];
@@ -851,14 +908,11 @@ export function discoverFunctions(
       const inside = (target: Address): boolean =>
         byId.get(decoded.get(target.value)?.id ?? '') !== undefined &&
         (target.value === item.entry.value || !functionEntries.has(target.value));
-      let changed = false;
-      for (const instruction of members) {
-        const table = tableAt(instruction);
-        if (!table) continue;
-        context.checkpoint(table.proof.chain.length + table.proof.targets.length);
-        const chain = table.proof.chain.map((id) => byId.get(id));
-        const selector = table.proof.chain.indexOf(table.proof.selector.instruction);
-        const valid =
+      const valid = (proof: JumpTableProof): boolean => {
+        context.checkpoint(proof.chain.length + proof.targets.length);
+        const chain = proof.chain.map((id) => byId.get(id));
+        const selector = proof.chain.indexOf(proof.selector.instruction);
+        return (
           selector >= 0 &&
           chain.every((member, position) => {
             if (!member) return false;
@@ -872,9 +926,39 @@ export function discoverFunctions(
               (position <= selector || chain[position - 1]!.flow.kind === 'fallthrough')
             );
           }) &&
-          inside(table.proof.otherwise) &&
-          table.proof.targets.every(inside);
-        if (!valid) {
+          inside(proof.otherwise) &&
+          proof.targets.every(inside)
+        );
+      };
+      let changed = false;
+      for (const instruction of members) {
+        const table = tableAt(instruction);
+        if (!table || valid(table.proof)) continue;
+        const proof = proveJumpTable(
+          {
+            image,
+            branch: instruction,
+            incoming: predecessors,
+            is_entry: (value) => value === item.entry.value || functionEntries.has(value),
+            executable: (value) => executableEnd(value) > value,
+            max_entries: MAX_JUMP_TABLE_ENTRIES,
+          },
+          context,
+        );
+        const current = new Set(table.proof.targets.map((target) => target.value));
+        const targets = new Set(proof?.targets.map((target) => target.value));
+        if (proof && [...targets].every((target) => current.has(target)) && valid(proof)) {
+          reproved.set(instruction.address.value, {
+            proof,
+            evidence: derive(
+              JUMP_TABLE_RULE,
+              instruction.address,
+              proof.chain.flatMap((id) => instructionEvidence.get(id) ?? []),
+            ),
+          });
+          // The same target set leaves the graph's edges as they are.
+          if (targets.size < current.size) changed = true;
+        } else {
           rejected.add(instruction.address.value);
           changed = true;
         }
