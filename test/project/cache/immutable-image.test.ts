@@ -173,7 +173,11 @@ test('SQLite cache hits and annotation catalogs reuse immutable image facts with
   const hit = await run(() => assert.fail('A cache hit must not recompute'));
   assert.ok('data' in computed && 'data' in hit);
   assert.equal(hit.data.cache, 'hit');
-  assert.deepEqual({ ...hit.data, cache: 'computed' }, computed.data);
+  // Work is per delivery (what this request consumed), not part of the stored result.
+  const { work: hitWork, ...hitData } = hit.data;
+  const { work: computedWork, ...computedData } = computed.data;
+  assert.ok(hitWork !== undefined && computedWork !== undefined);
+  assert.deepEqual({ ...hitData, cache: 'computed' }, computedData);
   const catalog = await readAnnotationCatalog(
     store,
     2,

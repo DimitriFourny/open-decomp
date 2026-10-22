@@ -212,6 +212,27 @@ export interface BinarySpeed {
   readonly decompile_ms_total: number;
 }
 
+/** Counted work (what `budget.work` bounds) of one function in one lane that recorded it. */
+export interface WorkRow {
+  readonly fn: string;
+  readonly consumed: number;
+  /** The work limit the function's own result reported. */
+  readonly limit: number;
+  readonly state: string;
+}
+
+export interface LaneWork {
+  readonly lane: string;
+  /** Tier functions of this lane with a recorded `work`. */
+  readonly recorded: number;
+  /** Tier functions of this lane without one (failed before a result, or a lane recorded before M1). */
+  readonly unrecorded: number;
+  /** Every recorded function, largest consumed work first. */
+  readonly functions: readonly WorkRow[];
+  /** Functions at more than 80% of their reported limit (a subset of `functions`, same order). */
+  readonly above_80_percent: readonly WorkRow[];
+}
+
 export interface PerFunction {
   readonly id: string;
   readonly binary: string;
@@ -224,6 +245,8 @@ export interface PerFunction {
         readonly lexical_tokens: number;
         readonly claude_tokens: number | null;
         readonly ms: number | null;
+        /** Counted work consumed, or null when the lane recorded none. */
+        readonly work: number | null;
         /** Overall readability score of this lane against the reference. */
         readonly readability: number | null;
         readonly coverage: number | null;
@@ -269,6 +292,8 @@ export interface Report {
     readonly binaries: readonly BinarySpeed[];
     readonly load_warnings: readonly string[];
     readonly determinism_failures: readonly { readonly lane: string; readonly fn: string }[];
+    /** Lanes that recorded counted work (Open Decomp lanes recorded since M1). */
+    readonly work: readonly LaneWork[];
   };
   readonly warnings: readonly string[];
   readonly per_function: readonly PerFunction[];
@@ -870,6 +895,7 @@ export async function buildReport(opts: {
   const binarySpeed: BinarySpeed[] = [];
   const loadWarnings: string[] = [];
   const determinism: { lane: string; fn: string }[] = [];
+  const laneWork: LaneWork[] = [];
   const tierBinaries = [...new Set(tierFns.map((fn) => fn.binary))];
   for (const lane of lanes) {
     const run = runs.get(lane) as LaneRun;
@@ -894,6 +920,27 @@ export async function buildReport(opts: {
       loadWarnings.push(`Lane ${lane} ran with jobs=${run.jobs}: its timings are not comparable.`);
     for (const fn of tierFns)
       if (run.functions[fn.id]?.deterministic === false) determinism.push({ lane, fn: fn.id });
+    const rows: WorkRow[] = [];
+    for (const fn of tierFns) {
+      const result = run.functions[fn.id];
+      if (result?.work)
+        rows.push({
+          fn: fn.id,
+          consumed: result.work.consumed,
+          limit: result.work.limit,
+          state: result.state,
+        });
+    }
+    if (rows.length > 0) {
+      rows.sort((a, b) => b.consumed - a.consumed || a.fn.localeCompare(b.fn));
+      laneWork.push({
+        lane,
+        recorded: rows.length,
+        unrecorded: tierFns.length - rows.length,
+        functions: rows,
+        above_80_percent: rows.filter((row) => row.consumed > 0.8 * row.limit),
+      });
+    }
   }
 
   // Section 9: warnings from judgments.
@@ -947,6 +994,7 @@ export async function buildReport(opts: {
         lexical_tokens: lexicalOf(lane, fn.id) ?? 0,
         claude_tokens: claudeOf(lane, fn.id),
         ms: result?.ms ?? null,
+        work: result?.work?.consumed ?? null,
         readability: scores?.score.overall ?? null,
         coverage: ctx.comprehension.get(lane)?.get(fn.id)?.coverage ?? null,
       };
@@ -1009,6 +1057,7 @@ export async function buildReport(opts: {
       binaries: binarySpeed,
       load_warnings: loadWarnings,
       determinism_failures: determinism,
+      work: laneWork,
     },
     warnings,
     per_function: perFunction,
@@ -1410,6 +1459,32 @@ export function renderMarkdown(report: Report): string {
         ? 'Determinism: not checked (run od with --repeat 2 or more).'
         : `Determinism: every function printed identical text across repeats (${repeated.map((lane) => `${lane.lane} ×${lane.repeat}`).join(', ')}).`,
   );
+  if (report.speed.work.length === 0)
+    push('Counted work: no lane recorded it (re-run the od lane with a build that reports it).');
+  for (const work of report.speed.work) {
+    const limit = Math.max(...work.functions.map((row) => row.limit));
+    push(
+      `Counted work, ${work.lane}: ${work.recorded} function(s) recorded${work.unrecorded > 0 ? `, ${work.unrecorded} without a result` : ''}; limit ${fmtInt(limit)}; ${work.above_80_percent.length} above 80% of their limit. Largest:`,
+    );
+    const pct = (row: WorkRow): string => fmtPct(row.consumed / row.limit);
+    push(
+      table(
+        ['function', 'work', 'of limit', 'state'],
+        work.functions
+          .slice(0, 10)
+          .map((row) => [row.fn, fmtInt(row.consumed), pct(row), row.state]),
+        [3],
+      ),
+    );
+    if (work.above_80_percent.length > 0)
+      push(
+        table(
+          ['function above 80%', 'work', 'of limit', 'state'],
+          work.above_80_percent.map((row) => [row.fn, fmtInt(row.consumed), pct(row), row.state]),
+          [3],
+        ),
+      );
+  }
 
   // 9. Warnings
   push('## 9. Warnings');

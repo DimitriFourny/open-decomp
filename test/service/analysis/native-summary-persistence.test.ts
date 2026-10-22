@@ -9,10 +9,12 @@ import { project } from './support.js';
 const FIXTURE = 'libcorpus-arm64-symbols.dylib';
 
 /** Output a run must reproduce exactly, whatever caches were warm: everything but the
- * artifact handle and the cache marker. */
+ * artifact handle, the cache marker and the work this delivery consumed. */
 const comparable = (result: ToolResult<'function_decompile'>): string =>
   JSON.stringify(result, (key, value: unknown) =>
-    key === 'artifacts' || key === 'cache' || key === 'artifact_id' ? undefined : value,
+    key === 'artifacts' || key === 'cache' || key === 'artifact_id' || key === 'work'
+      ? undefined
+      : value,
   );
 
 type Project = Awaited<ReturnType<typeof project>>;
