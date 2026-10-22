@@ -246,7 +246,11 @@ test('repeated guard epochs retain call effects and ignore MXCSR status-only wri
       // The checked view keeps its requirement line, without the premise record.
       const checked = emit(f.ir, { source: f.source }, language, 'checked').emission;
       assert.match(checked.text, /Requirement requirement_[0-9a-f]+ \(assumption\)/);
-      assert.ok(!checked.requirements!.some((item) => item.sites.some((site) => site.state_epoch === 'fp_default_environment')));
+      assert.ok(
+        !checked.requirements!.some((item) =>
+          item.sites.some((site) => site.state_epoch === 'fp_default_environment'),
+        ),
+      );
       const formal = emittedFormals(emission)[0]!;
       const result = execute(
         emission,

@@ -9112,7 +9112,8 @@ export class Renderer {
       proof ? [proof.evidence] : [],
     );
     if (environmentOmitted)
-      for (const requirement of environment) mapSites(requirement, this.headerStart, this.headerEnd);
+      for (const requirement of environment)
+        mapSites(requirement, this.headerStart, this.headerEnd);
     const formals = new Set(parameters.map((parameter) => parameter.value.id));
     const stack = this.program.source?.stack;
     if (stack?.kind === 'private') {

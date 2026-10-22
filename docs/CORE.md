@@ -364,8 +364,9 @@ enumerated-outcome fold (integer relations; IEEE less/equal/greater/unordered),
 e.g. `!(x < 0 || x > 0) && !isunordered(x, 0)` is `x == 0`, using only leaves
 the merged tests already read. Header notes: the ABI scratch comment is printed
 only when a scratch register name occurs in the text (`abi_scratch_note`), and
-the FP-environment assumption trails the signature with an unambiguous
-requirement ID prefix (`requirement_note`); full records stay in metadata.
+the source view prints no FP-environment note (`requirement_note`): the
+assumption is the recorded `fp_default_environment` ABI requirement, and full
+records stay in metadata.
 
 `else_if` prints an `else` arm that is exactly one `if` statement (no statement,
 definition, label, note or edge copy before or after it; the arm's own `else`
@@ -520,7 +521,7 @@ A type inference record carries every `association_ids` member whose assertion d
 
 Parameter roles distinguish observed source inputs, physical-register inputs and explicit entry-storage environment inputs; an entry-SP formal is not evidence of authored arity. Interpretation widths describe reconstructed IR, not necessarily a decoder operand or source declaration. Call constants expose exact unsigned bit patterns with explicit widths, without inventing signedness. Partial fields retain unknown bounds and observed callback targets; local checks retain their bounded scope and counterexamples. Metadata uses the same operation/output budget and cancellation as rendering, and omits evidence IDs when evidence was not requested. Five focused regressions and 12 public both-dialect observations cover these boundaries; they do not establish whole-function equivalence.
 
-Optional `emission.requirements` localize assumptions, unresolved values/effects/calls/control and conflicts at original subjects and instruction-backed output spans. One function-level `fp_environment` explanation names every affected guard/operation and its original state epoch. Source-only `fp_environment_guard` presentation selects the supported edge of an exact lifter guard when its state is an unchanged entry value or call clobber, there are no explicit environment writes, and the unsupported arm is exclusively owned. This is conditional on the recorded requirement at **each** epoch, not proof that calls preserve FP state. Omitted guard/failure provenance maps to the top requirement comment; checked guards and ordered effects remain intact. Computed, loaded, known unsupported, or opaque-written control state retains explicit guards. An opaque effect that is the last statement of a block ending in an unresolved exit changes no recorded epoch (no modeled operation follows it) and does not retain them (`fp_terminal_effect`); an opaque effect elsewhere, such as an unsupported encoding inside the function, still does.
+Optional `emission.requirements` localize assumptions, unresolved values/effects/calls/control and conflicts at original subjects and instruction-backed output spans. One function-level `fp_environment` explanation names every affected guard/operation and its original state epoch. Source-only `fp_environment_guard` presentation selects the supported edge of an exact lifter guard when its state is an unchanged entry value or call clobber, there are no explicit environment writes, and the unsupported arm is exclusively owned. This is conditional on the recorded requirement at **each** epoch, not proof that calls preserve FP state. Omitted guard/failure provenance maps to the signature in the source view and to the top requirement comment in the checked view; checked guards and ordered effects remain intact. Computed, loaded, known unsupported, or opaque-written control state retains explicit guards. An opaque effect that is the last statement of a block ending in an unresolved exit changes no recorded epoch (no modeled operation follows it) and does not retain them (`fp_terminal_effect`); an opaque effect elsewhere, such as an unsupported encoding inside the function, still does.
 
 Source-only `fp_native_operations` prints scalar IEEE arithmetic, negation, absolute value, square root, comparisons and compatible conversions under the FP requirement plus the target IEEE representation, no-excess-precision and disabled-contraction (`-ffp-contract=off`) contract. Every operation the recorded `fp_environment` requirement covers prints natively unless a rule below keeps it explicit: C uses `-x`, `__builtin_fabs[f]`/`__builtin_sqrt[f]` (no header, so no clash with an analyzed libm callee) and `(intN_t)x`/`(uintN_t)x`; Python-like prints `-x` and `abs(x)` for binary64. Backwards consumer tracing retains helpers for operations whose arithmetic NaN payload escapes through integer operations, memory, calls or physical boundaries; a promoted local slot is private storage, so a store to it is exactly as observable as the loads that read it back. Comparisons and float-to-integer conversions never observe a payload (a NaN converts to an undefined value, as in the IR), and negation/absolute value change only the sign bit, so none of them forces helpers on their operands or their own result. Float-to-integer conversion truncates toward zero and is undefined for NaN, infinities and out-of-range values, exactly as the IR specifies. Helpers remain for fused and vector operations, payload-escaping arithmetic and square roots, whole functions whose environment is not a recorded default epoch (explicit environment writes or unknown environment effects keep every guard and every FP helper), Python binary32 arithmetic, Python division, square root and float-to-integer conversion (Python raises where the IR yields a value). Finite floating literals retain exact target bits, including integer constants that join an established FP value as a bitcast operand, phi copy or select arm. FP/integer copies preserve representation bitcasts, never numeric assignment conversions. Exhausted presentation records retain the explicit form.
 
@@ -1220,9 +1221,14 @@ Original helper names and contracts stay in metadata.
 Only the helper definitions, `#include` and `#define` lines that the finished
 function text references (directly or through another helper) precede it, in a
 fixed order; the text is scanned outside comments and string literals after
-rendering, so unused or speculative expressions never add one. The FP environment
-requirement appears as one comment line citing its id; its full explanation is in
-the `requirements` metadata, and checked rendering keeps the full text.
+rendering, so unused or speculative expressions never add one. The source view
+prints no comment for the FP environment requirement: emitted C without
+`#pragma STDC FENV_ACCESS ON` presumes the default modes (C11 7.6.1p2, a language
+premise of the same class as `frame_object`), recorded as one
+`fp_default_environment` `abi_conformance` requirement anchored at the signature
+beside the unchanged `fp_environment` requirement, whose sites (omitted guards
+included) map to the signature. Its full explanation is in the `requirements`
+metadata, and checked rendering keeps the full `/* Requirement … */` line.
 `c_bitcast` uses same-width `memcpy` helpers for integer/IEEE32/IEEE64
 reinterpretation under an explicit native-representation ABI requirement.
 `c_integer_storage` uses ordinary C scalar storage for nonstandard-width integer
