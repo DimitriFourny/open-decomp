@@ -252,7 +252,11 @@ function integers(
 ): Fixture {
   const abi = sysvAMD64Abi,
     fp: DataType = { kind: 'float', bits: 64 },
-    parameters = Array.from({ length: count + Number(store) }, () => integer(64));
+    parameters = Array.from({ length: count + Number(store) }, () => ({
+      kind: 'integer' as const,
+      bits: 64,
+      signed: false,
+    }));
   const b = builder(`native-integers-${name}`),
     entry = b.block('entry');
   const inputs = abi
