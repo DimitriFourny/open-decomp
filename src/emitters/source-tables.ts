@@ -177,9 +177,9 @@ export function indexedDataAccesses(
     return best;
   };
   /** Greatest unsigned value `value` can take in `block`: its width, masks and
-   * extensions (`maximum`), the dominating guards, and a subtraction `x - c`
-   * whose `x >= c` is guarded, which does not wrap and is at most the greatest
-   * `x` minus `c`. */
+   * extensions (`maximum`), the dominating guards, a constant right shift of a
+   * bounded value, and a subtraction `x - c` whose `x >= c` is guarded, which
+   * does not wrap and is at most the greatest `x` minus `c`. */
   const reachOf = (value: Value, block: string, depth = 0): bigint => {
     context.checkpoint(1);
     let limit = maximum(value);
@@ -192,6 +192,13 @@ export function indexedDataAccesses(
       if (amount !== undefined && floor !== undefined && floor >= amount) {
         const top = reachOf(expression.left, block, depth + 1);
         if (top >= amount && top - amount < limit) limit = top - amount;
+      }
+    } else if (depth < 4 && expression?.kind === 'integer' && expression.op === 'lshr') {
+      // `x >> c` with an in-width constant shift is at most the greatest `x` shifted.
+      const amount = constant(expression.right);
+      if (amount !== undefined && amount < BigInt(bitWidth(value.type))) {
+        const top = reachOf(expression.left, block, depth + 1) >> amount;
+        if (top < limit) limit = top;
       }
     }
     return limit;

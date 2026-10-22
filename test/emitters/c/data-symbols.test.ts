@@ -321,6 +321,67 @@ for (const language of languages)
     assert.doesNotMatch(open, /64 (uint8_t )?elements/);
   });
 
+for (const language of languages)
+  test(`${language} a right shift of a guarded index bounds the accessed range (aAscii[c >> 5], c <= 0x7f)`, () => {
+    const bytes = elementBytes(8, 4);
+    const build = (guarded: boolean) => {
+      const f = tableFixture(bytes, { next: 0x2010n, bits: 32 });
+      const b = builder(`shift-${language}-${guarded}`),
+        entry = b.block('entry'),
+        inside = guarded ? b.block('inside') : entry,
+        outside = guarded ? b.block('outside') : entry;
+      const start = f.recovered.address;
+      const c = entry.cast('truncate', integer(32), entry.readRegister(rdi()));
+      const word = inside.cast(
+        'zero_extend',
+        integer(64),
+        inside.int('lshr', c, inside.constant(integer(32), 5n)),
+      );
+      const value = inside.load(
+        integer(32),
+        inside.int(
+          'add',
+          inside.address(start),
+          inside.int('mul', word, inside.constant(integer(64), 4n)),
+        ),
+        { endian: 'little', alignment: 1, volatile: false },
+      );
+      if (guarded) {
+        entry.branch(
+          entry.compare('ule', c, entry.constant(integer(32), 0x7fn)),
+          entry.edge(inside),
+          entry.edge(outside),
+        );
+        inside.return([value]);
+        outside.return([outside.constant(integer(32), 0n)]);
+      } else entry.return([value]);
+      const ssa = constructSSA(b.finish(entry, [integer(32)])).value as SSAForm;
+      return emit(ssa, sourceOf([{ ...f.recovered, object_bytes: [...bytes] }]), language).emission;
+    };
+    const emission = build(true);
+    if (language === 'c-like') assert.match(emission.text, /static const uint32_t \w+\[4\] = \{/);
+    else assert.match(emission.text, /# VA 0x2000, read-only; 4 uint32_t elements/);
+    const formal = emittedFormals(emission)[0]!;
+    const memory = new Map<bigint, number>(
+      Array.from(bytes, (byte, index) => [0x2000n + BigInt(index), byte] as const),
+    );
+    for (const [input, element] of [
+      [0n, 1n],
+      [31n, 1n],
+      [32n, 2n],
+      [0x7fn, 4n],
+      [0x80n, 0n],
+    ] as const)
+      assert.deepEqual(
+        execute(emission, new Map(formal.semantic_ids.map((id) => [id, input])), new Map(memory))
+          .values,
+        [element],
+      );
+    // Unguarded, the shifted index reaches 2^27 words: no extent is claimed.
+    const open = build(false).text;
+    assert.match(open, /first 4 elements/);
+  });
+
 test('a table of unestablished extent shows only its first elements', () => {
   const bytes = Buffer.from(Array.from({ length: 64 }, (_, index) => index));
   // No symbol size, no next symbol bound, index not bounded by the access: the
