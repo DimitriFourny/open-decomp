@@ -745,6 +745,18 @@ Library/format closure records `arity_closure` plus `abi_conformance`; refusal a
 the presentation-record bound preserves the open form. Checked text and original
 call/stack/type facts retain their conservative interfaces.
 
+An established, non-conflicting variadic library contract that no rule closed
+(a format that could be either of two literals with different actual types, a
+non-literal format) prints its fixed prefix (K3, source only): each fixed
+parameter binds at the register location of the ABI classification of the
+contract and the call is `inferred` with the argument list open, so the header
+states the open arity (`fprintf(stream, format)`). The declared result stays
+unbound (the exit register of a void caller does not become an established
+integer result), the anonymous arguments are never claimed, and a fixed
+location that is not a register, a hidden result or an unsupported layout keeps
+the unresolved call. Records `library_fixed_prefix` (presentation) and an
+`abi_conformance` requirement of the same name.
+
 Source-only `frame_save` uses the ABI's preserved register slices (including
 Windows x64 XMM6–XMM15 low 128 bits), not architecture-specific register lists.
 One nonvolatile entry-value store must dominate every same-slot reload; every
