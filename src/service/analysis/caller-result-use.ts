@@ -6,7 +6,6 @@ import {
   classifyResultUse,
   resultRoots,
   type CallerSite,
-  type CallerSiteIndex,
   type ResultUse,
 } from '../../analysis/calls/caller-sites.js';
 import { Arm64Decoder } from '../../decoders/arm64/index.js';
