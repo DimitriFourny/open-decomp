@@ -48,6 +48,7 @@ import { constantRotationOperands } from '../reconstruction/source-shifts.js';
 import {
   stackEntry,
   type FrameMember,
+  type IncomingObject,
   type ObjCMessage,
   type SourceAddress,
   type SourceFormalType,
@@ -174,6 +175,15 @@ type Nest =
   | { readonly kind: 'switch'; readonly id: string; readonly follow: string | null };
 /** A statement a `for` header prints as its init or step. */
 type HeaderStatement = Extract<Instruction, { kind: 'assign' | 'load' }>;
+/** Source view: one stack object kept as memory (the frame object, or the
+ * incoming object of S4) in entry-SP coordinates, with its member naming. */
+interface StackObjectView {
+  readonly name: string;
+  readonly minimum_offset: bigint;
+  readonly members: readonly FrameMember[];
+  /** Field name of the member starting at entry-SP `offset`. */
+  readonly field: (offset: bigint) => string;
+}
 /** One test of a merged `if` chain: its printed form and the value it tests. */
 interface ConditionTerm {
   readonly printed: Printed;
@@ -1656,10 +1666,10 @@ export class Renderer {
       python = this.language === 'python-like';
     const stack = this.program.source?.stack,
       offset = this.program.source?.stack_addresses.get(value.id);
+    // The incoming object, and beside a live entry SP the frame object below it.
+    const object = offset === undefined ? undefined : this.stackObject(offset);
+    if (object) return this.frameAddress(object, offset!);
     if (stack && offset !== undefined) {
-      // Beside a frame object only addresses at or above the entry SP keep it.
-      if (stack.kind === 'object' && (offset < 0n || !stack.entry))
-        return this.frameAddress(stack, offset);
       const entry = stackEntry(stack);
       if (entry) {
         if (source) {
@@ -3918,12 +3928,36 @@ export class Renderer {
     return type.kind === 'integer' ? `uint${type.bits}_t` : machineType(type);
   }
 
-  /** The frame member holding entry-SP byte `offset` and the offset within it. */
+  /** Source view: the stack object that prints entry-SP `offset`. The incoming
+   * object (S4) holds offsets from its start up; the frame object holds
+   * offsets below the entry SP, and every offset when no entry SP is live
+   * beside it. Members are named by entry-SP offset. */
+  private stackObject(offset: bigint): StackObjectView | undefined {
+    const incoming = this.program.source?.incoming_object,
+      stack = this.program.source?.stack;
+    if (incoming && offset >= incoming.minimum_offset)
+      return {
+        name: this.sourceIdentifier(incoming.formal.id, 'stack_args'),
+        minimum_offset: incoming.minimum_offset,
+        members: incoming.members,
+        field: (start) => `arg_${start.toString(16)}`,
+      };
+    if (stack?.kind === 'object' && (offset < 0n || !stack.entry))
+      return {
+        name: this.sourceIdentifier(stack.id, 'frame'),
+        minimum_offset: stack.minimum_offset,
+        members: stack.members,
+        field: (start) => `local_${(-start).toString(16)}`,
+      };
+    return undefined;
+  }
+
+  /** The member of a stack object holding entry-SP byte `offset` and the offset within it. */
   private frameMemberAt(
-    stack: Extract<SourceStackStorage, { kind: 'object' }>,
+    object: { readonly members: readonly FrameMember[] },
     offset: bigint,
   ): { member: FrameMember; delta: bigint } | undefined {
-    const members = stack.members;
+    const members = object.members;
     // One charge per lookup: the binary search takes at most log2(members) steps.
     this.context.checkpoint(1);
     for (let low = 0, high = members.length - 1; low <= high;) {
@@ -3937,8 +3971,8 @@ export class Renderer {
   }
 
   private readonly frameTypes = new Map<FrameMember, string>();
-  /** Declared type of a frame member: a byte array, or the one spelling every
-   * plain access of a scalar member uses (else the unsigned integer of its width). */
+  /** Declared type of a stack-object member: a byte array, or the one spelling
+   * every plain access of a scalar member uses (else the unsigned integer of its width). */
   private frameMemberType(member: FrameMember): string {
     if (!member.scalar) return 'uint8_t';
     let type = this.frameTypes.get(member);
@@ -3962,22 +3996,20 @@ export class Renderer {
     return type;
   }
 
-  /** Address of entry-SP `offset` in the frame object: `&frame.local_38`, an
-   * element of a byte-array member, else a byte offset from the object. */
-  private frameAddress(
-    stack: Extract<SourceStackStorage, { kind: 'object' }>,
-    offset: bigint,
-  ): Printed {
-    const name = this.sourceIdentifier(stack.id, 'frame'),
-      found = this.frameMemberAt(stack, offset),
+  /** Address of entry-SP `offset` in a stack object: `&frame.local_38`,
+   * `&stack_args.arg_8`, an element of a byte-array member, else a byte offset
+   * from the object. */
+  private frameAddress(object: StackObjectView, offset: bigint): Printed {
+    const name = object.name,
+      found = this.frameMemberAt(object, offset),
       address = { bits: 64, signed: false } as const;
     const member =
       found && (found.delta === 0n || !found.member.scalar)
-        ? `${name}.local_${(-found.member.offset).toString(16)}`
+        ? `${name}.${object.field(found.member.offset)}`
         : undefined;
     if (this.language === 'python-like') {
       const base = this.printer.primary(`address_of(${member ?? name})`, address),
-        delta = member ? found!.delta : offset - stack.minimum_offset;
+        delta = member ? found!.delta : offset - object.minimum_offset;
       return delta === 0n
         ? base
         : this.printer.binary('+', base, this.printer.literal(delta, 64), address);
@@ -3993,35 +4025,34 @@ export class Renderer {
       return { text: `(uintptr_t)${pointer.text}`, precedence: UNARY, ctype: address, pointer };
     }
     const base: Printed = { text: `(uintptr_t)&${name}`, precedence: UNARY, ctype: address };
-    const delta = offset - stack.minimum_offset;
+    const delta = offset - object.minimum_offset;
     return delta === 0n
       ? base
       : this.printer.binary('+', base, this.printer.literal(delta, 64), address);
   }
 
-  /** A plain access at a known frame offset: the member itself when it is
-   * exactly that member with its declared type, otherwise one cast
+  /** A plain access at a known stack-object offset: the member itself when it
+   * is exactly that member with its declared type, otherwise one cast
    * dereference of the member or object bytes. Undefined keeps the general
    * memory spelling (volatile, big-endian, aligned or non-byte accesses, and
-   * bytes at or above the entry SP beside the object). */
+   * bytes at or above the entry SP beside the frame object). */
   private frameStorage(node: Extract<Instruction, { kind: 'load' | 'store' }>): string | undefined {
-    const stack = this.program.source?.stack,
-      offset = this.program.source?.stack_addresses.get(node.address.id),
+    const offset = this.program.source?.stack_addresses.get(node.address.id),
       bits = BigInt(bitWidth(this.accessType(node)));
+    const object = offset === undefined ? undefined : this.stackObject(offset);
     if (
-      stack?.kind !== 'object' ||
+      !object ||
       offset === undefined ||
-      offset >= 0n ||
       bits % 8n ||
       node.access.endian !== 'little' ||
       node.access.volatile ||
       node.access.alignment !== 1
     )
       return undefined;
-    const name = this.sourceIdentifier(stack.id, 'frame'),
-      found = this.frameMemberAt(stack, offset),
+    const name = object.name,
+      found = this.frameMemberAt(object, offset),
       spelled = this.plainAccessSpelling(node);
-    const member = found && `${name}.local_${(-found.member.offset).toString(16)}`;
+    const member = found && `${name}.${object.field(found.member.offset)}`;
     let text: string | undefined;
     if (
       found?.member.scalar &&
@@ -4038,13 +4069,57 @@ export class Renderer {
           ? `*(${spelled} *)${member}`
           : `*(${spelled} *)&${member}[${this.printer.literal(found.delta, 64).text}]`;
     else {
-      const delta = offset - stack.minimum_offset;
+      const delta = offset - object.minimum_offset;
       text =
         delta === 0n
           ? `*(${spelled} *)&${name}`
           : `*(${spelled} *)((uint8_t *)&${name} + ${this.printer.literal(delta, 64).text})`;
     }
     return this.permitUnaligned(node) ? text : undefined;
+  }
+
+  /** Source view (S4): the struct tag of the incoming object and its member
+   * declarations from its start in entry-SP order, padding between (C
+   * `T arg_8`, Python-like `arg_8: T`); packed when a scalar member is not at
+   * its natural alignment. */
+  private incomingStruct(incoming: IncomingObject): {
+    tag: string;
+    members: string[];
+    packed: boolean;
+  } {
+    const c = this.language === 'c-like',
+      members: string[] = [];
+    const declare = (field: string, type: string): string =>
+      c ? `${type} ${field}` : `${field}: ${type}`;
+    let end = incoming.minimum_offset,
+      packed = false;
+    for (const member of incoming.members) {
+      this.context.checkpoint(1);
+      if (member.offset > end) {
+        const gap = `pad_${end.toString(16)}`;
+        members.push(
+          c
+            ? `uint8_t ${gap}[${member.offset - end}]`
+            : declare(gap, `array<uint8_t, ${member.offset - end}>`),
+        );
+      }
+      const field = `arg_${member.offset.toString(16)}`;
+      members.push(
+        member.scalar
+          ? declare(field, this.frameMemberType(member))
+          : c
+            ? `uint8_t ${field}[${member.size}]`
+            : declare(field, `array<uint8_t, ${member.size}>`),
+      );
+      packed ||=
+        member.scalar && (member.offset - incoming.minimum_offset) % member.size !== 0n;
+      end = member.offset + member.size;
+    }
+    return {
+      tag: this.sourceIdentifier(incoming.id, `stack_args_${incoming.id.slice(7, 11)}`),
+      members,
+      packed,
+    };
   }
 
   /** Source-view memory access: `*p` through a declared scalar pointer of the
@@ -8719,6 +8794,9 @@ export class Renderer {
       : [];
     const headerName = methodName ?? functionName;
     const parameters: { value: Value; type: string; name: string }[] = [];
+    // Source view (S4): the incoming object's by-value struct formal.
+    const incomingObject = this.sourceView ? this.program.source?.incoming_object : undefined;
+    const incomingStruct = incomingObject ? this.incomingStruct(incomingObject) : undefined;
     for (let i = 0; i < this.program.parameters.length; i++) {
       this.context.checkpoint(1);
       const value = this.program.parameters[i]!;
@@ -8738,16 +8816,28 @@ export class Renderer {
         register && register.offset_bits === 0
           ? (['self', '_cmd'] as const)[implicit.indexOf(register.root)]
           : undefined;
-      const name = this.program.source
-        ? this.sourceIdentifier(
-            value.id,
-            role ??
-              (this.sourceRoleNames.has(value.id)
-                ? (proven ?? `arg${i}`)
-                : (this.program.source.parameter_names.get(value.id) ?? source?.name ?? `arg${i}`)),
-          )
-        : this.identifier(value.id, source ? 'arg' : register ? 'reg' : 'arg');
-      const type = source ? this.sourceType(source.type_id) : this.valueType(value);
+      const incomingFormal = incomingObject?.formal.id === value.id;
+      const name = incomingFormal
+        ? this.sourceIdentifier(value.id, 'stack_args')
+        : this.program.source
+          ? this.sourceIdentifier(
+              value.id,
+              role ??
+                (this.sourceRoleNames.has(value.id)
+                  ? (proven ?? `arg${i}`)
+                  : (this.program.source.parameter_names.get(value.id) ??
+                    source?.name ??
+                    `arg${i}`)),
+            )
+          : this.identifier(value.id, source ? 'arg' : register ? 'reg' : 'arg');
+      const type =
+        incomingFormal && incomingStruct
+          ? this.language === 'c-like'
+            ? `struct ${incomingStruct.tag}`
+            : `struct{${incomingStruct.members.join(', ')}}`
+          : source
+            ? this.sourceType(source.type_id)
+            : this.valueType(value);
       this.declaredTypes.set(value.id, type);
       parameters.push({
         value,
@@ -8817,6 +8907,12 @@ export class Renderer {
         if (id) typeIds.push(id);
       }
       this.structDeclarations(typeIds);
+      // The incoming object's members sit at their entry-SP offsets from its start.
+      if (incomingStruct)
+        w.line(
+          0,
+          `struct ${incomingStruct.tag} { ${incomingStruct.members.map((member) => `${member};`).join(' ')} }${incomingStruct.packed ? ' __attribute__((packed))' : ''};`,
+        );
     }
     this.declareDataTables();
     this.declareSourceCallees();

@@ -232,7 +232,8 @@ const clobbered = new (class extends Map<string, bigint> {
 
 /** Runs one view with the entry SP at `ENTRY_SP`, the 32 frame bytes below
  * it mapped (the checked view addresses them there) and `incoming` in the
- * first incoming stack slot; the callee leaves memory unchanged in both views. */
+ * first incoming stack slot; the callee leaves memory unchanged in both views.
+ * A `stack_args` formal (S4) is the address of those incoming bytes. */
 function run(emission: Emission, abi: AbiProfile, argument: bigint, incoming: bigint): Observation {
   const memory = new Map<bigint, number>();
   for (let offset = -32n; offset < abi.stack_return_address_bytes; offset++)
@@ -249,7 +250,11 @@ function run(emission: Emission, abi: AbiProfile, argument: bigint, incoming: bi
     new Map(
       formals.map((formal) => [
         formal.statement_id,
-        formal.name === 'entry_sp' ? ENTRY_SP : argument,
+        formal.name === 'entry_sp'
+          ? ENTRY_SP
+          : formal.name === 'stack_args'
+            ? ENTRY_SP + abi.stack_return_address_bytes
+            : argument,
       ]),
     ),
     memory,
@@ -261,13 +266,15 @@ function run(emission: Emission, abi: AbiProfile, argument: bigint, incoming: bi
 }
 
 /** The source view prints every negative entry-SP offset through the frame
- * object and the entry SP only in nonnegative expressions; its values and
+ * object and, `beside` it, either the entry SP only in nonnegative expressions
+ * or (S4) the incoming bytes through the `stack_args` formal; its values and
  * event order equal the checked view's. */
 function assertBeside(
   fixture: Fixture,
   abi: AbiProfile,
   cases: readonly (readonly [argument: bigint, incoming: bigint, expected: bigint])[],
   events: readonly string[],
+  beside: 'entry_sp' | 'stack_args' = 'entry_sp',
 ): void {
   for (const language of ['c-like', 'python-like'] as const) {
     const output = emit(fixture.ir, fixture.extra, language).emission,
@@ -275,13 +282,23 @@ function assertBeside(
     const text = output.text;
     // The checked view keeps every frame byte in entry-SP form.
     assert.match(checked.text, /entry_sp - /, checked.text);
-    assert.doesNotMatch(checked.text, /\bframe\b/, checked.text);
+    assert.doesNotMatch(checked.text, /\bframe\b|\bstack_args\b/, checked.text);
     assert.match(text, language === 'c-like' ? /\} frame;/ : /frame = stack_frame\(/, text);
-    assert.match(text, /\bentry_sp\b/, text);
     assert.doesNotMatch(text, /\bentry_sp\s*-|-\s*\(?entry_sp\b/, text);
-    assert.ok(
-      output.local_validation?.some((record) => record.rule === 'frame_object_beside_entry_sp'),
-    );
+    if (beside === 'entry_sp') {
+      assert.match(text, /\bentry_sp\b/, text);
+      assert.ok(
+        output.local_validation?.some((record) => record.rule === 'frame_object_beside_entry_sp'),
+      );
+    } else {
+      assert.doesNotMatch(text, /\bentry_sp\b/, text);
+      assert.match(
+        text,
+        language === 'c-like' ? /struct stack_args_\w+ stack_args\)/ : /stack_args: struct\{/,
+        text,
+      );
+      assert.ok(output.local_validation?.some((record) => record.rule === 'incoming_object'));
+    }
     for (const [argument, incoming, expected] of cases) {
       const source = run(output, abi, argument, incoming),
         machine = run(checked, abi, argument, incoming);
@@ -295,12 +312,13 @@ function assertBeside(
 
 const mask64 = (1n << 64n) - 1n;
 for (const abi of [darwinArm64Abi, sysvAMD64Abi, windowsX64Abi]) {
-  test(`${abi.id}: an escaped negative slot prints as a frame member beside a live entry SP`, () => {
+  test(`${abi.id}: an escaped negative slot prints as a frame member beside the incoming object`, () => {
     const f = entryFrame(abi, 'escaped');
     const slot = f.at(-16n),
       incoming = f.at(f.incoming);
     f.block.store(slot, f.block.constant(u64, 7n));
-    // A store to the incoming argument slot keeps the entry SP live.
+    // The incoming slot is stored and reloaded; no exposure can designate it
+    // (the escaped address is a frame address), so it is the S4 incoming object.
     f.block.store(incoming, f.argument);
     f.call(slot);
     const sum = f.block.int('add', f.block.load(u64, slot), f.block.load(u64, incoming));
@@ -310,10 +328,11 @@ for (const abi of [darwinArm64Abi, sysvAMD64Abi, windowsX64Abi]) {
       abi,
       [0n, 5n, mask64, 1n << 63n].map((argument) => [argument, 0n, (argument + 7n) & mask64]),
       ['store', 'store', 'call', 'load', 'load'],
+      'stack_args',
     );
   });
 
-  test(`${abi.id}: an indexed negative base prints as a frame byte array beside a live entry SP`, () => {
+  test(`${abi.id}: an indexed negative base prints as a frame byte array beside the incoming object`, () => {
     const f = entryFrame(abi, 'indexed');
     const base = f.at(-32n);
     for (const index of [0n, 1n, 2n, 3n])
@@ -355,6 +374,7 @@ for (const abi of [darwinArm64Abi, sysvAMD64Abi, windowsX64Abi]) {
         'load',
         'load',
       ],
+      'stack_args',
     );
   });
 

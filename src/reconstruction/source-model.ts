@@ -258,6 +258,19 @@ export interface FrameMember {
   /** The known-offset frame accesses inside these bytes. */
   readonly access_ids: readonly string[];
 }
+/** Source view (S4): the incoming stack-argument bytes this activation keeps
+ * as memory (a by-value aggregate modified in place), printed as one struct
+ * formal of `size` bytes starting at entry-SP `minimum_offset` (the first
+ * incoming byte). Members are in entry-SP coordinates; bytes between them are
+ * padding, and every byte stays ordinary, aliasable memory. The formal's IR
+ * type is a pointer-width carrier only; its spelling is the struct. */
+export interface IncomingObject {
+  readonly formal: Value;
+  readonly id: string;
+  readonly minimum_offset: bigint;
+  readonly size: bigint;
+  readonly members: readonly FrameMember[];
+}
 /** Complete source interpretation of an unchanged machine-width value. */
 export interface SourceTypeView {
   readonly type_id: string;
@@ -332,6 +345,8 @@ export interface SourcePresentation {
   readonly requirements?: readonly Requirement[];
   readonly locals: ReadonlyMap<string, SourceLocal>;
   readonly stack: SourceStackStorage | null;
+  /** Source view (S4): the incoming object, when its struct formal is presented. */
+  readonly incoming_object?: IncomingObject | null;
   readonly stack_addresses: ReadonlyMap<string, bigint>;
   /** Source view only: frame-private save/restore traffic of preserved registers
    * and the frame record, hidden under an `abi_conformance` requirement. */

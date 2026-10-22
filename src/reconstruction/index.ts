@@ -198,6 +198,7 @@ export function reconstruct(
         context,
         sourcePlan.incomingStack,
         sourcePlan.entryStack,
+        sourcePlan.incomingObject,
         localValidation,
         view,
         sourcePlan.presentation.requirements,
@@ -280,6 +281,7 @@ export function reconstruct(
       for (const binding of boundary.outputs) roots.push(binding.value);
     };
     if (sourceStack?.entryStorage) roots.push(sourceStack.entryStorage);
+    if (sourceStack?.incomingFormal) roots.push(sourceStack.incomingFormal);
     for (const block of blocks.values()) {
       for (const node of block.statements) {
         context.checkpoint(1);
@@ -877,6 +879,8 @@ export function reconstruct(
       if (sourceStack?.addresses.has(value.id)) {
         if (sourceStack.entryStorage && sourceStack.requiresEntry(value.id))
           use(sourceStack.entryStorage, owner.get(value.id)!);
+        if (sourceStack.incomingFormal && sourceStack.requiresIncoming(value.id))
+          use(sourceStack.incomingFormal, owner.get(value.id)!);
         continue;
       }
       if (expression)
@@ -956,6 +960,8 @@ export function reconstruct(
       if (sourceStack?.addresses.has(value.id)) {
         if (sourceStack.entryStorage && sourceStack.requiresEntry(value.id))
           reach(sourceStack.entryStorage);
+        if (sourceStack.incomingFormal && sourceStack.requiresIncoming(value.id))
+          reach(sourceStack.incomingFormal);
         continue;
       }
       if (expression) for (const operand of expressionOperands(expression)) reach(operand);
@@ -1232,6 +1238,9 @@ export function reconstruct(
           inferred: sourcePlan.presentation.inferred || entryStorageLive,
           locals: sourceStack.locals,
           stack: sourceStack.frame(retained, live),
+          ...(view === 'source'
+            ? { incoming_object: sourceStack.incomingStorage(retained, live) }
+            : {}),
           stack_addresses: sourceStack.addresses,
           forwarded_reloads: sourceStack.forwardedReloads,
           ...(view === 'source' ? { frame_saves: sourceStack.saves } : {}),
