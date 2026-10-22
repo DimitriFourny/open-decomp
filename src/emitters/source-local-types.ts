@@ -652,10 +652,13 @@ export function planIntegerSpellings(host: IntegerSpellingHost): Map<string, Int
   // between printed variables (edge copies and pure same-width assignments).
   const users = new Map<string, { readonly value: Value; readonly expression: Expression }[]>();
   const occurrences = new Map<string, number>();
-  for (const [id, expression] of program.expressions) {
-    context.checkpoint(1);
+  for (const id of program.live) {
     const value = program.values.get(id);
-    if (!value || !program.live.has(id)) continue;
+    if (!value) continue;
+    admit(value);
+    const expression = program.expressions.get(id);
+    if (!expression) continue;
+    context.checkpoint(1);
     for (const operand of expressionOperands(expression)) {
       occurrences.set(operand.id, (occurrences.get(operand.id) ?? 0) + 1);
       const row = users.get(operand.id) ?? [];
@@ -698,9 +701,16 @@ export function planIntegerSpellings(host: IntegerSpellingHost): Map<string, Int
       if (widened(copy.source) && admit(copy.destination)) fixed.add(copy.destination.id);
       join(copy.destination, resolve(copy.source));
     }
-  for (const block of program.blocks.values())
+  // A return or tail block entered by several edges may print once per edge
+  // (return tail duplication, decided after this plan): its reads count as often.
+  const home = new Map<string, string>(),
+    entries = new Map<string, number>();
+  for (const block of program.blocks.values()) {
+    context.checkpoint(1);
+    for (const value of block.parameters) home.set(value.id, block.id);
     for (const node of block.statements) {
-      context.checkpoint(1);
+      if ('result' in node) home.set(node.result.id, block.id);
+      if (node.kind === 'call') for (const value of node.results) home.set(value.id, block.id);
       if (node.kind !== 'assign' || !program.retained.has(node.id)) continue;
       const expression = program.expressions.get(node.result.id) ?? node.expression;
       if (expression.kind !== 'cast') continue;
@@ -714,9 +724,11 @@ export function planIntegerSpellings(host: IntegerSpellingHost): Map<string, Int
       const source = resolve(expression.value);
       if (bitWidth(source.type) === bitWidth(node.result.type)) join(node.result, source);
     }
-  for (const id of program.live) {
-    const value = program.values.get(id);
-    if (value) admit(value);
+    const control = block.control;
+    for (const transfer of control.kind === 'jump'
+      ? [control.transfer]
+      : controlArms(control).map((arm) => arm.transfer))
+      entries.set(transfer.target, (entries.get(transfer.target) ?? 0) + 1);
   }
   const groups = new Map<string, string[]>();
   for (const id of values.keys()) {
@@ -725,8 +737,15 @@ export function planIntegerSpellings(host: IntegerSpellingHost): Map<string, Int
     group.push(id);
     groups.set(root, group);
   }
+  const repeats = (value: Value): number => {
+    const block = program.blocks.get(home.get(value.id) ?? '');
+    return block && (block.control.kind === 'return' || program.tails.has(block.control.id))
+      ? Math.max(1, entries.get(block.id) ?? 1)
+      : 1;
+  };
   const weight = (value: Value): number =>
-    host.inline.has(value.id) ? Math.max(1, program.use_counts.get(value.id) ?? 1) : 1;
+    (host.inline.has(value.id) ? Math.max(1, program.use_counts.get(value.id) ?? 1) : 1) *
+    repeats(value);
   /** Reads of `value` that are neither a live printed expression nor a copy
    * into the set: statements, call arguments, returns, other copies. */
   const others = (value: Value, members: ReadonlySet<string>): number => {

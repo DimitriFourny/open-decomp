@@ -1685,13 +1685,14 @@ export class Renderer {
 
   private assigned(destination: Value, value: Printed): string {
     const declared = this.declaredInteger(destination, this.declaredSpelling(destination));
+    const chosen = this.localIntegers.has((this.variables.get(destination.id) ?? destination).id);
     // A local signed by conversion cost: C assignment converts to it, so the
     // signed variable a same-width reinterpretation re-read passes unchanged.
-    if (
-      declared?.signed &&
-      this.localIntegers.has((this.variables.get(destination.id) ?? destination).id)
-    )
-      return this.signedContext(value, declared.bits);
+    if (chosen && declared?.signed) return this.signedContext(value, declared.bits);
+    // A narrow local keeps the low bits of any assigned value: the operand of
+    // its final reduction or zero extension has the same low bits.
+    if (chosen && declared && declared.bits < bitWidth(destination.type))
+      return (value.unreduced ?? value.widened ?? value).text;
     return this.converted(
       value,
       declared && !declared.signed && declared.bits === bitWidth(destination.type)
