@@ -8,11 +8,33 @@ import type { InferredCallee } from '../../reconstruction/source-model.js';
 import { parameterRegisters } from './native-abi.js';
 import { nativeIncomingStackEscapes } from './native-transfer.js';
 
-/** A callee's `va_start` footprint as callers see it (`NativeInterface.variadic`,
- * S8): the named argument registers of the source view's classification in
- * position order, their counts per class, and the bytes of named stack
- * arguments before the first anonymous one. */
+/** A callee's `va_start` footprint as the source view classifies it (S6/S7),
+ * kept with its prepared unit: the named argument registers in position order
+ * (null on Darwin arm64, whose classification leaves them to the observed
+ * register prefix: no anonymous argument occupies a register there) and the
+ * bytes of named stack arguments before the first anonymous one. */
+export interface NativeVariadicFootprint {
+  readonly named: readonly RegisterDescriptor[] | null;
+  readonly named_stack_bytes: bigint;
+}
+
+/** The footprint as callers see it (`NativeInterface.variadic`, S8). */
 export type NativeVariadic = NonNullable<InferredCallee['variadic']>;
+
+/** Publish a footprint over its named registers (Darwin: `observed`, the
+ * body's observed register prefix). */
+export function nativeVariadicInterface(
+  footprint: NativeVariadicFootprint,
+  observed: readonly RegisterDescriptor[],
+): NativeVariadic {
+  const named = footprint.named ?? observed;
+  return {
+    named_integer: named.filter((register) => register.bank === 'integer').length,
+    named_vector: named.filter((register) => register.bank !== 'integer').length,
+    named_stack_bytes: footprint.named_stack_bytes,
+    named,
+  };
+}
 
 /** Cheap necessary condition of the S6/S7 classifiers on the SSA body: an
  * incoming-stack address escapes (every SysV `va_start` stores
@@ -119,7 +141,7 @@ export function nativeVariadicFootprint(
   abi: AbiProfile,
   analysis: CallAnalysisResult | null,
   context: OperationContext,
-): NativeVariadic | null {
+): NativeVariadicFootprint | null {
   if (!types?.calls || !analysis || types.state !== 'complete') return null;
   if (!variadicCandidate(ir, abi, analysis, context)) return null;
   const structured = structureControlFlow(ir, context, {
@@ -134,9 +156,15 @@ export function nativeVariadicFootprint(
   );
   const variadic = program.source?.variadic;
   if (!variadic) return null;
-  // Order: SysV and Darwin list every integer register before the vector
-  // ones (`parameterRegisters`); Win64 positions share one sequence, so a
-  // register's place is its index within its own class.
+  // Darwin: the area starts after the named stack formals; the named
+  // registers stay the observed prefix (`nativeVariadicInterface`).
+  if (variadic.kind === 'area' && abi.id === 'darwin-arm64')
+    return { named: null, named_stack_bytes: variadic.offset };
+  // SysV and Win64: the named registers are the formals `va_start`'s
+  // classification bound (gp/fp offsets, Win64's area offset). SysV lists
+  // every integer register before the vector ones (`parameterRegisters`);
+  // Win64 positions share one sequence, so a register's place is its index
+  // within its own class.
   const candidates = parameterRegisters(abi);
   const order = (register: RegisterDescriptor): number =>
     abi.id === 'windows-x64'
@@ -152,19 +180,11 @@ export function nativeVariadicFootprint(
         : [];
     })
     .sort((left, right) => order(left) - order(right));
-  // Darwin: the area starts after the named stack formals; Win64's lies in
-  // the home area (no named stack bytes); SysV's named stack formals tile
-  // [8, overflow_arg_area).
+  // Win64's area lies in the home area (no named stack bytes); SysV's named
+  // stack formals tile [8, overflow_arg_area).
   let stackEnd = abi.stack_return_address_bytes;
-  if (variadic.kind === 'area') {
-    if (abi.id === 'darwin-arm64') stackEnd = variadic.offset;
-  } else
+  if (variadic.kind === 'va_list')
     for (const offset of program.source?.formal_stack_offsets?.values() ?? [])
       if (offset + 8n > stackEnd) stackEnd = offset + 8n;
-  return {
-    named_integer: named.filter((register) => register.bank === 'integer').length,
-    named_vector: named.filter((register) => register.bank !== 'integer').length,
-    named_stack_bytes: stackEnd - abi.stack_return_address_bytes,
-    named,
-  };
+  return { named, named_stack_bytes: stackEnd - abi.stack_return_address_bytes };
 }

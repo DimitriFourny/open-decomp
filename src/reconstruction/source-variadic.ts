@@ -61,11 +61,12 @@ export function planVariadicStackArguments(
     fact?.value.kind === 'dynamic_stack';
   const preserved = new Set(source.abi.preserved.map((register) => register.root));
   // A callee with a published `va_start` footprint (S8) reads, under the
-  // variadic convention recorded with each rewrite, its named registers and
-  // its anonymous stack slots only: a stack address in another register at
-  // its call reaches nothing.
+  // variadic convention recorded with each rewrite, its named registers (the
+  // observed prefix) and its anonymous stack slots only: a stack address in
+  // another register at its call reaches nothing.
   const leaks = (id: string): boolean => {
-    const named = inferred.get(id)?.variadic?.named;
+    const callee = inferred.get(id),
+      named = callee?.variadic && callee.parameters;
     return (
       stack.snapshots
         .get(id)
@@ -1152,7 +1153,10 @@ export function createVariadicCallBinder(
     const variadic = callee.variadic;
     if (!variadic) return null;
     const values: Value[] = [];
-    for (const [index, named] of variadic.named.entries()) {
+    // Darwin arm64 passes no anonymous argument in a register: the named
+    // registers are the call's observed register prefix, as for any callee.
+    const namedRegisters = abi.id === 'darwin-arm64' ? callee.parameters : variadic.named;
+    for (const [index, named] of namedRegisters.entries()) {
       // The observed cell width and type of the named register, when read.
       const at = callee.parameters.findIndex((register) => register.root === named.root);
       const register = at >= 0 ? callee.parameters[at]! : named;
