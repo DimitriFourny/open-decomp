@@ -28,10 +28,26 @@ export interface StaticMetrics {
   readonly else_if: number;
   /** `if`/`while` conditions holding a comma operator. */
   readonly comma_conditions: number;
+  /** `if`/`while` conditions holding a parenthesized assignment compared to a value: `(x = e) != k`. */
+  readonly embedded_assignment_conditions: number;
   /** `x | ((uint64_t)y << 32)`: a 64-bit value rebuilt from two 32-bit cells. */
   readonly cells64: number;
   /** Local declarations at the top of the body. */
   readonly decls: number;
+  /** OD result-unknown markers (`unknown_result` return type or value), occurrences. */
+  readonly unknown_result: number;
+  /** `unknown_value(` calls. */
+  readonly unknown_values: number;
+  /** `__unknown_effect(` calls. */
+  readonly unknown_effects: number;
+  /** `boundary(` calls. */
+  readonly boundaries: number;
+  /** `requirement_predicate(` calls. */
+  readonly requirement_predicates: number;
+  /** Function-pointer casts whose parameter list contains `...`: `(T (*)(A, ...))f`. */
+  readonly open_pointer_casts: number;
+  /** 0/1: the text declares a `frame` struct (`} frame;`). */
+  readonly with_frame: number;
   /** Body lines with a call ending `, ...)`. */
   readonly open_calls: number;
   /** Lines (comments included) mentioning `entry_sp`. */
@@ -92,6 +108,18 @@ export const SCALAR_METRICS: readonly {
   { key: 'tested', label: 'loops with a test', aggregate: 'sum' },
   { key: 'else_if', label: 'else if', aggregate: 'sum' },
   { key: 'comma_conditions', label: 'comma conditions', aggregate: 'sum' },
+  {
+    key: 'embedded_assignment_conditions',
+    label: 'embedded-assignment conditions `(x = e) op k`',
+    aggregate: 'sum',
+  },
+  { key: 'unknown_result', label: 'unknown_result', aggregate: 'sum' },
+  { key: 'unknown_values', label: 'unknown_value(', aggregate: 'sum' },
+  { key: 'unknown_effects', label: '__unknown_effect(', aggregate: 'sum' },
+  { key: 'boundaries', label: 'boundary(', aggregate: 'sum' },
+  { key: 'requirement_predicates', label: 'requirement_predicate(', aggregate: 'sum' },
+  { key: 'open_pointer_casts', label: 'function-pointer casts with `...`', aggregate: 'sum' },
+  { key: 'with_frame', label: 'functions with a frame struct', aggregate: 'sum' },
   { key: 'decision_points', label: 'decision points', aggregate: 'sum' },
   { key: 'max_nesting', label: 'max nesting', aggregate: 'max' },
   { key: 'decls', label: 'local declarations', aggregate: 'sum' },
@@ -181,6 +209,14 @@ const DECLARATION = new RegExp(
 const HELPER = /\b(?:unknown_\w+|requirement_predicate|physical_\w+)\b/;
 const ENTRY_SP = /\bentry_sp\b/;
 const OPEN_CALL = /,\s*\.\.\.\)/;
+const UNKNOWN_RESULT = /\bunknown_result\b/g;
+const UNKNOWN_VALUE = /\bunknown_value\s*\(/g;
+const UNKNOWN_EFFECT = /\b__unknown_effect\s*\(/g;
+const BOUNDARY = /\bboundary\s*\(/g;
+const REQUIREMENT_PREDICATE = /\brequirement_predicate\s*\(/g;
+/** `(*)(…, ...)` with at most one level of nested parentheses in the parameter list. */
+const OPEN_POINTER_CAST = /\(\s*\*\s*\)\s*\((?:[^()]|\([^()]*\))*\.\.\.\s*\)/g;
+const FRAME_STRUCT = /\}\s*frame\s*;/;
 const CELL64 = /\|\s*\(\s*\(\s*uint64_t\s*\)\s*[A-Za-z_]\w*\s*<<\s*32\s*\)/g;
 const EXIT_FLAG = /\bloop_exit_\d+\b/g;
 const LINE_BREAK = /\r\n|[\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029]/;
@@ -216,7 +252,7 @@ function literalEnd(text: string, start: number): number {
 }
 
 /** Comments become spaces (newlines kept), string and char literals become their bare quotes. */
-function blankNoise(text: string): string {
+export function blankNoise(text: string): string {
   const parts: string[] = [];
   let copied = 0;
   let index = 0;
@@ -276,6 +312,68 @@ function commaConditions(code: string): number {
   return found;
 }
 
+/** True when the `)` at `close` ends a type-name group (`(uint32_t)`, `(struct s*)`), i.e. a cast. */
+function closesCast(code: string, close: number): boolean {
+  let depth = 0;
+  for (let index = close; index >= 0; index--) {
+    if (code[index] === ')') depth++;
+    else if (code[index] === '(' && --depth === 0) {
+      let back = index - 1;
+      while (back >= 0 && /\s/.test(code[back] ?? '')) back--;
+      return /^[\w\s*]+$/.test(code.slice(index + 1, close)) && !/[\w)\]]/.test(code[back] ?? ' ');
+    }
+  }
+  return false;
+}
+
+/**
+ * `if` / `while` conditions with an assignment inside a parenthesized group that is followed by a
+ * comparison or arithmetic operator: `(x = f()) != 0`, `(uint32_t)(n -= 2) > 0`, `(v = a + b) >> 16`.
+ * One per condition. Call argument lists and `sizeof` groups (a group preceded by a name or a
+ * closing bracket other than a cast) never count; a group holding a comma operator is the business
+ * of `comma_conditions`, and `(x = e) && y` has no operator on the value.
+ */
+function embeddedAssignmentConditions(code: string): number {
+  const OPERATOR_AFTER = /^\s*(?:==|!=|<=|>=|<|>|\+|-|\*|\/|%|&(?!&)|\|(?!\|)|\^)/;
+  let found = 0;
+  for (const match of code.matchAll(/\b(?:if|while)\s*\(/g)) {
+    const open = match.index + match[0].length - 1;
+    const groups: { assigns: boolean; value: boolean }[] = [];
+    let counted = false;
+    for (let index = open; index < code.length && !counted; index++) {
+      const char = code[index];
+      if (char === '(') {
+        let back = index - 1;
+        while (back >= 0 && /\s/.test(code[back] ?? '')) back--;
+        const before = back >= 0 ? (code[back] ?? '') : '';
+        // A value group: not the condition's own parenthesis, not a call or index, maybe a cast's operand.
+        const value =
+          index !== open &&
+          (!/[\p{L}\p{N}_)\]]/u.test(before) || (before === ')' && closesCast(code, back)));
+        groups.push({ assigns: false, value });
+      } else if (char === ')') {
+        const group = groups.pop();
+        if (!group) break;
+        if (group.value && group.assigns && OPERATOR_AFTER.test(code.slice(index + 1)))
+          counted = true;
+        if (groups.length === 0) break;
+      } else if (
+        char === '=' &&
+        code[index + 1] !== '=' &&
+        !'=!<>'.includes(code[index - 1] ?? '')
+      ) {
+        // Only the group's own level: an assignment inside a nested call belongs to that call.
+        const top = groups[groups.length - 1];
+        if (top) top.assigns = true;
+      } else if (char === ';' || char === '{' || char === '}') {
+        break;
+      }
+    }
+    if (counted) found++;
+  }
+  return found;
+}
+
 /**
  * Index of the line that opens the function body: the first unindented line ending in `{` that is not a
  * type, extern/static/inline or preprocessor line (the signature is the line itself or the block above
@@ -300,6 +398,7 @@ interface StructureCounts {
   jumps: number;
   else_if: number;
   comma_conditions: number;
+  embedded_assignment_conditions: number;
   cells64: number;
   decls: number;
   open_calls: number;
@@ -334,6 +433,7 @@ function structure(text: string, code: string): StructureCounts {
     jumps: gotos + breaks + continues + exitFlags + breakable,
     else_if: countMatches(/\belse\s+if\b/g, code),
     comma_conditions: commaConditions(code),
+    embedded_assignment_conditions: embeddedAssignmentConditions(code),
     cells64: countMatches(CELL64, code),
     decls: 0,
     open_calls: 0,
@@ -525,9 +625,17 @@ export function computeMetrics(text: string): StaticMetrics {
     jumps: counts.jumps,
     else_if: counts.else_if,
     comma_conditions: counts.comma_conditions,
+    embedded_assignment_conditions: counts.embedded_assignment_conditions,
     cells64: counts.cells64,
     decls: counts.decls,
     open_calls: counts.open_calls,
+    unknown_result: countMatches(UNKNOWN_RESULT, code),
+    unknown_values: countMatches(UNKNOWN_VALUE, code),
+    unknown_effects: countMatches(UNKNOWN_EFFECT, code),
+    boundaries: countMatches(BOUNDARY, code),
+    requirement_predicates: countMatches(REQUIREMENT_PREDICATE, code),
+    open_pointer_casts: countMatches(OPEN_POINTER_CAST, code),
+    with_frame: FRAME_STRUCT.test(code) ? 1 : 0,
     entry_sp_lines: counts.entry_sp_lines,
     with_goto: counts.gotos > 0 ? 1 : 0,
     with_entry_sp: counts.entry_sp_lines > 0 ? 1 : 0,

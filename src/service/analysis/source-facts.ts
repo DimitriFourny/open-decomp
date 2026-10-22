@@ -1814,7 +1814,7 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
       } = observed;
       const proofIds = [...(summary?.evidence_ids ?? dependency.target.evidence_ids)];
       if (dependency.assumptions) {
-        const readset = scope.dependencies?.finish();
+        const readsetHash = scope.dependencies?.readsetFingerprint(scope.dependencies.finish());
         const proof: Evidence = {
           id: `evidence_${fingerprint([image.id, revision, dependency.call_id, key, 'context-use'])}`,
           origin: {
@@ -1834,7 +1834,7 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
               .join(', ')}; ` +
             `identity aliases ${dependency.assumptions.aliases.map((group) => group.map((register) => register.root).join('=')).join(', ')}; ` +
             `type/evidence scope ${dependency.assumptions.type_evidence_scope}; ` +
-            `complete positive/negative dependency scope ${readset ? fingerprint(readset as unknown as CanonicalValue) : 'unavailable (no reuse ledger)'}; ` +
+            `complete positive/negative dependency scope ${readsetHash ?? 'unavailable (no reuse ledger)'}; ` +
             `result storage ${observed.returns.map((register) => `${register.root}:${register.width_bits}`).join(', ')}; ` +
             'input assumptions do not establish complete source arity, disjoint aliases, object bounds, or source field names',
           derived_from: [...new Set([...proofIds, ...(dependency.evidence_ids ?? [])])],

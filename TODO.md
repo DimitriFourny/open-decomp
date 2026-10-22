@@ -139,7 +139,7 @@ Files that several items touch:
 
 ## M1: Signature and diagnostic rows in odbench
 
-- [ ] **Problem.** The largest excess wrong-claim class (return types) does not appear in the report. Comprehension is one sample per function, so its noise is about ±0.1. The OD lane does not record diagnostics, so this investigation needed throwaway census scripts for cut callees, partial reasons, unsupported encodings and open arity.
+- [x] **Problem.** The largest excess wrong-claim class (return types) does not appear in the report. Comprehension is one sample per function, so its noise is about ±0.1. The OD lane does not record diagnostics, so this investigation needed throwaway census scripts for cut callees, partial reasons, unsupported encodings and open arity.
   - **Change** (`scripts/bench/odbench/`):
     - `od-worker.ts`/`lane-od.ts`: record per function the diagnostics (code plus first sentence, deduplicated) in `lane.json`. This is not part of text identity.
     - New `signature.ts` with a tolerant C definition reader for the three lane styles: OD (preamble, one-line signatures), Ghidra (signature line, then `{`) and source (macros such as `SQLITE_API`, multi-line parameters, `KEEP`). The report gains a "signature vs source" table per lane:
@@ -151,22 +151,24 @@ Files that several items touch:
     - `bun run bench report --lanes od-rm3-final,source --tier full` re-renders from the caches, with no model call.
     - It shows OD void-source 17/13/12 (void/value/unknown) and value-source 8/180/1 (±1 for parser differences, explained).
     - Texts and judgments are unchanged.
+  - **Done (evidence).** `bench report --lanes od-rm3-final,source --tier full` re-renders from the caches with no model call: void-source 17/13/12, value-source 9/180/1 (the prototype's 8 omitted the stripped `sub@0x10000041c` `KEEP aggregate` function, which the reader matches by taking the text's last definition; 232 paired, not 231), Ghidra 40/2/0 and 14/176/0. Embedded-assignment conditions count 41 in OD (casts before the group and arithmetic operators after it included; the prototype's 46 was not reproduced by any variant tried: the only `if`/`while` lines with an assignment group that this counter skips are 6 comma conditions, which stay in `comma_conditions`), 17 in the source, 0 in Ghidra. `bench run od --label rm4-m1`: 232 texts byte-identical to `od-rm3-final`, state/reason/sha unchanged, 237 functions with `diagnostics` (202 with at least one).
 
 ## M2: Speed rows that match the D8 target
 
-- [ ] **Problem.** The scorecard's cold time adds opening and decompiling, but the target (D8) compares the decompile time after open with Ghidra's whole run (import, analysis and decompiles), and asks for quick first decompiles. The report has neither row, no worker memory figure and no parallel OD lane: the lane header always records `jobs: 1` (`scripts/bench/odbench/lane-od.ts:257`).
+- [x] **Problem.** The scorecard's cold time adds opening and decompiling, but the target (D8) compares the decompile time after open with Ghidra's whole run (import, analysis and decompiles), and asks for quick first decompiles. The report has neither row, no worker memory figure and no parallel OD lane: the lane header always records `jobs: 1` (`scripts/bench/odbench/lane-od.ts:257`).
   - **Change** (`scripts/bench/odbench/`):
     - `od-worker.ts`/`lane-od.ts`: record per binary `open_ms` (`openBinary`, including the T8 job once it exists, with the job's own time as `open_job_ms`), `first10_ms` (wall time from open to the 10th corpus function's result, in corpus order), the existing `decompile_ms_total`, and the peak RSS of every process.
     - `--jobs N`: decompile one binary's functions with N request workers over one opened project (needs T9; until T9 lands it accepts only 1). The lane header records N.
     - `report.ts`, scorecard and section 8: per binary and in total, OD decompile time after open against Ghidra's `cold_ms`, the ratio and the D8 threshold (1.25×); `first10_ms` against 5 s on SQLite; open time and peak RSS as reported values. Keep the existing cold-time row.
   - **Tests:** odbench unit tests in `test/bench/`: the ratio and threshold rows from a synthetic lane, and `--jobs 1` lanes re-render unchanged.
   - **Acceptance:** `bench report` on the existing lanes shows SQLite 121.4 s vs 38.7 s (3.13×) and the total 140 s vs 87 s (1.61×) without a model call; a new `od` run records `first10_ms` and peak RSS.
+  - **Done:** `bench report --lanes od-rm3-final,source --tier full` (from caches) shows SQLite 121.4 s vs 38.7 s (3.13×) and total 140.0 s vs 86.7 s (1.62×; 1.61× is the rounded 140/87); an `od` run (`od-rm4-m2`, loaded host) records `first10_ms`, `open_ms` and per-process peak RSS with texts byte-identical to `od-rm3-final`; `test/bench/odbench-speed.test.ts`.
 
 ## C: Coverage and failures
 
 ### C1: No edge copy into a proven stack-address phi
 
-- [ ] **Problem.** `sqlite3CodeRowTrigger` (`0x1000d41a8`) fails in both views with "Reconstruction invariant failed: a parallel edge copy has an invalid destination or width". `isDate` hits the same failure once A1 lands.
+- [x] **Problem.** `sqlite3CodeRowTrigger` (`0x1000d41a8`) fails in both views with "Reconstruction invariant failed: a parallel edge copy has an invalid destination or width". `isDate` hits the same failure once A1 lands. **Done:** `sqlite3CodeRowTrigger` now has text in both views (310 source lines, 5.85M work in lane `od-rm4-c1`); lane diff vs `od-rm3-final` is that one new text, every other text byte-identical (reconstruction 78 → 79).
   - **Root cause:**
     - `planSourceStack` proves that a loop phi is one frame address on every edge (`source-stack.ts:659-667`); here x28 carries `x29 − 0xb0`.
     - `reconstructView` therefore marks every `sourceStack.addresses` id inline (`src/reconstruction/index.ts:1043`).
@@ -184,7 +186,7 @@ Files that several items touch:
 
 ### C2: Exhausted validation never degrades the text
 
-- [ ] **Problem:**
+- [x] **Problem:** _(Done: lane `od-rm4-c2` at 10M: brotli `main` 55,953 → 46,419 B, `isDate` 112,543 → 81,332 B, `Incrmerge` 80,331 → 56,081 B, `boundary(` 9/27/23 → 0; every other text byte-identical to `od-rm3-final`; checked view identical; `sqlite3Select` at 40M renders in one attempt per metadata mode, then stops at the evidence catalog bound (C3).)_
   - 59 `boundary("unknown_read_write", {"arm64:x0:0:64", … 60 registers})` statements (67.7 KB) in brotli `main` (9), `isDate` (27) and `sqlite3Fts3Incrmerge` (23);
   - up to 5 full render attempts (5.3M work on `sqlite3Select` at 40M);
   - a latent "A comma statement printed a line" failure behind `sqlite3Select`/`sqlite3Pragma`.
@@ -505,7 +507,7 @@ Files that several items touch:
 
 ### F1: FP-environment epoch webs: coinductive acceptance and mark-based unobserved epochs
 
-- [ ] **Problem.** In functions with a call inside a loop, every FPCR guard, failure effect, `unknown_exit("Unsupported FPCR environment")` and `fp_*` helper stays printed. `rtreeInsertCell` has 19 `requirement_predicate` guards and 3 `unknown_value("uint32_t", "call clobbers fpcr")` (lexical tokens 6,360 vs Ghidra's 3,144). Undeclared `value0 = unknown_value("bits32_t", "FPCR environment");` assignments in `sqlite3_result_double` and `cume_distValueFunc` do not compile.
+- [x] **Problem.** In functions with a call inside a loop, every FPCR guard, failure effect, `unknown_exit("Unsupported FPCR environment")` and `fp_*` helper stays printed. `rtreeInsertCell` has 19 `requirement_predicate` guards and 3 `unknown_value("uint32_t", "call clobbers fpcr")` (lexical tokens 6,360 vs Ghidra's 3,144). Undeclared `value0 = unknown_value("bits32_t", "FPCR environment");` assignments in `sqlite3_result_double` and `cume_distValueFunc` do not compile. _Done (`wt/rm4-f1`): lane `od-rm4-f1` differs from `od-main-56a18f1` in exactly the three acceptance texts (`rtreeInsertCell` 6,336 → 5,311 lexical tokens with 0 guards/exits/placeholders/`fp_*`, 6,360 → 5,335 against `od-rm3-final`; `sqlite3_result_double` 123 → 114, `cume_distValueFunc` 182 → 173); checked view byte-identical on those three and three unchanged FP-note functions; states unchanged; `rtreeInsertCell` work 7,045,301 → 7,022,449._
   - **Root cause:**
     - `sourceFpPresentation` returns `unchanged` unless every guard's epoch is assumed. `assumedEpoch` is inductive and rejects cycles (`src/reconstruction/source-fp.ts:146-160`, `:149`), and a loop with a call makes the FPCR loop phi depend on itself.
     - `unobserved` (`:209-238`) is a reference count that never releases a cycle, and it marks only call outputs (`:234`).
@@ -792,7 +794,7 @@ Files that several items touch:
 
 ### E5: Fold the bitfield-move aliases (SXTB/SXTH/SXTW, SBFIZ/UBFIZ, SBFX)
 
-- [ ] **Problem.** 25 sign-fill selects such as `((x >> 0x1f) & 1 ? 0xffffffffffffffff : 0) & 0xffffffff00000000) | (x & 0xffffffff)` and 5 rotate-as-shift idioms in 15 functions, each 15–35 tokens. Judges cite `btreeOverwriteContent`, `openStatTable` and `fts3MatchinfoLcsCb`.
+- [x] **Problem.** 25 sign-fill selects such as `((x >> 0x1f) & 1 ? 0xffffffffffffffff : 0) & 0xffffffff00000000) | (x & 0xffffffff)` and 5 rotate-as-shift idioms in 15 functions, each 15–35 tokens. Judges cite `btreeOverwriteContent`, `openStatTable` and `fts3MatchinfoLcsCb`. _Done (`wt/rm4-e5`): fields of 8/16/32 bits starting at bit 0 fold (SXTB/SXTH/SXTW, SBFIZ, UBFIZ); SBFX/UBFX and odd widths keep their lowering (the division and signed-shift recognizers read them, and odd widths print as xor/subtract pairs). Lane `od-rm4-e5` vs `od-main-afb7691`: 61 sign-fill selects and 7 rotate idioms fold in 28 functions (30 texts change, all of them by these folds; 14 selects and 10 rotates remain in other shapes); `btreeOverwriteContent` prints `(uint64_t)count` (`count` is an `int32_t` formal) and `size = (uint64_t)(int32_t)size`; `fts3MatchinfoLcsCb` prints `*(uint64_t *)((uintptr_t)arg2 + ((uint64_t)arg1 << 5))` with `int32_t arg1`; checked view byte-identical; reconstruction 80, fingerprints unchanged._
   - **Root cause:** the generic SBFM/UBFM lowering (`src/lifters/arm64/semantics.ts:332-353`). `foldShiftIdiom` (`src/reconstruction/source-shifts.ts:121-171`) folds only masks equal to the whole non-wrapped part.
   - **Change:** in `foldShiftIdiom` or a sibling rule in `EXPRESSION_RULES` (`source-rules.ts:632-652`), with masks equal to the field exactly:
     - (i) `(select(bit_s(x), ~0, 0) & ~mask(s+1)) | (x & mask(s+1))` → `sign_extend(trunc_{s+1}(x))`;
@@ -882,7 +884,7 @@ Files that several items touch:
 
 ### P4: Struct class names without another function's name
 
-- [ ] **Problem.** 250 of 418 struct names are `<fn>_arg<N>_<hash>` (`sqlite3VdbeAddOp3_arg0_e84e`, `setSectorSize_arg0_f48_f0_2620`), 1,190 occurrences and 34.5 KB. 141 of them name a function other than the one printed, which the judge called "misleading sqlite3DbFree_arg1 type name".
+- [x] **Problem.** 250 of 418 struct names are `<fn>_arg<N>_<hash>` (`sqlite3VdbeAddOp3_arg0_e84e`, `setSectorSize_arg0_f48_f0_2620`), 1,190 occurrences and 34.5 KB. 141 of them name a function other than the one printed, which the judge called "misleading sqlite3DbFree_arg1 type name".
   - **Root cause:** `src/analysis/types/image-types.ts:395-452` names a class after its first anchor.
   - **Change:**
     - Function texts print `struct_<6hex>` (already used for 146 classes; `source-structs.ts:241`).
@@ -891,6 +893,7 @@ Files that several items touch:
   - **Tests:** `test/analysis/types/image-types.test.ts`, `test/emitters/c/source-structs.test.ts`, `test/reconstruction/image-types-source.test.ts`, the docs/CORE.md image-type section.
   - **Acceptance:** only struct names change; lexical tokens unchanged.
   - **Expected effect:** Claude tokens −9.3k, geomean about −0.035 [estimate].
+  - **Done (`wt/rm4-p4`):** OD lane: 97 of 237 texts change, every one only by struct identifiers (identical after renaming; lexical token counts unchanged); `<fn>_arg<N>_` struct names 219 (1,109 occurrences) → 0, and `_ret`/`_obj`/`_local`/`_alloc` names → `struct_<hex>` too (368 names before and after); checked view unchanged on the 4 sampled functions; versions types/16, reconstruction/79, emitters 85.
 
 ## L: Loops
 
@@ -966,7 +969,7 @@ Files that several items touch:
 
 ### T1: Incremental hash of the dependency ledger
 
-- [ ] **Problem.** `fingerprint(readset)` (`source-facts.ts:1817-1837`, inside the dependency loop at `:1786`) rebuilds and hashes the whole append-only ledger (about 10.9k reads) for every context-specialized dependency: 11.0 s of profile plus GC.
+- [x] **Problem.** `fingerprint(readset)` (`source-facts.ts:1817-1837`, inside the dependency loop at `:1786`) rebuilds and hashes the whole append-only ledger (about 10.9k reads) for every context-specialized dependency: 11.0 s of profile plus GC. _Done (`wt/rm4-t1`): all 237 lane texts and states identical to `od-rm3-final`; SQLite `decompile_ms_total` back-to-back at similar load: base 139.3 / 125.6 s → 117.2 / 106.9 s._
   - **Change:**
     - `src/core/identity.ts`: an append-only canonical hasher that produces exactly `fingerprint({version: 1, complete: true, reads})` for a growing array, with `canonicalIdentity` per element (no second format).
     - `src/project/cache/dependencies.ts`: `AnalysisDependencyCollector.readsetFingerprint(readset)` absorbs only new reads. `finish()` snapshots are prefixes (`:410-415`). Fall back to the full hash for foreign readsets.
