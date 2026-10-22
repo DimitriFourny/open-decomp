@@ -155,19 +155,20 @@ Files that several items touch:
 
 ## M2: Speed rows that match the D8 target
 
-- [ ] **Problem.** The scorecard's cold time adds opening and decompiling, but the target (D8) compares the decompile time after open with Ghidra's whole run (import, analysis and decompiles), and asks for quick first decompiles. The report has neither row, no worker memory figure and no parallel OD lane: the lane header always records `jobs: 1` (`scripts/bench/odbench/lane-od.ts:257`).
+- [x] **Problem.** The scorecard's cold time adds opening and decompiling, but the target (D8) compares the decompile time after open with Ghidra's whole run (import, analysis and decompiles), and asks for quick first decompiles. The report has neither row, no worker memory figure and no parallel OD lane: the lane header always records `jobs: 1` (`scripts/bench/odbench/lane-od.ts:257`).
   - **Change** (`scripts/bench/odbench/`):
     - `od-worker.ts`/`lane-od.ts`: record per binary `open_ms` (`openBinary`, including the T8 job once it exists, with the job's own time as `open_job_ms`), `first10_ms` (wall time from open to the 10th corpus function's result, in corpus order), the existing `decompile_ms_total`, and the peak RSS of every process.
     - `--jobs N`: decompile one binary's functions with N request workers over one opened project (needs T9; until T9 lands it accepts only 1). The lane header records N.
     - `report.ts`, scorecard and section 8: per binary and in total, OD decompile time after open against Ghidra's `cold_ms`, the ratio and the D8 threshold (1.25×); `first10_ms` against 5 s on SQLite; open time and peak RSS as reported values. Keep the existing cold-time row.
   - **Tests:** odbench unit tests in `test/bench/`: the ratio and threshold rows from a synthetic lane, and `--jobs 1` lanes re-render unchanged.
   - **Acceptance:** `bench report` on the existing lanes shows SQLite 121.4 s vs 38.7 s (3.13×) and the total 140 s vs 87 s (1.61×) without a model call; a new `od` run records `first10_ms` and peak RSS.
+  - **Done:** `bench report --lanes od-rm3-final,source --tier full` (from caches) shows SQLite 121.4 s vs 38.7 s (3.13×) and total 140.0 s vs 86.7 s (1.62×; 1.61× is the rounded 140/87); an `od` run (`od-rm4-m2`, loaded host) records `first10_ms`, `open_ms` and per-process peak RSS with texts byte-identical to `od-rm3-final`; `test/bench/odbench-speed.test.ts`.
 
 ## C: Coverage and failures
 
 ### C1: No edge copy into a proven stack-address phi
 
-- [ ] **Problem.** `sqlite3CodeRowTrigger` (`0x1000d41a8`) fails in both views with "Reconstruction invariant failed: a parallel edge copy has an invalid destination or width". `isDate` hits the same failure once A1 lands.
+- [x] **Problem.** `sqlite3CodeRowTrigger` (`0x1000d41a8`) fails in both views with "Reconstruction invariant failed: a parallel edge copy has an invalid destination or width". `isDate` hits the same failure once A1 lands. **Done:** `sqlite3CodeRowTrigger` now has text in both views (310 source lines, 5.85M work in lane `od-rm4-c1`); lane diff vs `od-rm3-final` is that one new text, every other text byte-identical (reconstruction 78 → 79).
   - **Root cause:**
     - `planSourceStack` proves that a loop phi is one frame address on every edge (`source-stack.ts:659-667`); here x28 carries `x29 − 0xb0`.
     - `reconstructView` therefore marks every `sourceStack.addresses` id inline (`src/reconstruction/index.ts:1043`).
@@ -506,7 +507,7 @@ Files that several items touch:
 
 ### F1: FP-environment epoch webs: coinductive acceptance and mark-based unobserved epochs
 
-- [ ] **Problem.** In functions with a call inside a loop, every FPCR guard, failure effect, `unknown_exit("Unsupported FPCR environment")` and `fp_*` helper stays printed. `rtreeInsertCell` has 19 `requirement_predicate` guards and 3 `unknown_value("uint32_t", "call clobbers fpcr")` (lexical tokens 6,360 vs Ghidra's 3,144). Undeclared `value0 = unknown_value("bits32_t", "FPCR environment");` assignments in `sqlite3_result_double` and `cume_distValueFunc` do not compile.
+- [x] **Problem.** In functions with a call inside a loop, every FPCR guard, failure effect, `unknown_exit("Unsupported FPCR environment")` and `fp_*` helper stays printed. `rtreeInsertCell` has 19 `requirement_predicate` guards and 3 `unknown_value("uint32_t", "call clobbers fpcr")` (lexical tokens 6,360 vs Ghidra's 3,144). Undeclared `value0 = unknown_value("bits32_t", "FPCR environment");` assignments in `sqlite3_result_double` and `cume_distValueFunc` do not compile. _Done (`wt/rm4-f1`): lane `od-rm4-f1` differs from `od-main-56a18f1` in exactly the three acceptance texts (`rtreeInsertCell` 6,336 → 5,311 lexical tokens with 0 guards/exits/placeholders/`fp_*`, 6,360 → 5,335 against `od-rm3-final`; `sqlite3_result_double` 123 → 114, `cume_distValueFunc` 182 → 173); checked view byte-identical on those three and three unchanged FP-note functions; states unchanged; `rtreeInsertCell` work 7,045,301 → 7,022,449._
   - **Root cause:**
     - `sourceFpPresentation` returns `unchanged` unless every guard's epoch is assumed. `assumedEpoch` is inductive and rejects cycles (`src/reconstruction/source-fp.ts:146-160`, `:149`), and a loop with a call makes the FPCR loop phi depend on itself.
     - `unobserved` (`:209-238`) is a reference count that never releases a cycle, and it marks only call outputs (`:234`).

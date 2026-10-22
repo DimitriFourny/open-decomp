@@ -5893,17 +5893,20 @@ export class Renderer {
   }
 
   /** Edge copies actually printed: the variable partition's `edgeCopies`, less
-   * copies forwarded into returned constants. */
+   * copies forwarded into returned constants and copies into FP-environment
+   * epochs that only omitted guards read (`fp_unobserved_epoch`). */
   private printedCopies(
     transfer: ParallelTransfer,
   ): readonly { readonly destination: Value; readonly source: Value }[] {
-    const all = this.program.transfers.get(transfer) ?? [];
-    const forwarded = this.forwardedCopies.get(transfer);
+    const forwarded = this.forwardedCopies.get(transfer),
+      unobserved = this.fpPresentation.unobserved;
     return edgeCopies(
       this.program,
       this.variables,
       this.inline,
-      forwarded ? all.filter((copy) => !forwarded.has(copy.destination.id)) : all,
+      (this.program.transfers.get(transfer) ?? []).filter(
+        (copy) => !forwarded?.has(copy.destination.id) && !unobserved.has(copy.destination.id),
+      ),
     );
   }
 
@@ -9228,11 +9231,19 @@ export class Renderer {
       );
       this.mapped(this.dataOrigin(node), start, [node]);
     }
+    // An unobserved FP-environment value is not declared, unless it represents
+    // a coalesced class that also holds an observed member.
+    const observedClasses = new Set<string>();
+    if (this.fpPresentation.unobserved.size)
+      for (const [id, representative] of this.variables) {
+        this.context.checkpoint(1);
+        if (!this.fpPresentation.unobserved.has(id)) observedClasses.add(representative.id);
+      }
     for (const value of this.program.values.values()) {
       this.context.checkpoint(1);
       if (
         !this.program.live.has(value.id) ||
-        this.fpPresentation.unobserved.has(value.id) ||
+        (this.fpPresentation.unobserved.has(value.id) && !observedClasses.has(value.id)) ||
         this.inline.has(value.id) ||
         this.inlinedCalls.has(value.id) ||
         formals.has(value.id) ||
