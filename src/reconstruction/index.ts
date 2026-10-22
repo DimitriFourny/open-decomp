@@ -63,12 +63,28 @@ function controlTransfers(control: Control): readonly ParallelTransfer[] {
  * view: pure expression folding, demand-driven live phi copies, exact physical
  * snapshots and conservative source projections. No CFG is structured twice.
  * The `source` view additionally applies proof-carrying presentation rewrites
- * (frame save elision, ABI-scratch exit slices); `checked` applies none. */
+ * (frame save elision, ABI-scratch exit slices); `checked` applies none.
+ * Source view (S9): a declared signature with stack, variadic or hidden-result
+ * parameters is planned first; when the stack plan does not confirm every
+ * declared part, the function is reconstructed again without them. */
 export function reconstruct(
   input: EmissionInput,
   context: OperationContext,
   view: PresentationView = 'checked',
 ): Reconstruction {
+  return (
+    (view === 'source' ? reconstructView(input, context, view, true) : null) ??
+    reconstructView(input, context, view, false)!
+  );
+}
+
+/** Null only when `extended` declared parts were planned but not confirmed. */
+function reconstructView(
+  input: EmissionInput,
+  context: OperationContext,
+  view: PresentationView,
+  extended: boolean,
+): Reconstruction | null {
   context.checkpoint(0);
   const blocks = new Map<string, BlockRegion>(),
     values = new Map<string, Value>();
@@ -183,7 +199,17 @@ export function reconstruct(
         )
       : new Set<string>();
   const sourcePlan = input.source
-    ? planSource(input, blocks, values, expressions, owner, context, view, localValidation)
+    ? planSource(
+        input,
+        blocks,
+        values,
+        expressions,
+        owner,
+        context,
+        view,
+        localValidation,
+        extended,
+      )
     : null;
   const sourceStack = sourcePlan
     ? planSourceStack(
@@ -205,6 +231,10 @@ export function reconstruct(
         sourcePlan.variadic,
       )
     : null;
+  // S9: a declared `...` needs the `va_start` footprint it names.
+  const declaredExtension = sourcePlan?.declaredExtension ?? null;
+  if (declaredExtension && (declaredExtension.variadic !== null) !== Boolean(sourceStack?.variadic))
+    return null;
   // Source view: indirect exits proven to be tail calls become target-value tails.
   if (sourcePlan && sourceStack?.indirectTails.size)
     for (const block of blocks.values()) {
@@ -1124,7 +1154,34 @@ export function reconstruct(
   const entryStorage = sourceStack?.entryStorage;
   const entryStorageLive =
     entryStorage !== null && entryStorage !== undefined && live.has(entryStorage.id);
-  if (entryStorageLive) signature = null;
+  // A declared `...` (S9) keeps its signature beside the `va` area that stands
+  // in for the entry SP; any other live entry-SP form still drops it.
+  const declaredArea =
+    declaredExtension !== null &&
+    sourceStack?.variadic?.kind === 'area' &&
+    sourceStack.variadic.area.id === entryStorage?.id;
+  const entrySpLive = entryStorageLive && !declaredArea;
+  if (entrySpLive) signature = null;
+  // S9: every declared part is confirmed once no incoming byte still needs
+  // the entry SP: each declared stack slot read is its formal (S1) or the
+  // declared aggregate's object (S4), the `va_start` footprint matched the
+  // declared named formals (S6/S7), and the hidden result bound its register.
+  if (
+    declaredExtension &&
+    (entrySpLive ||
+      !localValidation.presentation(
+        'declared_signature',
+        input.function.id,
+        'declared signature with stack, variadic or hidden-result parameters: every register parameter and the hidden-result pointer bind their ABI registers at entry and every result its ABI register at every exit; every read of a declared stack slot is that formal (incoming_formal) or the declared aggregate (incoming_object); a declared ... has exactly the va_start footprint of its named formals (va_start); no incoming byte is addressed through the entry SP',
+        [
+          input.function.id,
+          ...(declaredExtension.hidden ? [declaredExtension.hidden.id] : []),
+          ...[...declaredExtension.stack.values()].map((value) => value.id),
+          ...(declaredExtension.aggregate ? [declaredExtension.aggregate.value.id] : []),
+        ].slice(0, 64),
+      ))
+  )
+    return null;
   // A source return without a fully expressible function interface still retains
   // its proven result binding; physical outputs are never dropped by this choice.
   const parameters = sourcePlan
@@ -1240,7 +1297,7 @@ export function reconstruct(
     sourcePlan && sourceStack
       ? {
           ...sourcePlan.presentation,
-          inferred: sourcePlan.presentation.inferred || entryStorageLive,
+          inferred: sourcePlan.presentation.inferred || entrySpLive,
           locals: sourceStack.locals,
           stack: sourceStack.frame(retained, live),
           ...(view === 'source'

@@ -1665,9 +1665,11 @@ export class Parser {
     }
     if (token === 'memory' && this.peek() === '.') {
       this.take('.');
+      // `uN`: integer bits; `fN`: a native float (fp_memory_access); `ieeeN_t`:
+      // the IEEE carrier bits of an unproven FP access, as in the checked view.
       const view = this.take(),
-        match = /^(volatile_)?(be_)?([uf])(\d+)$/.exec(view);
-      assert.ok(match);
+        match = /^(volatile_)?(be_)?(u|f|ieee)(\d+)(?:_t)?$/.exec(view);
+      assert.ok(match && (match[3] === 'ieee') === view.endsWith('_t'), view);
       this.take('[');
       const address = this.expression();
       this.take(']');
@@ -1676,7 +1678,7 @@ export class Parser {
         name: 'read_memory',
         args: [
           address,
-          { kind: 'literal', value: `${match[3] === 'f' ? 'ieee' : 'bits'}${match[4]}_t` },
+          { kind: 'literal', value: `${match[3] === 'u' ? 'bits' : 'ieee'}${match[4]}_t` },
           { kind: 'literal', value: match[2] ? 'big' : 'little' },
           { kind: 'literal', value: 1n },
           { kind: 'literal', value: !!match[1] },
