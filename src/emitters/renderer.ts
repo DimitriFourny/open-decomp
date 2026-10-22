@@ -48,6 +48,7 @@ import { validateReconstruction, validateRenderedTransfers } from '../reconstruc
 import { foldSourceCondition } from '../reconstruction/source-conditions.js';
 import { constantRotationOperands } from '../reconstruction/source-shifts.js';
 import {
+  registerOutputs,
   stackEntry,
   variadicArea,
   type SourceVariadic,
@@ -703,7 +704,11 @@ export class Renderer {
         if (node.kind === 'call')
           for (const value of node.results) this.origins.set(value.id, node);
         if (node.kind === 'call' || node.kind === 'unknown_effect')
-          for (const binding of node.register_outputs) this.origins.set(binding.value.id, node);
+          for (const binding of [
+            ...node.register_outputs,
+            ...registerOutputs(this.program.source, node),
+          ])
+            this.origins.set(binding.value.id, node);
       }
       if (this.controls.has(block.control.id))
         this.invalid('Duplicate structured control identity');
@@ -1512,8 +1517,15 @@ export class Renderer {
       ...(this.recorder ? { presentation: this.recorder } : {}),
       nativeFp: this.fpPresentation.expressions.has(expression),
       floatLiterals: this.fpPresentation.expressions.has(expression),
+      ...(this.sourceView ? { definition: this.definition } : {}),
     });
   }
+
+  /** The pure IR definition of the value `printed` prints for `value`. */
+  private definition = (value: Value): Expression | undefined => {
+    value = this.substituted?.get(value.id) ?? value;
+    return this.synthetic.get(value.id) ?? this.program.expressions.get(value.id);
+  };
 
   /** Declared spelling of the variable a value prints as (its partition
    * representative's). */
@@ -5253,7 +5265,7 @@ export class Renderer {
         const projection = this.program.calls.get(node.id);
         const results = node.kind === 'call' ? (projection?.results ?? node.results) : [];
         const resultIds = new Set(results.map((value) => value.id));
-        const outputs = (projection?.outputs ?? node.register_outputs).filter(
+        const outputs = (projection?.outputs ?? registerOutputs(this.program.source, node)).filter(
           (binding) => this.program.live.has(binding.value.id) && !resultIds.has(binding.value.id),
         );
         const inputs =

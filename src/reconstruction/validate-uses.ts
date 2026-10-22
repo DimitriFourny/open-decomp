@@ -2,6 +2,7 @@ import { OperationError, type OperationContext } from '../core/index.js';
 import { expressionOperands, type Origin, type Value } from '../ir/index.js';
 import type { ParallelTransfer } from '../presentation/index.js';
 import type { Reconstruction } from './model.js';
+import { registerOutputs } from './source-model.js';
 
 /** SSA values may be used in any dominated block, and source rewrites (the
  * variable partition, tail duplication, shared locals) move or share emission sites.
@@ -30,7 +31,8 @@ export function validateEmittedUses(
           for (const result of program.calls.get(node.id)?.results ?? node.results)
             define(result, id, order);
         if ('register_outputs' in node)
-          for (const binding of node.register_outputs) define(binding.value, id, order);
+          for (const binding of registerOutputs(program.source, node))
+            define(binding.value, id, order);
       }
       for (const definition of program.source?.definitions?.get(node.id) ?? [])
         define(definition.result, id, order + 1);
