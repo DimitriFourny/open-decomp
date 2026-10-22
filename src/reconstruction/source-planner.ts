@@ -31,12 +31,11 @@ import {
   unchangedStorage,
   type StorageCopy,
 } from './source-register-types.js';
-import { sourceStackArgumentParts, type StackArgumentJoins } from './source-stack-arguments.js';
+import { createStackArgumentJoins, sourceStackArgumentParts } from './source-stack-arguments.js';
 import { planSourceRequirements } from './source-requirements.js';
 import { possibleAbiReturnStorage } from '../analysis/calls/return-storage.js';
 import { LocalValidationSession } from './local-validation.js';
 import { selectSourcePrimaryResult, type SourcePrimaryResult } from './source-results.js';
-import { identityOperand } from './expressions.js';
 import { createVariadicCallBinder } from './source-variadic.js';
 
 /** Source ABI abstraction: architectural snapshots are retained in the input,
@@ -278,55 +277,7 @@ export function planSource(
   const stores = new Map<string, Value>();
   for (const block of blocks.values())
     for (const node of block.statements) if (node.kind === 'store') stores.set(node.id, node.value);
-  const statementBlocks = new Map<string, string>(),
-    concats = new Map<string, readonly Value[]>(),
-    aliases = new Map<string, Value>(),
-    constants = new Map<string, bigint>(),
-    incomingEdges = new Map<
-      string,
-      { exit: string; copies: readonly { destination: Value; source: Value }[] }[]
-    >();
-  for (const block of blocks.values()) {
-    for (const node of block.statements) {
-      statementBlocks.set(node.id, block.id);
-      if (node.kind !== 'assign') continue;
-      if (node.expression.kind === 'constant') constants.set(node.result.id, node.expression.bits);
-      if (node.expression.kind === 'concat') concats.set(node.result.id, node.expression.values);
-      const alias = identityOperand(node.result.type, node.expression);
-      if (alias) aliases.set(node.result.id, alias);
-    }
-    const control = block.control;
-    const outgoing =
-      control.kind === 'jump'
-        ? [control.transfer]
-        : control.kind === 'if'
-          ? [control.when_true.transfer, control.when_false.transfer]
-          : control.kind === 'switch'
-            ? [...control.cases.map((item) => item.arm.transfer), control.otherwise.transfer]
-            : [];
-    for (const transfer of outgoing) {
-      const edges = incomingEdges.get(transfer.target) ?? [];
-      edges.push({ exit: control.id, copies: transfer.copies });
-      incomingEdges.set(transfer.target, edges);
-    }
-  }
-  const stackJoins: StackArgumentJoins = {
-    block(boundary) {
-      const block = blocks.get(statementBlocks.get(boundary) ?? '');
-      if (!block || block.id === input.function.entry) return undefined;
-      const index = block.statements.findIndex((node) => node.id === boundary);
-      return {
-        statements: block.statements.slice(0, index + 1).map((node) => ({
-          id: node.id,
-          pure: node.kind !== 'store' && node.kind !== 'call' && node.kind !== 'unknown_effect',
-        })),
-        incoming: incomingEdges.get(block.id) ?? [],
-      };
-    },
-    concat: (value) => concats.get(value.id),
-    alias: (value) => aliases.get(value.id),
-    constant: (value) => constants.get(value.id),
-  };
+  const stackJoins = createStackArgumentJoins(blocks, input.function.entry);
   const bindStack = (
     key: string,
     boundary: string,

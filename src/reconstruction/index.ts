@@ -296,6 +296,12 @@ function reconstructView(
             sourceStack.hidden.has(id) ||
             sourceStack.locals.has(id) ||
             sourceStack.saves.stores.has(id),
+          {
+            transfers: allTransfers,
+            copies: cellTransfers,
+            incoming: parameterSources,
+            make: sourcePlan.make,
+          },
           localValidation,
           context,
         )
