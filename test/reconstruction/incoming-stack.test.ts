@@ -518,8 +518,21 @@ for (const variant of ['o2', 'o0'] as const)
         language === 'c-like' ? /, struct (stack_args_\w+) stack_args\)/ : /stack_args: struct\{/,
         text,
       );
-      if (language === 'c-like')
-        assert.match(text, /^struct stack_args_\w+ \{ [^}]*arg_8[^}]*arg_18; \};$/m, text);
+      // The 16- or 8-byte copy over the u64 and the u32 keeps both scalar
+      // members, the u32's padding explicit; the copy is a cast at the first.
+      if (language === 'c-like') {
+        assert.match(
+          text,
+          /^struct stack_args_\w+ \{ uint64_t arg_8; uint32_t arg_10; uint8_t pad_14\[4\]; uint64_t arg_18; \};$/m,
+          text,
+        );
+        assert.doesNotMatch(text, /uint8_t arg_\w+\[/, text);
+      } else
+        assert.match(
+          text,
+          /struct\{arg_8: uint64_t, arg_10: uint32_t, pad_14: array<uint8_t, 4>, arg_18: uint64_t\}/,
+          text,
+        );
       assert.ok(output.local_validation?.some((record) => record.rule === 'incoming_object'));
       assert.ok(
         output.requirements?.some((requirement) =>

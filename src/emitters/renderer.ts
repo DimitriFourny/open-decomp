@@ -4128,6 +4128,13 @@ export class Renderer {
       packed ||= member.scalar && (member.offset - incoming.minimum_offset) % member.size !== 0n;
       end = member.offset + member.size;
     }
+    const tail = incoming.minimum_offset + incoming.size;
+    if (tail > end) {
+      const gap = `pad_${end.toString(16)}`;
+      members.push(
+        c ? `uint8_t ${gap}[${tail - end}]` : declare(gap, `array<uint8_t, ${tail - end}>`),
+      );
+    }
     return {
       tag: this.sourceIdentifier(incoming.id, `stack_args_${incoming.id.slice(7, 11)}`),
       members,

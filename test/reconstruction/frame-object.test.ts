@@ -21,15 +21,18 @@ import { emit, emittedFormals, execute, type Observation } from '../emitters/c/s
 const u64 = integer(64),
   u32 = integer(32);
 
-test('frame layout: exact access sets are scalars; overlap, interior and indexed addresses are byte arrays', () => {
+test('frame layout: exact access sets are scalars; partial overlap, interior and indexed addresses are byte arrays', () => {
   const accesses = [
     // One exact access set: a scalar.
     { offset: -80n, end: -72n, id: 'a' },
     { offset: -80n, end: -72n, id: 'b' },
-    // A wide store and the narrow halves read from it overlap: one byte array.
+    // A wide store and the narrow halves read from it: two scalar members.
     { offset: -64n, end: -56n, id: 'c' },
     { offset: -64n, end: -60n, id: 'd' },
     { offset: -60n, end: -56n, id: 'e' },
+    // Partially overlapping accesses: one byte array.
+    { offset: -56n, end: -52n, id: 'm' },
+    { offset: -54n, end: -50n, id: 'n' },
     // An indexed base absorbs the accesses that continue it without a gap.
     { offset: -48n, end: -44n, id: 'f' },
     { offset: -44n, end: -40n, id: 'g' },
@@ -48,7 +51,9 @@ test('frame layout: exact access sets are scalars; overlap, interior and indexed
   const expected = [
     { offset: -100n, size: 20n, scalar: false, access_ids: [] },
     { offset: -80n, size: 8n, scalar: true, access_ids: ['a', 'b'] },
-    { offset: -64n, size: 8n, scalar: false, access_ids: ['d', 'c', 'e'] },
+    { offset: -64n, size: 4n, scalar: true, access_ids: ['d'] },
+    { offset: -60n, size: 4n, scalar: true, access_ids: ['e'] },
+    { offset: -56n, size: 6n, scalar: false, access_ids: ['m', 'n'] },
     { offset: -48n, size: 16n, scalar: false, access_ids: ['f', 'g', 'h'] },
     { offset: -28n, size: 4n, scalar: true, access_ids: ['i'] },
     { offset: -20n, size: 3n, scalar: false, access_ids: ['j'] },
@@ -62,6 +67,84 @@ test('frame layout: exact access sets are scalars; overlap, interior and indexed
   // Members never overlap and stay below the entry SP.
   for (const [index, member] of expected.entries())
     assert.ok(member.offset + member.size <= (expected[index + 1]?.offset ?? 0n));
+});
+
+test('frame layout: a wide access over whole narrower clusters keeps them as scalar members', () => {
+  const layout = (
+    accesses: readonly { offset: bigint; end: bigint; id: string }[],
+    taken: readonly bigint[] = [],
+    indexed: readonly bigint[] = [],
+    direction: 'below' | 'above' = 'below',
+    origin = 0n,
+  ) => frameLayout(accesses, taken, new Set(indexed), 16, origin, direction);
+  const shapes = (result: ReturnType<typeof frameLayout>) =>
+    result.members.map((member) => [member.offset, member.size, member.scalar]);
+  const wide = (id: string, offset: bigint, end: bigint) => ({ offset, end, id });
+  // Two u32 halves under a u64.
+  assert.deepEqual(layout([wide('w', -32n, -24n), wide('a', -32n, -28n), wide('b', -28n, -24n)]), {
+    minimum_offset: -32n,
+    size: 32n,
+    members: [
+      { offset: -32n, size: 4n, scalar: true, access_ids: ['a'] },
+      { offset: -28n, size: 4n, scalar: true, access_ids: ['b'] },
+    ],
+  });
+  // A u32 and its padding under a u64 and under a u128; both wide accesses
+  // cast at the first member.
+  assert.deepEqual(
+    layout([wide('x', -32n, -16n), wide('w', -32n, -24n), wide('a', -32n, -28n)]).members,
+    [{ offset: -32n, size: 4n, scalar: true, access_ids: ['a'] }],
+  );
+  // Several members, a gap between them is padding.
+  assert.deepEqual(
+    shapes(layout([wide('w', -32n, -16n), wide('a', -32n, -28n), wide('b', -24n, -16n)])),
+    [
+      [-32n, 4n, true],
+      [-24n, 8n, true],
+    ],
+  );
+  // The wide access must start at a member and not cut one: byte arrays.
+  for (const group of [
+    [wide('w', -32n, -24n), wide('a', -28n, -24n)],
+    [wide('w', -32n, -26n), wide('a', -32n, -28n), wide('b', -28n, -24n)],
+    [wide('a', -32n, -28n), wide('b', -30n, -26n), wide('w', -32n, -24n)],
+    [wide('w', -32n, -24n), wide('a', -32n, -29n)],
+  ])
+    assert.deepEqual(shapes(layout(group)), [
+      [
+        -32n,
+        group.reduce((end, access) => (access.end > end ? access.end : end), -99n) + 32n,
+        false,
+      ],
+    ]);
+  const spanning = [wide('w', -32n, -24n), wide('a', -32n, -28n), wide('b', -28n, -24n)];
+  // An address taken at a member start keeps the split; inside a member, in
+  // padding or an indexed base inside the span make one byte array.
+  assert.deepEqual(shapes(layout(spanning, [-28n])), [
+    [-32n, 4n, true],
+    [-28n, 4n, true],
+  ]);
+  for (const [taken, indexed] of [
+    [[-30n], []],
+    [[], [-32n]],
+    [[], [-28n]],
+  ] as const)
+    assert.deepEqual(shapes(layout(spanning, taken, indexed)), [[-32n, 8n, false]]);
+  assert.deepEqual(shapes(layout([wide('w', -32n, -24n), wide('a', -32n, -28n)], [-26n])), [
+    [-32n, 8n, false],
+  ]);
+  // The incoming object (above): the wide access's padding is inside the object.
+  assert.deepEqual(
+    layout([wide('w', 8n, 24n), wide('a', 8n, 16n), wide('b', 16n, 20n)], [], [], 'above', 8n),
+    {
+      minimum_offset: 8n,
+      size: 16n,
+      members: [
+        { offset: 8n, size: 8n, scalar: true, access_ids: ['a'] },
+        { offset: 16n, size: 4n, scalar: true, access_ids: ['b'] },
+      ],
+    },
+  );
 });
 
 function firstArgument(abi: AbiProfile): RegisterDescriptor {
@@ -150,16 +233,20 @@ for (const abi of [darwinArm64Abi, sysvAMD64Abi, windowsX64Abi])
     for (const language of ['c-like', 'python-like'] as const) {
       const output = emit(fixture.ir, fixture.extra, language).emission;
       assert.doesNotMatch(output.text, /\bentry_sp\b/, output.text);
-      // The indexed run and the overlapped slot are byte arrays; the escaped
+      // The indexed run is a byte array; the wide slot keeps its two 32-bit
+      // halves as members and the wide access casts at the first; the escaped
       // slot is a scalar member passed by address; padding fills the gaps.
       if (language === 'c-like') {
         assert.match(output.text, /uint8_t local_30\[8\];/, output.text);
         assert.match(output.text, /uint8_t pad_28\[16\];/, output.text);
-        assert.match(output.text, /uint8_t local_18\[8\];/, output.text);
+        assert.match(output.text, /uint32_t local_18;\s+uint32_t local_14;/, output.text);
+        assert.match(output.text, /\*\(uint64_t \*\)&frame\.local_18 = /, output.text);
         assert.match(output.text, /uint64_t local_8;/, output.text);
         assert.match(output.text, /sub_2000\(&frame\.local_8\)/, output.text);
       } else {
         assert.match(output.text, /frame\.local_30: array<uint8_t, 8>/, output.text);
+        assert.match(output.text, /frame\.local_18: uint32_t/, output.text);
+        assert.match(output.text, /frame\.local_14: uint32_t/, output.text);
         assert.match(output.text, /frame\.local_8: uint64_t/, output.text);
         assert.match(output.text, /sub_2000\(address_of\(frame\.local_8\)\)/, output.text);
       }
@@ -334,6 +421,55 @@ for (const abi of [darwinArm64Abi, sysvAMD64Abi, windowsX64Abi]) {
       abi,
       [0n, 5n, mask64, 1n << 63n].map((argument) => [argument, 0n, (argument + 7n) & mask64]),
       ['store', 'store', 'call', 'load', 'load'],
+      'stack_args',
+    );
+  });
+
+  test(`${abi.id}: wide frame accesses over two u32 members and over a u32 plus padding keep the scalar members`, () => {
+    const f = entryFrame(abi, 'spanning');
+    const pair = f.at(-16n),
+      padded = f.at(-32n),
+      incoming = f.at(f.incoming);
+    const word = f.block.extract(f.argument, 0, 32);
+    f.block.store(incoming, f.argument);
+    // Two u32 members, read back as one u64.
+    f.block.store(pair, word);
+    f.block.store(f.at(-12n), f.block.constant(u32, 7n));
+    // A u32 member over a u64 whose high half stays padding.
+    f.block.store(padded, f.block.constant(u64, 0x1122334455667788n));
+    f.block.store(padded, f.block.int('add', word, f.block.constant(u32, 1n)));
+    f.call(pair);
+    f.call(padded);
+    const sum = f.block.int(
+      'add',
+      f.block.int('add', f.block.load(u64, pair), f.block.load(u64, padded)),
+      f.block.load(u64, incoming),
+    );
+    f.block.return([sum]);
+    const fixture = f.finish();
+    const text = emit(fixture.ir, fixture.extra, 'c-like').emission.text;
+    assert.match(text, /uint32_t local_20;/, text);
+    assert.match(text, /uint32_t local_10;\s+uint32_t local_c;/, text);
+    assert.match(text, /\*\(uint64_t \*\)&frame\.local_10\b/, text);
+    assert.match(text, /\*\(uint64_t \*\)&frame\.local_20\b/, text);
+    assert.doesNotMatch(text, /uint8_t local_/, text);
+    const python = emit(fixture.ir, fixture.extra, 'python-like').emission.text;
+    assert.match(python, /frame\.local_10: uint32_t/, python);
+    assert.match(python, /frame\.local_c: uint32_t/, python);
+    assert.match(python, /frame\.local_20: uint32_t/, python);
+    assertBeside(
+      fixture,
+      abi,
+      [0n, 5n, 0xffffffffn, mask64, 1n << 63n].map((argument) => {
+        const low = argument & 0xffffffffn;
+        return [
+          argument,
+          0n,
+          (((7n << 32n) | low) + (0x1122334400000000n | ((low + 1n) & 0xffffffffn)) + argument) &
+            mask64,
+        ];
+      }),
+      ['store', 'store', 'store', 'store', 'store', 'call', 'call', 'load', 'load', 'load'],
       'stack_args',
     );
   });
