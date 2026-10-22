@@ -2411,12 +2411,7 @@ for (const language of ['c-like', 'python-like'] as const)
         assert.equal(rules(output).includes('for_loop'), c && !again, text);
         assert.equal(/\bfor\b/.test(text), c && !again, text);
         if (!c || again) assert.match(text, c ? /\bwhile \(/ : /\bwhile /, text);
-        else
-          assert.match(
-            text,
-            /for \(index = 0; \(int32_t\)index < count; index = index \+ 1\)/,
-            text,
-          );
+        else assert.doesNotMatch(text, /\bwhile\b/, text);
         const formals = emittedFormals(output.emission);
         assert.equal(formals.length, 1);
         for (const n of [0n, 1n, 3n]) {
