@@ -60,7 +60,13 @@ export interface ImageTypeFunction {
 export interface ImageTypeClass {
   /** Stable identity of the merged member set. */
   readonly id: string;
+  /** Metadata: the class's first anchor (`<function>_arg0`, ...). It names
+   * another function than the one a reader looks at, so it is never printed
+   * as an identifier: see `label`. */
   readonly name: string;
+  /** The printed identifier, `struct_<hex>`: a digest of `name` that is unique
+   * among the solution's classes (see `imageTypeLabels`). */
+  readonly label: string;
   readonly members: readonly string[];
   readonly functions: readonly string[];
   /** Union of compatible observed members, sorted by offset. */
@@ -450,7 +456,7 @@ export function solveImageTypes(
     item.name = `${functionName(object.function_id)}_obj${ordinals.get(object.key)}`;
     item.local = item.members.length === 1;
   }
-  const result: ImageTypeClass[] = [];
+  const result: Omit<ImageTypeClass, 'label'>[] = [];
   const class_of = new Map<string, string>();
   for (const item of classes) {
     const root = roots.get(item.root)!;
@@ -496,5 +502,28 @@ export function solveImageTypes(
     used.set(item.name, count);
     if (count > 1) result[index] = { ...item, name: `${item.name}_${count}` };
   }
-  return { classes: result, class_of };
+  // The printed identifier digests the final name, so exactly the classes that
+  // used to share a name share a label.
+  const labels = imageTypeLabels(result.map((item) => item.name));
+  return {
+    classes: result.map((item) => ({ ...item, label: labels.get(item.name)! })),
+    class_of,
+  };
+}
+
+/** `struct_<6 hex>` identifiers for distinct class names, a pure digest of the
+ * name so one class prints one identifier in every function and the name
+ * (another function's anchor) never appears. Names whose digests collide (in
+ * name order) extend by two hex digits until unique. */
+export function imageTypeLabels(names: readonly string[]): ReadonlyMap<string, string> {
+  const labels = new Map<string, string>();
+  const taken = new Set<string>();
+  for (const name of [...new Set(names)].sort()) {
+    const digest = fingerprint(name);
+    let length = 6;
+    while (length < digest.length && taken.has(digest.slice(0, length))) length += 2;
+    taken.add(digest.slice(0, length));
+    labels.set(name, `struct_${digest.slice(0, length)}`);
+  }
+  return labels;
 }
