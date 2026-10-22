@@ -4,6 +4,7 @@ import type {
   Address,
   Diagnostic,
   Evidence,
+  OperationContext,
   RegisterDescriptor,
 } from '../core/index.js';
 import type { DataType, Instruction, Value } from '../ir/index.js';
@@ -197,12 +198,25 @@ export interface SourceEvidence {
   /** Positive caller consumption gathered from available native units. This is
    * not an exhaustive caller scan; absence is never proof of non-consumption. */
   readonly function_return_demands?: readonly RegisterDescriptor[];
+  /** Source view: positive caller result-use evidence from a bounded scan of the
+   * image's direct call sites, computed only when the planner asks (a void-like
+   * `incidental_result` interface, or a tail whose callee has no result types).
+   * Charged to `context`; undefined when the scan abstains or finds no caller
+   * that reads a result register. Never evidence of non-consumption. */
+  readonly caller_result_demands?: (context: OperationContext) => CallerResultDemand | undefined;
   /** Actual proven written result storage, not an inferred author aggregate. */
   readonly function_returns?: {
     readonly registers: readonly RegisterDescriptor[];
     readonly types: readonly DataType[];
   };
   readonly objc?: ObjCSourceFacts;
+}
+/** Result registers that a caller reads after a direct call returns, before
+ * writing them: positive evidence that the function has a result. */
+export interface CallerResultDemand {
+  readonly registers: readonly RegisterDescriptor[];
+  /** The call instructions whose callers read `registers`. */
+  readonly sites: readonly Address[];
 }
 /** Objective-C message form of a call whose selector is statically resolved.
  * `send`: projected arguments are (receiver, selector, keyword arguments...);
@@ -390,6 +404,9 @@ export interface SourcePresentation {
   /** Source view only: the primary-result rule rejected the native written-result
    * storage, which then no longer counts as result evidence for exit overlays. */
   readonly observed_result_rejected?: true;
+  /** Source view only: caller result-use demand the planner fetched
+   * (`caller_result_demands`); counts like `function_return_demands`. */
+  readonly caller_result_demands?: readonly RegisterDescriptor[];
   /** Source view only: the rule that made the interface void-like.
    * `incidental_result`: the integer result register is established on no exit
    * path and the FP carrier is unchanged or undefined on every exit;

@@ -794,3 +794,69 @@ test('random acyclic graphs with shared joins keep every labeled transfer forwar
   // The sample does exercise labels (joins entered from unrelated arms).
   assert.ok(labels > 0);
 });
+
+test('past the selection allowance, ranking exits before its edge scan and the layout is unchanged', () => {
+  let seed = 0x5bd1e995;
+  const next = (bound: number): number => {
+    seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+    return (seed >>> 8) % bound;
+  };
+  const bytes = (values: readonly number[]): Uint8Array => {
+    const result = new Uint8Array(0x100);
+    values.forEach((value, index) => (result[index * 4] = value));
+    return result;
+  };
+  let stuck = 0;
+  for (let index = 0; index < 100; index++) {
+    // Joins entered from unrelated arms leave scopes stuck: without a search,
+    // every stuck scope asks for a ranking past the (negative) allowance.
+    const b = ssa(`ranking-${index}`),
+      count = 6 + next(12),
+      list = Array.from({ length: count }, (_, id) => b.block(`n${id}`));
+    list.forEach((block, id) => {
+      block.store(
+        block.constant(i64, 0x1080n + 4n * BigInt(id % 16)),
+        block.constant(i32, BigInt(id)),
+      );
+      if (id === count - 1) return block.return([]);
+      const later = (): BlockBuilder => list[id + 1 + next(Math.min(5, count - id - 1))]!;
+      const yes = later();
+      let no = later();
+      if (no === yes) no = list[id + 1]! === yes ? list[count - 1]! : list[id + 1]!;
+      if (no === yes) return block.jump(yes);
+      block.branch(
+        block.compare(
+          'ne',
+          block.load(i32, block.constant(i64, 0x1000n + 4n * BigInt(id % 4))),
+          block.constant(i32, 0n),
+        ),
+        block.edge(yes),
+        block.edge(no),
+      );
+    });
+    const input = b.finish(list[0]!, []);
+    const structure = (max_work?: number) =>
+      structureControlFlow(input, createOperationContext(), {
+        search: false,
+        ...(max_work === undefined ? {} : { max_work }),
+      });
+    const free = structure();
+    assert.equal(free.state, 'complete');
+    assert.ok(free.value);
+    if (transfers(free.value).some((transfer) => transfer.mode === 'goto')) stuck++;
+    // The layout costs exactly its own work, with or without a limit.
+    assert.deepEqual(structure(free.work).value, free.value);
+    assert.equal(structure(free.work - 1).value, null);
+    const output = lower(free.value);
+    for (const cells of [
+      [0, 0, 0, 0],
+      [1, 0, 1, 0],
+      [1, 1, 1, 1],
+      [0, 1, 1, 0],
+    ]) {
+      const options = { memory: [{ base: 0x1000n, bytes: bytes(cells), writable: true }] };
+      assert.deepEqual(evaluateIR(output, options), evaluateIR(input, options));
+    }
+  }
+  assert.ok(stuck > 0);
+});
