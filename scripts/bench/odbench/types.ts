@@ -128,6 +128,13 @@ export interface FunctionWork {
   readonly limit: number;
 }
 
+/** One distinct diagnostic of one decompile: severity, code and the first sentence of the message. */
+export interface FunctionDiagnostic {
+  readonly code: string;
+  readonly severity: string;
+  readonly text: string;
+}
+
 export interface FunctionResult {
   readonly state: FunctionState;
   /** Tool reason/diagnostic for partial/failed/not_found (e.g. `unsupported_subset`, `budget`). */
@@ -150,6 +157,10 @@ export interface FunctionResult {
   readonly work?: FunctionWork | null;
   /** Open Decomp with repeat > 1: every repeat printed byte-identical text. */
   readonly deterministic?: boolean;
+  /** Open Decomp: the result's distinct diagnostics (not part of text identity); null when no result
+   * carried them (worker died before this function). Absent on lanes recorded before this field and
+   * on other tools. */
+  readonly diagnostics?: readonly FunctionDiagnostic[] | null;
 }
 
 export interface LaneRun {

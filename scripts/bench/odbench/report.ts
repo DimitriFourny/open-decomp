@@ -6,6 +6,8 @@
  */
 import { tierFunctions } from './corpus.js';
 import { ARTIFACT_PATTERNS, SCALAR_METRICS, computeMetrics } from './metrics.js';
+import { signatureTable } from './signature.js';
+import type { SignatureInput, SignatureTable } from './signature.js';
 import type { StaticMetrics } from './metrics.js';
 import {
   DEFAULT_SEED,
@@ -185,6 +187,25 @@ export interface MetricTotals {
   readonly artifacts: Readonly<Record<string, number>>;
 }
 
+/** Functions (of the paired set) whose result carried one distinct diagnostic. */
+export interface DiagnosticRow {
+  readonly severity: string;
+  readonly code: string;
+  readonly text: string;
+  readonly functions: number;
+}
+
+/** Diagnostics an Open Decomp lane recorded per function (lanes recorded before M1 have none). */
+export interface LaneDiagnostics {
+  readonly lane: string;
+  /** Paired functions with a recorded diagnostics list. */
+  readonly recorded: number;
+  /** Of those, functions with at least one diagnostic. */
+  readonly with_diagnostics: number;
+  /** Most frequent first. */
+  readonly rows: readonly DiagnosticRow[];
+}
+
 export interface QaQuestionRow {
   readonly question: string;
   readonly fn: string;
@@ -299,6 +320,10 @@ export interface Report {
   readonly readability: readonly ReadabilityPair[];
   readonly anchor: { readonly score: number | null; readonly warning: string | null } | null;
   readonly breakdowns: readonly Breakdown[];
+  /** Lane the signatures are compared against (the `source` lane), or null when it is not compared. */
+  readonly signature_source: string | null;
+  readonly signatures: readonly SignatureTable[];
+  readonly diagnostics: readonly LaneDiagnostics[];
   readonly metrics: readonly MetricTotals[];
   readonly qa: {
     readonly common_questions: number;
@@ -521,6 +546,56 @@ function totalsOf(lane: string, all: readonly StaticMetrics[]): MetricTotals {
     mean_nesting: meanOrNull(all.map((metrics) => metrics.max_nesting)),
     artifacts,
   };
+}
+
+/** Per lane except the source lane: return kind and parameter count against the source definition. */
+async function signatureTables(
+  ctx: Context,
+  sourceLane: string,
+): Promise<readonly SignatureTable[]> {
+  const source = ctx.runs.get(sourceLane);
+  const tables: SignatureTable[] = [];
+  for (const lane of ctx.lanes) {
+    const run = ctx.runs.get(lane);
+    if (lane === sourceLane || !run || !source) continue;
+    const inputs: SignatureInput[] = [];
+    for (const fn of ctx.paired) {
+      const laneText = await readText(run, fn.id);
+      const sourceText = await readText(source, fn.id);
+      if (laneText !== null && sourceText !== null)
+        inputs.push({ name: fn.name, lane: laneText, source: sourceText });
+    }
+    tables.push(signatureTable(lane, inputs));
+  }
+  return tables;
+}
+
+/** The recorded diagnostics of every lane that has them, counted in functions per distinct record. */
+function diagnosticCensus(ctx: Context): LaneDiagnostics[] {
+  const census: LaneDiagnostics[] = [];
+  for (const lane of ctx.lanes) {
+    const run = ctx.runs.get(lane);
+    const counts = new Map<string, DiagnosticRow>();
+    let recorded = 0;
+    let withDiagnostics = 0;
+    for (const fn of ctx.paired) {
+      const list = run?.functions[fn.id]?.diagnostics;
+      if (!list) continue;
+      recorded++;
+      if (list.length > 0) withDiagnostics++;
+      for (const { severity, code, text } of list) {
+        const key = JSON.stringify([severity, code, text]);
+        counts.set(key, { severity, code, text, functions: (counts.get(key)?.functions ?? 0) + 1 });
+      }
+    }
+    if (recorded === 0) continue;
+    const rows = [...counts.values()].sort(
+      (a, b) =>
+        b.functions - a.functions || a.code.localeCompare(b.code) || a.text.localeCompare(b.text),
+    );
+    census.push({ lane, recorded, with_diagnostics: withDiagnostics, rows });
+  }
+  return census;
 }
 
 // ---- build -------------------------------------------------------------------------------------
@@ -855,6 +930,11 @@ export async function buildReport(opts: {
     ),
   );
 
+  // Section 5: signatures against the source and recorded diagnostics.
+  const signatureSource = lanes.find((lane) => runs.get(lane)?.kind === 'source') ?? null;
+  const signatures = signatureSource === null ? [] : await signatureTables(ctx, signatureSource);
+  const diagnostics = diagnosticCensus(ctx);
+
   // Section 6: QA.
   const qaRows: QaQuestionRow[] = qaIndex.common.map((question) => {
     const byLane = qaIndex.byQuestion.get(question);
@@ -1075,6 +1155,9 @@ export async function buildReport(opts: {
     anchor,
     breakdowns,
     metrics: metricTotals,
+    signature_source: signatureSource,
+    signatures,
+    diagnostics,
     qa: {
       common_questions: qaIndex.common.length,
       lanes: qaIndex.lanesWithQa,
@@ -1096,6 +1179,8 @@ export async function buildReport(opts: {
 // ---- rendering ---------------------------------------------------------------------------------
 
 const DASH = '—';
+/** Distinct diagnostics listed per lane in section 5 (report.json keeps all). */
+const DIAGNOSTIC_ROWS = 20;
 
 function fmtInt(value: number | null): string {
   return value === null ? DASH : Math.round(value).toLocaleString('en-US');
@@ -1411,6 +1496,64 @@ export function renderMarkdown(report: Report): string {
           [1],
         ),
   );
+
+  push('### Signature vs source');
+  if (report.signature_source === null || report.signatures.length === 0) {
+    push('No source lane among the compared lanes: add `source` to `--lanes`.');
+  } else {
+    push(
+      `Return kind and parameter count of each lane's definition against the source definition, over the paired functions (\`(void)\` and \`()\` have no parameters, \`...\` is not counted).`,
+    );
+    const sum = (counts: Readonly<Record<string, number>>): number =>
+      Object.values(counts).reduce((total, count) => total + count, 0);
+    const rowsFor = (source: 'void' | 'value'): string[][] => [
+      [
+        `${source}-source functions`,
+        ...report.signatures.map((t) => fmtInt(sum(t.returns[source]))),
+      ],
+      ...(['void', 'value', 'unknown_result'] as const).map((kind) => [
+        `${source}-source, lane prints ${kind === 'value' ? 'a value' : kind}`,
+        ...report.signatures.map((t) => fmtInt(t.returns[source][kind])),
+      ]),
+    ];
+    push(
+      table(
+        ['row', ...report.signatures.map((t) => t.lane)],
+        [
+          ...rowsFor('void'),
+          ...rowsFor('value'),
+          ...(['equal', 'fewer', 'more'] as const).map((kind) => [
+            `parameters ${kind}`,
+            ...report.signatures.map((t) => fmtInt(t.parameters[kind])),
+          ]),
+          [
+            'definition not read (lane / source)',
+            ...report.signatures.map((t) => `${t.unread_lane} / ${t.unread_source}`),
+          ],
+        ],
+      ),
+    );
+  }
+
+  push('### Diagnostics per function');
+  if (report.diagnostics.length === 0) {
+    push('No compared lane recorded diagnostics (Open Decomp lanes run since M1 do).');
+  }
+  for (const lane of report.diagnostics) {
+    push(
+      `${lane.lane}: ${lane.with_diagnostics} of ${lane.recorded} paired functions carry a diagnostic; the ${Math.min(DIAGNOSTIC_ROWS, lane.rows.length)} most frequent of ${lane.rows.length} distinct (functions per row).`,
+    );
+    if (lane.rows.length > 0)
+      push(
+        table(
+          ['severity', 'code', 'diagnostic', 'functions'],
+          lane.rows
+            .slice(0, DIAGNOSTIC_ROWS)
+            .map((row) => [row.severity, row.code, row.text, fmtInt(row.functions)]),
+          [1, 2],
+        ),
+      );
+  }
 
   // 6. QA
   push('## 6. QA');

@@ -648,7 +648,7 @@ export function applyImageTypes(
         rule: 'compatible observed layouts joined through exact pointer flows',
       },
       claim:
-        `Layout ${item.name} joins ${item.members.length} observed view(s) in ` +
+        `Layout ${item.label} (first seen: ${item.name}) joins ${item.members.length} observed view(s) in ` +
         `${item.functions.map((fn) => names.get(fn)?.name ?? fn).join(', ')} through argument, result ` +
         `and stack-address flows${item.state === 'bounded' ? ' (exploration bounded)' : ''}; ` +
         'members are observed accesses only, not an object size or complete layout',
@@ -952,10 +952,11 @@ export function applyImageTypes(
     if (item.local) continue;
     bindings.push({
       type_id,
-      name: item.name,
+      name: item.label,
+      first_seen: item.name,
       state: item.state,
       functions: item.functions.length,
-      conflicts: item.conflicts.map((id) => classes.get(id)?.name ?? id),
+      conflicts: item.conflicts.map((id) => classes.get(id)?.label ?? id),
     });
   }
   return {
