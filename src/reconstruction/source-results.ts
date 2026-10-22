@@ -11,6 +11,7 @@ import {
 } from '../ir/index.js';
 import type { BlockRegion } from '../presentation/index.js';
 import { registerTypes, type RegisterTypeSlice } from './source-register-types.js';
+import { createSlotTyper } from './source-slot-types.js';
 
 type RegisterLocation = Extract<AbiLocation, { kind: 'register' }>;
 
@@ -181,82 +182,14 @@ export function selectSourcePrimaryResult(
       self,
     };
   };
-  // Values of every direct store to the exact loaded stack slot; partially
-  // overlapping or dynamic stack writes leave the slot contents unknown.
-  const slotStores = (load: Value): Value[] | undefined => {
-    const address = loads.get(load.id);
-    const fact = address && stack?.state === 'complete' ? stack.values.get(address.id) : undefined;
-    if (fact?.value.kind !== 'stack' || bitWidth(load.type) % 8) return undefined;
-    const offset = fact.value.offset,
-      size = BigInt(bitWidth(load.type) / 8);
-    const stored: Value[] = [];
-    for (const access of stack!.accesses) {
-      context.checkpoint(1);
-      if (access.kind !== 'write') continue;
-      if (access.offset === null) return undefined;
-      if (access.offset >= offset + size || access.offset + access.size <= offset) continue;
-      const value = storeValues.get(access.node_id);
-      if (access.offset !== offset || access.size !== size || !value) return undefined;
-      stored.push(value);
-    }
-    return stored;
-  };
-  // Every stored value is typed FP of the slot width or literal bits; a stored
-  // reload of an exact slot (an unoptimized copy between frame slots, possibly
-  // through same-width bitcasts) carries that slot's type. A slot already being
-  // resolved adds no other value: its contents are those of the stores
-  // resolved around the cycle. `null` means no constraint (only literals or
-  // cycle back-references); unknown slot contents are `undefined`.
-  const reloaded = (value: Value): Value | undefined => {
-    let current = value;
-    for (let depth = 0; depth < 16; depth++) {
-      if (loads.has(current.id)) return current;
-      const expression = expressions.get(current.id);
-      if (
-        expression?.kind !== 'cast' ||
-        expression.op !== 'bitcast' ||
-        bitWidth(expression.value.type) !== bitWidth(current.type)
-      )
-        return undefined;
-      current = expression.value;
-    }
-    return undefined;
-  };
-  const slotType = (
-    load: Value,
-    active = new Set<string>(),
-    visits = { count: 0 },
-  ): DataType | null | undefined => {
-    if (active.has(load.id)) return null;
-    const stores = ++visits.count <= 64 ? slotStores(load) : undefined;
-    if (!stores) return undefined;
-    active.add(load.id);
-    let type: DataType | null | undefined = null;
-    for (const stored of stores) {
-      if (expressions.get(stored.id)?.kind === 'constant') continue;
-      const reload = reloaded(stored);
-      const slice =
-        typed
-          .get(stored.id)
-          ?.find(
-            (candidate) =>
-              candidate.offset === 0 &&
-              scalarFloat(candidate.type) &&
-              bitWidth(candidate.type) === bitWidth(load.type),
-          )?.type ??
-        (reload && bitWidth(reload.type) === bitWidth(load.type)
-          ? slotType(reload, active, visits)
-          : undefined);
-      if (slice === null) continue;
-      if (!slice || (type && !sameType(type, slice))) {
-        type = undefined;
-        break;
-      }
-      type = slice;
-    }
-    active.delete(load.id);
-    return type;
-  };
+  const slotType = createSlotTyper({
+    loads,
+    stores: storeValues,
+    expressions,
+    typed,
+    stack,
+    context,
+  });
   // Path-sensitive write order. A definition site is an SSA statement in its
   // structured block; block parameters merge at their block, entry values and
   // projected parameters precede everything.

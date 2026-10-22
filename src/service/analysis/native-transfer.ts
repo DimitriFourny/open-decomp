@@ -20,6 +20,7 @@ import {
   unchangedStorage,
   type RegisterTypeSlice,
 } from '../../reconstruction/source-register-types.js';
+import { createSlotTyper, type SlotTyper } from '../../reconstruction/source-slot-types.js';
 import { createNativeInterfaceIndex, type NativeInterfaceIndex } from './native-entry.js';
 import { parameterRegisters } from './native-abi.js';
 import type { NativeInterface } from './native-worklist.js';
@@ -237,6 +238,8 @@ export function nativeReturnInterface(
     copies,
     outputs,
     loaded_values: loads,
+    load_addresses,
+    store_values,
     exits,
     tails,
     primary: primaryLocations,
@@ -371,6 +374,90 @@ export function nativeReturnInterface(
     }
     return authored;
   };
+  let slotTyper: SlotTyper | undefined;
+  // The IEEE type of the low `bits` of `start` when every leaf is a load of an
+  // exact private local slot (through lossless transport, phis and lane
+  // projections) and the stores to that slot are typed alike. A frame whose
+  // address escapes may be written by callees unseen by the stack recovery.
+  const reloadedSlotType = (start: Value, bits: number): DataType | undefined => {
+    const stack = analysis?.stack;
+    if (!stack || stack.state !== 'complete' || stack.frame.escaped) return undefined;
+    slotTyper ??= createSlotTyper({
+      loads: load_addresses,
+      stores: store_values,
+      expressions,
+      typed,
+      stack,
+      context,
+    });
+    const pending = [{ value: start, offset: 0, width: bits }],
+      seen = new Set<string>();
+    let result: DataType | undefined;
+    while (pending.length) {
+      context.checkpoint(1);
+      const item = pending.pop()!,
+        key = `${item.value.id}:${item.offset}:${item.width}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const address = load_addresses.get(item.value.id);
+      if (address) {
+        const slot = stack.values.get(address.id)?.value;
+        if (
+          item.offset !== 0 ||
+          bitWidth(item.value.type) !== item.width ||
+          slot?.kind !== 'stack' ||
+          slot.offset >= 0n
+        )
+          return undefined;
+        const slotType = slotTyper(item.value);
+        if (!slotType || (result && !sameType(result, slotType))) return undefined;
+        result = slotType;
+        continue;
+      }
+      const expression = expressions.get(item.value.id);
+      if (!expression) {
+        const incoming = sources.get(item.value.id);
+        if (!incoming?.length) return undefined;
+        for (const source of incoming) pending.push({ ...item, value: source });
+      } else if (expression.kind === 'extract')
+        pending.push({
+          value: expression.value,
+          offset: item.offset + expression.offset,
+          width: item.width,
+        });
+      else if (
+        expression.kind === 'cast' &&
+        (expression.op === 'bitcast' ||
+          expression.op === 'zero_extend' ||
+          expression.op === 'truncate') &&
+        item.offset + item.width <= bitWidth(expression.value.type)
+      )
+        pending.push({ ...item, value: expression.value });
+      else if (expression.kind === 'insert') {
+        const low = expression.offset,
+          high = low + bitWidth(expression.value.type);
+        if (item.offset >= low && item.offset + item.width <= high)
+          pending.push({ value: expression.value, offset: item.offset - low, width: item.width });
+        else if (item.offset + item.width <= low || item.offset >= high)
+          pending.push({ ...item, value: expression.base });
+        else return undefined;
+      } else if (expression.kind === 'concat') {
+        let cursor = 0,
+          part: Value | undefined;
+        for (const candidate of expression.values) {
+          const end = cursor + bitWidth(candidate.type);
+          if (item.offset >= cursor && item.offset + item.width <= end) {
+            part = candidate;
+            break;
+          }
+          cursor = end;
+        }
+        if (!part) return undefined;
+        pending.push({ value: part, offset: item.offset - cursor, width: item.width });
+      } else return undefined;
+    }
+    return result;
+  };
   const returns: RegisterDescriptor[] = [],
     types: DataType[] = [];
   for (const location of primary) {
@@ -453,6 +540,16 @@ export function nativeReturnInterface(
             break;
           }
         }
+      }
+      // An unoptimized result is a reload of a frame slot; its type is the
+      // type of the values stored there.
+      if (floating && !type && cells[0]?.register.offset_bits === 0) {
+        for (const bits of [64, 32]) {
+          type = reloadedSlotType(cells[0].value, bits);
+          if (type) break;
+        }
+        // The write must cover the typed width.
+        if (type && width < bitWidth(type)) type = undefined;
       }
       if (floating && !type && (!untypedFloatWrites || !width)) continue;
       if (type) width = Math.min(width, bitWidth(type));

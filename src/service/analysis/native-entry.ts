@@ -34,6 +34,10 @@ interface NativeInterfaceStructure {
   >;
   readonly loads: ReadonlyMap<string, Extract<Instruction, { kind: 'load' }>>;
   readonly loaded_values: ReadonlySet<string>;
+  /** Address of every load, by loaded value. */
+  readonly load_addresses: ReadonlyMap<string, Value>;
+  /** Stored value of every store, by store node. */
+  readonly store_values: ReadonlyMap<string, Value>;
   readonly calls: readonly Extract<Instruction, { kind: 'call' }>[];
   readonly exits: readonly SSAForm['blocks'][number][];
   readonly tails: readonly SSAForm['blocks'][number][];
@@ -98,7 +102,9 @@ function prepareNativeInterfaceIndex(
   const blocks = new Map(ir.blocks.map((block) => [block.id, block]));
   const outputs = new Map<string, { readonly call: string; readonly binding: RegisterBinding }>();
   const loads = new Map<string, Extract<Instruction, { kind: 'load' }>>(),
-    loadedValues = new Set<string>();
+    loadedValues = new Set<string>(),
+    loadAddresses = new Map<string, Value>(),
+    storeValues = new Map<string, Value>();
   const calls: Extract<Instruction, { kind: 'call' }>[] = [],
     stores: Extract<Instruction, { kind: 'store' }>[] = [];
   const exits: SSAForm['blocks'][number][] = [],
@@ -122,9 +128,12 @@ function prepareNativeInterfaceIndex(
       } else if (node.kind === 'load') {
         loads.set(node.id, node);
         loadedValues.add(node.result.id);
+        loadAddresses.set(node.result.id, node.address);
         root(node.address);
-      } else if (node.kind === 'store') stores.push(node);
-      else if (node.kind === 'call') {
+      } else if (node.kind === 'store') {
+        stores.push(node);
+        storeValues.set(node.id, node.value);
+      } else if (node.kind === 'call') {
         calls.push(node);
         for (const value of node.arguments) root(value);
         if (node.target.kind === 'indirect') root(node.target.value);
@@ -207,6 +216,8 @@ function prepareNativeInterfaceIndex(
     outputs,
     loads,
     loaded_values: loadedValues,
+    load_addresses: loadAddresses,
+    store_values: storeValues,
     calls,
     exits,
     tails,
