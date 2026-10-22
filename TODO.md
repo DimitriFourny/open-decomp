@@ -138,7 +138,7 @@ The renderer prints `physical_return` at `src/emitters/renderer.ts:8130-8199` wh
 
 ### R4: The native return interface types `-O0` slot reloads like the source planner
 
-- [ ] **Problem.** `matrix_variadic_call` `-O0` (ELF `0x401ec0`, PE `0x140001410`, Mach-O `0x1000007a4`) prints `physical_return` with `unknown_value(…, "call clobbers zmm0_low64")`. The callee `matrix_variadic` is `double` in its own source view, but its summary says `rax`/`x0`.
+- [x] **Problem.** `matrix_variadic_call` `-O0` (ELF `0x401ec0`, PE `0x140001410`, Mach-O `0x1000007a4`) prints `physical_return` with `unknown_value(…, "call clobbers zmm0_low64")`. The callee `matrix_variadic` is `double` in its own source view, but its summary says `rax`/`x0`.
   - **Root cause:**
     - `nativeReturnInterface` (`native-transfer.ts:242-250, 428-453`) types registers only from expressions and contracts.
     - At `-O0` the result is a reload of a frame slot (`movsd -0x28(%rbp),%xmm0` / `ldr d0,[sp,#8]`), so the FP root is skipped.
@@ -155,6 +155,7 @@ The renderer prints `physical_return` at `src/emitters/renderer.ts:8130-8199` wh
     - The PE signature must stay `(uint32_t, double, double)`. A forced-summary prototype showed an extra `uint64_t` rdx formal; if it appears, report it to S8 instead of patching it.
     - Nothing else changes.
   - **Depends on:** R3 (same files; land them one after the other).
+  - Evidence (2026-10-22): `createSlotTyper` (`reconstruction/source-slot-types.ts`, extracted unchanged from `source-results.ts`) is used by `nativeReturnInterface` (`reloadedSlotType`, the `floating && !type` branch; native-entry exposes `load_addresses`/`load_nodes`/`store_values`). The slot must be local (negative entry-SP offset) and the load must not be reachable after a frame address reached a call/unresolved memory (`StackSnapshot.escaped` at the load, flow-sensitive; `frame.escaped` is too coarse: it also trips on dead scratch registers at return and on the arm64 FPCR dead-end `unknown_effect`). stack-calls/12, reconstruction unchanged. OD lane `od-rm3-r4` vs `od-rm3-r3`: exactly the three `matrix_variadic_call` `-O0` texts (ELF/Mach-O/PE symbols) differ (+ `selectInnerLoop` from J1 merged in); ELF `double …`/`return result;`, Mach-O `return frame.local_30;`, 0 `physical_return`/`unknown_value`; coverage unchanged (194 partial/37 complete/6 failed). **PE `-O0` signature now `(uint32_t arg0, uint64_t arg1, double arg2, double arg3)`**: the extra rdx formal is the Win64 variadic path (`matrix_variadic(0, arg1)` leaves rdx = entry value on the `count == 0` branch); not patched, belongs to S8. Tests: `native-interface.test.ts` SysV/AAPCS64 slot accumulator → f64, negatives (integer store, literal-only slot, address-taken frame), caller executed in C and Python-like.
 
 ### R5: A vector copy or fill temporary in the FP register is not a result
 
