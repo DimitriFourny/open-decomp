@@ -898,7 +898,7 @@ Files that several items touch:
 
 ### L1: A loop header's one statement prints inside the test
 
-- [ ] **Problem.** A loop header that prints any statement cannot become `while (c)`. 13 measured loops print `while (true) { x = e; if (!c) break; … }` where Ghidra prints a tested loop. Examples: the `sqlite3ParseUri` scan; the `sqlite3BtreeOpen` pointer chase.
+- [x] **Problem.** A loop header that prints any statement cannot become `while (c)`. 13 measured loops print `while (true) { x = e; if (!c) break; … }` where Ghidra prints a tested loop. Examples: the `sqlite3ParseUri` scan; the `sqlite3BtreeOpen` pointer chase. _Done (`wt/rm4-l1`): lane `od-rm4-l1` vs `od-rm3-final`: `while (true)` 217 → 203, tested loops 220 → 234, `break;` 379 → 360, `for` 18 → 19, gotos 759 unchanged; 14 loops in 10 texts print their header statement inside the test (`openDatabase` becomes a `for`), and 2 more texts (`fts3EvalNextRow`, `sqlite3Fts3Incrmerge`) only print chained negations as `x == 0`; every other text byte-identical; checked view identical; `loop_comma_condition`._
   - **Root cause:** `planLoopForms` accepts a chain stage only when `facts.silent(first)` (`src/emitters/source-control.ts:1436`), and a head test only when `facts.silent(head)` (`:1455`). The comma-operand machinery already exists for later short-circuit operands (`commaOperand` `renderer.ts:6574-6586`, `operandTerm` `:6685-6719`, carriers `:7686-7706`), and `commaOperands` is computed for every block.
   - **Change:**
     - `LoopFacts` gains `comma(block)` (a non-silent header whose `commaOperands` entry is one statement) and `carrier(block)`.
