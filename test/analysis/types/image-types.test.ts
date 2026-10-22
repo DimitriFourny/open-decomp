@@ -3,6 +3,7 @@ import test from 'node:test';
 import { AnalysisBudget } from '../../../src/analysis/ssa/budget.js';
 import { renderImageTypeDeclarations } from '../../../src/emitters/image-types.js';
 import {
+  imageTypeLabels,
   solveImageTypes,
   type ImageTypeAnchor,
   type ImageTypeField,
@@ -82,12 +83,30 @@ test('views of one pointer flowing to two callees merge into one named layout', 
     ],
   );
   assert.equal(first.name, 'first_arg0');
+  // The printed identifier is a digest of the class, never another function's anchor.
+  assert.match(first.label, /^struct_[0-9a-f]{6}$/);
+  assert.equal(first.label, imageTypeLabels([first.name]).get(first.name));
   assert.equal(first.state, 'complete');
   assert.deepEqual(first.functions, ['caller', 'first', 'second']);
   // Input order never changes the identity or the name.
   const reversed = solve([...shared].reverse());
   assert.equal(classOf(reversed, 'second|a0').id, first.id);
   assert.equal(classOf(reversed, 'second|a0').name, first.name);
+  assert.equal(classOf(reversed, 'second|a0').label, first.label);
+});
+
+test('class labels are digests of the class name, unique within a solution', () => {
+  // `image_type_890` and `image_type_5047` (any two names) share their first six digest digits.
+  const labels = imageTypeLabels(['image_type_5047', 'image_type_890', 'image_type_5047']);
+  assert.equal(labels.size, 2);
+  const [short, extended] = ['image_type_5047', 'image_type_890'].map((id) => labels.get(id)!);
+  assert.match(short!, /^struct_[0-9a-f]{6}$/);
+  assert.match(extended!, /^struct_[0-9a-f]{8}$/);
+  assert.ok(extended!.startsWith(short!));
+  // The first ID in order keeps the short form whatever the input order.
+  assert.deepEqual(imageTypeLabels(['image_type_890', 'image_type_5047']), labels);
+  // A class alone keeps the short digest: the two share it.
+  assert.equal(imageTypeLabels(['image_type_890']).get('image_type_890'), short);
 });
 
 test('overlapping incompatible views stay separate and record the conflict', () => {
@@ -179,6 +198,47 @@ test('image-wide declarations print the float and integer views as one anonymous
     /struct \w+ \{[^}]*uint64_t field_0x0;[^}]*union \{ uint64_t field_0x10; double field_0x10_f; \};[^}]*\};/,
     text,
   );
+});
+
+test('image-wide declarations name types by label and keep the anchor as a comment', () => {
+  const solution = solve([
+    object(
+      'caller|p',
+      'caller',
+      [],
+      [
+        { anchor: argument('first'), own: false },
+        { anchor: argument('second'), own: false },
+      ],
+    ),
+    object(
+      'first|a0',
+      'first',
+      [word(0n, 64), word(16n)],
+      [{ anchor: argument('first'), own: true }],
+    ),
+    object(
+      'second|a0',
+      'second',
+      [word(4n), word(24n)],
+      [{ anchor: argument('second'), own: true }],
+    ),
+  ]);
+  const wide = classOf(solution, 'first|a0'),
+    high = classOf(solution, 'second|a0');
+  assert.notEqual(wide.label, high.label);
+  const text = renderImageTypeDeclarations(solution.classes, (id) => id);
+  for (const item of [wide, high]) {
+    assert.match(text, new RegExp(`^typedef struct ${item.label} ${item.label};$`, 'm'), text);
+    assert.match(
+      text,
+      new RegExp(`/\\* first seen: ${item.name};[^\n]*\\*/\\nstruct ${item.label} \\{`),
+      text,
+    );
+  }
+  // Conflicts print the other class's label too.
+  assert.match(text, new RegExp(`conflicts with ${high.label} \\*/\\nstruct ${wide.label} `));
+  assert.doesNotMatch(text, /\bfirst_arg0\b[^;]*\bstruct\b|struct first_arg0|struct second_arg0/);
 });
 
 test('a flow the callee never uses as an object joins nothing', () => {

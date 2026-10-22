@@ -164,7 +164,10 @@ export interface TypeRecoveryResult {
  * merged layout in every function's output. */
 export interface ImageTypeBinding {
   readonly type_id: string;
+  /** The printed identifier (`struct_<hex>`), unique among the image's merged types. */
   readonly name: string;
+  /** Metadata: the class's first anchor, e.g. `setSectorSize_arg0`. */
+  readonly first_seen: string;
   /** Bounded: some pointer flows were not explored; the name carries a layout digest. */
   readonly state: 'complete' | 'bounded';
   /** Functions whose observed views were merged into this layout. */
