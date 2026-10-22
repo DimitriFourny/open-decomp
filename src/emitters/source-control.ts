@@ -285,6 +285,9 @@ export class VariableLiveness {
         if (node.kind === 'call') writes.push(...node.results);
         if ('register_outputs' in node)
           for (const binding of node.register_outputs) writes.push(binding.value);
+        if (node.kind === 'call' || node.kind === 'unknown_effect')
+          for (const binding of program.source?.register_outputs?.get(node.id) ?? [])
+            writes.push(binding.value);
         define(writes);
       }
       definitions(node.id);

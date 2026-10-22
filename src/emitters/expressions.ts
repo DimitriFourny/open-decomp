@@ -775,6 +775,39 @@ export interface ExpressionOptions {
   /** Approved scalar operation under the recorded FP environment requirement. */
   readonly nativeFp?: boolean;
   readonly floatLiterals?: boolean;
+  /** The pure IR definition of an operand's value, if any. */
+  readonly definition?: (value: Value) => Expression | undefined;
+}
+
+/** Whether the IR defines `value` as a zero or sign extension of a value of
+ * fewer than `bits` bits: `zero_extend`/`sign_extend`, a mask of the low
+ * 8/16/32 bits (zero), or a truncation or low extract of such an extension. */
+function extensionOf(
+  value: Value,
+  bits: number,
+  options: ExpressionOptions,
+  depth = 0,
+): 'zero' | 'sign' | undefined {
+  const definition = options.definition?.(value);
+  if (definition?.kind === 'integer' && definition.op === 'and') {
+    const mask = options.constant?.(definition.right) ?? options.constant?.(definition.left);
+    return [0xffn, 0xffffn, 0xffffffffn].includes(mask!) && mask! < 1n << BigInt(bits - 1)
+      ? 'zero'
+      : undefined;
+  }
+  if (
+    depth < 8 &&
+    ((definition?.kind === 'cast' && definition.op === 'truncate') ||
+      (definition?.kind === 'extract' && definition.offset === 0))
+  )
+    return extensionOf(definition.value, bits, options, depth + 1);
+  if (definition?.kind !== 'cast') return undefined;
+  if (bitWidth(definition.value.type) >= bits) return undefined;
+  return definition.op === 'zero_extend'
+    ? 'zero'
+    : definition.op === 'sign_extend'
+      ? 'sign'
+      : undefined;
 }
 
 /** Reconstruction chooses substitutions; formatting preserves width semantics.
@@ -935,12 +968,26 @@ export function expressionText(
       (expression.op === 'float_convert' ||
         [8, 16, 32, 64, 128].includes(bitWidth(expression.value.type)))
     ) {
-      const value =
-        expression.op === 'signed_to_float'
-          ? printer.cast(bitWidth(expression.value.type), true, name(expression.value))
-          : expression.op === 'unsigned_to_float'
-            ? printer.cast(bitWidth(expression.value.type), false, name(expression.value))
-            : name(expression.value);
+      // A conversion depends only on the mathematical integer. When the IR
+      // operand zero-extends a narrower value (either conversion) or
+      // sign-extends one (signed conversion), the conversion reads the narrower
+      // operand that the printed cast to the source width collapses to.
+      const source = bitWidth(expression.value.type),
+        signed = expression.op === 'signed_to_float';
+      let value = name(expression.value);
+      if (expression.op !== 'float_convert') {
+        value = printer.cast(source, signed, value);
+        const narrow = value.from?.operand,
+          extension = extensionOf(expression.value, source, options);
+        if (
+          extension &&
+          narrow?.ctype &&
+          value.from!.bits >= source &&
+          narrow.ctype.bits < source &&
+          (extension === 'zero' ? !narrow.ctype.signed : signed && narrow.ctype.signed)
+        )
+          value = narrow;
+      }
       if (python) return printer.primary(`float(${value.text})`);
       return {
         text: `(${width === 32 ? 'float' : 'double'})${printer.group(value, UNARY)}`,
