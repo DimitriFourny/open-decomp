@@ -1115,7 +1115,7 @@ function sourceAddresses(
  * same order under every allowance of at least min(A, 4W + 3) (each limit then
  * exceeds all work charged after it was set) and under every capacity it fits.
  *
- * Only such units are retained (`reusablePreparation`), with `allowance` =
+ * Only such units are retained (`retainablePreparation`), with `allowance` =
  * min(A, 4W + 3). A reuse happens only when the load's allowance is at least that and
  * the replayed charge (W on the load's context, then the recorded reads with their
  * capture charges) fits every enclosing allowance; it returns the recorded unit. So a
@@ -1135,11 +1135,17 @@ const preparedUnits = new WeakMap<LoadedImage, PreparedUnitCache>();
 /** Retained prepared size (instructions + IR nodes + evidence + traced reads) per
  * image. Measured on SQLite at roughly 1 KiB of heap per unit, so ~256 MiB. */
 const MAX_PREPARED_UNIT_SIZE = 1 << 18;
-const reusablePreparation = (unit: PreparedNativeUnit): boolean =>
-  !unit.budget_truncated &&
-  !unit.limited &&
-  !unit.reasons.length &&
-  unit.analysis?.state === 'complete';
+/** Retention (in process and persisted): the preparation hit no limit, so its result is
+ * independent of the allowance. Its `reasons` may be anything that is not a limit (for
+ * example "unresolved control flow" from an indirect call): they are facts of the body,
+ * recorded in the unit and replayed with it. */
+const retainablePreparation = (unit: PreparedNativeUnit): boolean =>
+  !unit.budget_truncated && !unit.limited && unit.analysis?.state === 'complete';
+/** What a request may cite as result-use evidence (`admit`): a retainable unit that also
+ * carries no reason. Narrower than retention, so evidence never depends on which
+ * reason-carrying units were retained. */
+const citablePreparation = (unit: PreparedNativeUnit): boolean =>
+  retainablePreparation(unit) && !unit.reasons.length;
 
 function nativeSelectedNodes(ir: SSAForm): number {
   return ir.blocks.reduce(
@@ -1295,7 +1301,7 @@ export function nativeUnitLoader(
     const { value: unit, trace } = scope.dependencies
       ? scope.dependencies.traced(run)
       : { value: run(), trace: undefined };
-    if (allowance !== undefined && reusablePreparation(unit)) {
+    if (allowance !== undefined && retainablePreparation(unit)) {
       const prior = cache.entries.get(fn.id);
       if (prior) {
         cache.entries.delete(fn.id);
@@ -1789,7 +1795,7 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
       load(fn, boundedContext) {
         let unit = loadUnit(fn, boundedContext);
         if (scope.dependencies) unit = { ...unit, dependency_readset: scope.dependencies.finish() };
-        if (reusablePreparation(unit)) admit(fn.id, unit);
+        if (citablePreparation(unit)) admit(fn.id, unit);
         return unit;
       },
       argument_reaching: (unit, boundedContext) =>

@@ -111,6 +111,75 @@ test('summaries persisted by an earlier process serve later requests with unchan
   }
 });
 
+/** `reasons` of every persisted unit that carries some: facts of the body (an indirect call is
+ * `unresolved control flow`), not limits. */
+async function persistedReasons(p: Project): Promise<Map<string, readonly string[]>> {
+  const rows = (await sql(p, 'SELECT function_id, scope FROM native_summaries')) as {
+    function_id: string;
+    scope: string;
+  }[];
+  const reasons = new Map<string, readonly string[]>();
+  for (const row of rows) {
+    const stored = p.state.store.readNativeSummary(row.scope, row.function_id);
+    const unit = (stored?.value as { unit?: { reasons?: readonly string[]; limited?: boolean } })
+      .unit;
+    assert.equal(unit?.limited, false);
+    if (unit?.reasons?.length) reasons.set(row.function_id, unit.reasons);
+  }
+  return reasons;
+}
+
+const workOf = (result: ToolResult<'function_decompile'>): unknown => {
+  const work = 'data' in result ? (result.data as { work?: unknown }).work : undefined;
+  assert.notEqual(work, undefined, 'the delivery reports no work');
+  return work;
+};
+
+test('units whose reasons are not limits (an unresolved indirect call) are persisted and served with unchanged output, reused with equal work', async (t) => {
+  const p = await project(t, FIXTURE);
+  const ids = p.functions.map((fn) => fn.id);
+  const references = async (of: Project) => {
+    const reference = new Map<string, { text: string; work: unknown }>();
+    for (const id of ids) {
+      const { result } = await of.decompile(id, {}, undefined, { analysis_cache: false });
+      reference.set(id, { text: comparable(result), work: workOf(result) });
+    }
+    return reference;
+  };
+  const reference = await references(p);
+  const half = Math.floor(ids.length / 2);
+  for (const id of ids.slice(0, half)) await p.decompile(id);
+  const reasons = await persistedReasons(p);
+  assert.ok(reasons.size > 0, 'no unit with a non-limit reason was persisted');
+  for (const list of reasons.values())
+    assert.ok(
+      list.every((reason) => !/work limit|budget/i.test(reason)),
+      `a limit reason was persisted: ${list.join('; ')}`,
+    );
+  // A new process serves the later functions from the rows with the uncached output.
+  let served = 0;
+  for (const id of ids.slice(half)) {
+    await p.reopen();
+    const phases: string[] = [];
+    const { result } = await p.decompile(id, {}, undefined, { phases });
+    if (phases.includes('native_summary_cache')) served++;
+    assert.equal(comparable(result), reference.get(id)!.text, id);
+  }
+  assert.ok(served > 0, 'no persisted summary was served');
+  // In one process the retained units (those with reasons included) serve the later
+  // functions, which charge exactly the work an uncached preparation charges.
+  const q = await project(t, FIXTURE);
+  const expected = await references(q);
+  for (const id of ids.slice(0, half)) await q.decompile(id);
+  const phases: string[] = [];
+  for (const id of ids.slice(half)) {
+    const { result } = await q.decompile(id, {}, undefined, { phases });
+    assert.equal(comparable(result), expected.get(id)!.text, id);
+    assert.deepEqual(workOf(result), expected.get(id)!.work, `work of ${id}`);
+  }
+  assert.ok(phases.includes('native_summary_cache'), 'no retained unit was reused');
+});
+
 test('a revision change invalidates persisted summaries and removes the superseded rows', async (t) => {
   const hitId = await reusingFunction(t);
   const { p, ids } = await persisted(t);
@@ -202,6 +271,32 @@ test('a row whose dependency trace no longer matches the store is a miss', async
   const forged = await inNewProcess(p, hitId);
   assert.equal(forged.reused, false, 'a summary with a stale trace was used');
   assert.equal(forged.output, reference);
+});
+
+test('rows of a unit that hit a limit are never served, whatever else they carry', async (t) => {
+  for (const field of ['limited', 'budget_truncated'] as const) {
+    const hitId = await reusingFunction(t);
+    const { p } = await persisted(t);
+    const reference = comparable(
+      (await p.decompile(hitId, {}, undefined, { analysis_cache: false })).result,
+    );
+    const rows = (await sql(p, 'SELECT function_id, scope FROM native_summaries')) as {
+      function_id: string;
+      scope: string;
+    }[];
+    // Authentic digests, but every unit claims the limit (the schema admits only false).
+    for (const row of rows) {
+      const stored = p.state.store.readNativeSummary(row.scope, row.function_id);
+      assert.ok(stored);
+      const value = stored.value as { unit: Record<string, unknown> };
+      value.unit[field] = true;
+      assert.ok(p.state.store.queueNativeSummary({ ...stored, value }));
+    }
+    p.state.store.flushNativeSummaries();
+    const forged = await inNewProcess(p, hitId);
+    assert.equal(forged.reused, false, `a unit with ${field} was used`);
+    assert.equal(forged.output, reference);
+  }
 });
 
 test('disabled analysis caching writes no derived rows and delivers like a cached run', async (t) => {
