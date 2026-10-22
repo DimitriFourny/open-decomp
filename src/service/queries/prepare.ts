@@ -19,6 +19,7 @@ import { classifyImportStubs, type ImportStub } from '../../analysis/discovery/s
 import { recoverRuntimeMetadata } from '../../metadata/runtime/index.js';
 import { libraryNoreturnCalls } from '../../metadata/library-contracts/index.js';
 import { decorateImageNames } from '../../metadata/symbols/index.js';
+import { targetAbi } from '../analysis/versions.js';
 
 /** Prepare outside SQLite; publish native facts, the import report and navigation
  * atomically. Decorated/runtime names remain separate derived records.
@@ -80,6 +81,7 @@ export async function prepareQueryImport(
         decoder,
         revision,
         noreturn_calls: libraryNoreturnCalls(decorated, context),
+        preserved_registers: targetAbi(image.target)?.preserved ?? [],
       },
       context,
     );
@@ -219,6 +221,7 @@ export function prepareDiscoveryStep(
         functions: input.functions,
         resume: input.frontier,
         noreturn_calls: libraryNoreturnCalls(image, context),
+        preserved_registers: targetAbi(image.target)?.preserved ?? [],
       },
       context,
     );

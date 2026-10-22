@@ -824,7 +824,11 @@ source aliases extract slices from the new whole phi, preserving parallel copies
 and full-width arithmetic carries. Independently written cells (for example a
 partial write that preserves the other half), missing cells, differing whole
 values, mismatched offsets and exhausted presentation-record capacity retain the
-split form. The `register_cell_recombination` presentation record documents this
+split form. A whole carried unchanged on an edge (its own loop edge, say) prints no
+copy: publication validation accepts that edge only when the original edge copies
+every cell aliased to a slice of the whole to itself and those cells cover all of its
+bits (`sqlite3PagerSavepoint`, and `jsonTranslateTextToBlob` once its table proves,
+were rejected before). The `register_cell_recombination` presentation record documents this
 exact bitvector identity without an ABI assumption; checked output does not
 apply it. `test/reconstruction/source-loop-cells.test.ts` executes both dialects
 against independent oracles for a 32-bit-immediate-entered 64-bit loop variable,
