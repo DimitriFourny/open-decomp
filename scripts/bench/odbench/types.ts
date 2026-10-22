@@ -130,7 +130,7 @@ export interface FunctionResult {
     readonly method: string;
   };
   /** Open Decomp: work this function's decompile consumed (`consumed`) against the work limit
-   * its result reported (`limit`); deterministic, so taken from the first repeat. Absent on lanes
+   * its result reported (`limit`), taken from the first repeat; for a work-limit failure `consumed` is the count its diagnostic reports. Absent on lanes
    * recorded before this field and on other tools; null when no result carried it (failures). */
   readonly work?: FunctionWork | null;
   /** Open Decomp with repeat > 1: every repeat printed byte-identical text. */
