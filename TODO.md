@@ -347,7 +347,8 @@ A prototype of S1–S3 (unsound, measurement only) gave these results:
 
 ### S7: SysV variadic functions print `...` and `va_start`
 
-- [ ] **Problem.** SysV `matrix_variadic` (`-O0` `0x401d10`, `-O2` `0x401bd0`, stripped `sub@0x401bd0`) prints 15 formals: `arg1..arg5`, `double arg6` and 7 × `uint128_t` (the register save area spills). It also prints `al` as `unknown_value("bits8_t", "non-argument entry register")` and the `va_list` initialization through `entry_sp`. Ghidra prints `double matrix_variadic(uint param_1)`.
+- [x] **Problem.**
+  - **Done (S7):** `classifySysvVaStart` (`va_start` record listing the hidden stores, `variadic_convention` premise), `va_list` frame member `va`, dropped `al` guard; `fixture_variadic` (ELF) prints `(uint32_t count, ...)`, `va_start(frame.va, count)` and executes like the oracle for counts 0..12 in C and Python-like; the three SysV `matrix_variadic` texts have 0 `entry_sp` and `(uint32_t arg0, ...)`. IR-builder negatives (missing xmm store, extra `rsi` use, call between footprint stores) not added. SysV `matrix_variadic` (`-O0` `0x401d10`, `-O2` `0x401bd0`, stripped `sub@0x401bd0`) prints 15 formals: `arg1..arg5`, `double arg6` and 7 × `uint128_t` (the register save area spills). It also prints `al` as `unknown_value("bits8_t", "non-argument entry register")` and the `va_list` initialization through `entry_sp`. Ghidra prints `double matrix_variadic(uint param_1)`.
   - **Change:** match the exact footprint; if anything differs, do not rewrite.
     - **Register save area** at frame offset R, 16-aligned. For i in [g, 6), one u64 store of the entry GPR i at R+8i (unconditional). For j in [f, 8), one 128-bit store of the entry xmm_j at R+48+16j, all inside one region guarded by `al != 0`.
     - **`va_list`** at frame offset v: `gp_offset = 8g`, `fp_offset = 48+16f` (two u32 stores or one u64), `overflow_arg_area` = entry SP + 8 + s, `reg_save_area` = R.
