@@ -263,9 +263,10 @@ export interface SourceVariadic {
 export interface FrameMember {
   readonly offset: bigint;
   readonly size: bigint;
-  /** Every access to these bytes reads or writes exactly them, or is wider and
-   * starts here, covering whole members and padding: a scalar member.
-   * Otherwise (overlapping accesses, an interior or indexed address) a byte array. */
+  /** Every access to these bytes reads or writes exactly them: a scalar member
+   * (accesses wider than it, covering whole members, are casts at the member
+   * holding their first byte). Otherwise (partially overlapping accesses, an
+   * interior or indexed address, padding under a wider access) a byte array. */
   readonly scalar: boolean;
   /** The known-offset frame accesses inside these bytes (a scalar member lists
    * those of exactly its bytes, not the wider accesses spanning it). */
@@ -274,9 +275,8 @@ export interface FrameMember {
 /** Source view (S4): the incoming stack-argument bytes this activation keeps
  * as memory (a by-value aggregate modified in place), printed as one struct
  * formal of `size` bytes starting at entry-SP `minimum_offset` (the first
- * incoming byte). Members are in entry-SP coordinates; bytes between them and
- * past the last one up to `size` are padding, and every byte stays ordinary,
- * aliasable memory. The formal's IR
+ * incoming byte). Members are in entry-SP coordinates; bytes between them are
+ * padding, and every byte stays ordinary, aliasable memory. The formal's IR
  * type is a pointer-width carrier only; its spelling is the struct. */
 export interface IncomingObject {
   readonly formal: Value;

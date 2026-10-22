@@ -89,24 +89,34 @@ test('frame layout: a wide access over whole narrower clusters keeps them as sca
       { offset: -28n, size: 4n, scalar: true, access_ids: ['b'] },
     ],
   });
-  // A u32 and its padding under a u64 and under a u128; both wide accesses
-  // cast at the first member.
+  // A u32 and its padding under a u64 and under a u128: a padding member
+  // fills the uncovered bytes, both wide accesses cast at the first member.
   assert.deepEqual(
     layout([wide('x', -32n, -16n), wide('w', -32n, -24n), wide('a', -32n, -28n)]).members,
-    [{ offset: -32n, size: 4n, scalar: true, access_ids: ['a'] }],
+    [
+      { offset: -32n, size: 4n, scalar: true, access_ids: ['a'] },
+      { offset: -28n, size: 12n, scalar: false, access_ids: [] },
+    ],
   );
-  // Several members, a gap between them is padding.
+  // Padding before the first member (a u64 store over a later u32 member) and
+  // between members.
+  assert.deepEqual(shapes(layout([wide('w', -32n, -24n), wide('a', -28n, -24n)])), [
+    [-32n, 4n, false],
+    [-28n, 4n, true],
+  ]);
   assert.deepEqual(
     shapes(layout([wide('w', -32n, -16n), wide('a', -32n, -28n), wide('b', -24n, -16n)])),
     [
       [-32n, 4n, true],
+      [-28n, 4n, false],
       [-24n, 8n, true],
     ],
   );
-  // The wide access must start at a member and not cut one: byte arrays.
+  // A wide access that cuts a member, partially overlapping narrow accesses
+  // and a narrow access of an odd width keep one byte array.
   for (const group of [
-    [wide('w', -32n, -24n), wide('a', -28n, -24n)],
     [wide('w', -32n, -26n), wide('a', -32n, -28n), wide('b', -28n, -24n)],
+    [wide('w', -32n, -24n), wide('a', -28n, -22n)],
     [wide('a', -32n, -28n), wide('b', -30n, -26n), wide('w', -32n, -24n)],
     [wide('w', -32n, -24n), wide('a', -32n, -29n)],
   ])
@@ -118,8 +128,8 @@ test('frame layout: a wide access over whole narrower clusters keeps them as sca
       ],
     ]);
   const spanning = [wide('w', -32n, -24n), wide('a', -32n, -28n), wide('b', -28n, -24n)];
-  // An address taken at a member start keeps the split; inside a member, in
-  // padding or an indexed base inside the span make one byte array.
+  // An address taken at a member start keeps the split; inside a member or
+  // padding, or an indexed base inside the span, make one byte array.
   assert.deepEqual(shapes(layout(spanning, [-28n])), [
     [-32n, 4n, true],
     [-28n, 4n, true],
@@ -130,10 +140,14 @@ test('frame layout: a wide access over whole narrower clusters keeps them as sca
     [[], [-28n]],
   ] as const)
     assert.deepEqual(shapes(layout(spanning, taken, indexed)), [[-32n, 8n, false]]);
-  assert.deepEqual(shapes(layout([wide('w', -32n, -24n), wide('a', -32n, -28n)], [-26n])), [
-    [-32n, 8n, false],
+  const padded = [wide('w', -32n, -24n), wide('a', -32n, -28n)];
+  assert.deepEqual(shapes(layout(padded, [-28n])), [
+    [-32n, 4n, true],
+    [-28n, 4n, false],
   ]);
-  // The incoming object (above): the wide access's padding is inside the object.
+  assert.deepEqual(shapes(layout(padded, [-26n])), [[-32n, 8n, false]]);
+  // The incoming object (above): the wide access's padding is a member, so the
+  // object still ends at its last member.
   assert.deepEqual(
     layout([wide('w', 8n, 24n), wide('a', 8n, 16n), wide('b', 16n, 20n)], [], [], 'above', 8n),
     {
@@ -142,6 +156,7 @@ test('frame layout: a wide access over whole narrower clusters keeps them as sca
       members: [
         { offset: 8n, size: 8n, scalar: true, access_ids: ['a'] },
         { offset: 16n, size: 4n, scalar: true, access_ids: ['b'] },
+        { offset: 20n, size: 4n, scalar: false, access_ids: [] },
       ],
     },
   );
@@ -452,11 +467,13 @@ for (const abi of [darwinArm64Abi, sysvAMD64Abi, windowsX64Abi]) {
     assert.match(text, /uint32_t local_10;\s+uint32_t local_c;/, text);
     assert.match(text, /\*\(uint64_t \*\)&frame\.local_10\b/, text);
     assert.match(text, /\*\(uint64_t \*\)&frame\.local_20\b/, text);
-    assert.doesNotMatch(text, /uint8_t local_/, text);
+    // The padding under the u64 is an explicit byte-array member.
+    assert.match(text, /uint32_t local_20;\s+uint8_t local_1c\[4\];/, text);
     const python = emit(fixture.ir, fixture.extra, 'python-like').emission.text;
     assert.match(python, /frame\.local_10: uint32_t/, python);
     assert.match(python, /frame\.local_c: uint32_t/, python);
     assert.match(python, /frame\.local_20: uint32_t/, python);
+    assert.match(python, /frame\.local_1c: array<uint8_t, 4>/, python);
     assertBeside(
       fixture,
       abi,

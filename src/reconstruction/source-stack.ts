@@ -37,28 +37,29 @@ import { classifyVariadicArea } from './source-variadic.js';
 
 type MemoryNode = Extract<Instruction, { kind: 'load' | 'store' }>;
 const FRAME_OBJECT_SCOPE =
-  'frame bytes kept as memory print as one local frame object at their entry-SP offsets: one scalar member per exact (offset, width) access set, a wider access that starts at a member and covers whole members plus padding printing as a cast at the first one, byte arrays where other accesses overlap or a frame address is indexed or points inside, padding between; every load and store keeps its address, width, order and aliasing, nothing is forwarded';
+  'frame bytes kept as memory print as one local frame object at their entry-SP offsets: one scalar member per exact (offset, width) access set, a wider access covering whole members plus padding printing as a cast at the member holding its first byte, byte arrays where other accesses overlap or a frame address is indexed or points inside, padding between; every load and store keeps its address, width, order and aliasing, nothing is forwarded';
 const INCOMING_OBJECT_SCOPE =
-  'incoming stack-argument bytes kept as memory print as one by-value struct formal at their entry-SP offsets: one scalar member per exact (offset, width) access set, a wider access that starts at a member and covers whole members plus padding printing as a cast at the first one, byte arrays where other accesses overlap or an address points inside, padding between; no exposure can designate incoming bytes and no frame escape is unbounded; no retained access spans the first incoming byte; every load and store keeps its address, width, order and aliasing, nothing is forwarded';
+  'incoming stack-argument bytes kept as memory print as one by-value struct formal at their entry-SP offsets: one scalar member per exact (offset, width) access set, a wider access covering whole members plus padding printing as a cast at the member holding its first byte, byte arrays where other accesses overlap or an address points inside, padding between; no exposure can designate incoming bytes and no frame escape is unbounded; no retained access spans the first incoming byte; every load and store keeps its address, width, order and aliasing, nothing is forwarded';
 const SCALAR_BYTES = new Set([1n, 2n, 4n, 8n, 16n]);
 
 /** Member layout of a source-view stack object at its entry-SP offsets.
  * One scalar member per exact (offset, width) access set. Overlapping accesses
  * keep the narrowest ones as scalar members when those are disjoint scalars
- * and every wider access starts at one of them and ends at a member end or in
- * padding (a wide access over two u32 members, or over a u32 and its padding):
- * the wide access is spelled as a cast at the first member and sits in no
- * member's `access_ids`. Any other overlap, an address strictly inside a
- * member or in such padding, and an indexed base (with the accesses that
- * continue it without a gap) form one byte array; a taken address in a gap
+ * and no wider access starts or ends strictly inside one (a wide access over
+ * two u32 members, or over a u32 and padding): the uncovered bytes of the
+ * span are byte-array padding members, the wide access is spelled as a cast at
+ * the member holding its first byte and sits in no member's `access_ids`. Any
+ * other overlap, an address strictly inside a member or padding, and an
+ * indexed base (with the accesses that continue it without a gap) form one
+ * byte array; a taken address in a gap
  * starts a byte array that runs to the next member.
  * `below` (the frame): the object ends at the entry SP and its bottom is
  * lowered to a stack-aligned address; offsets at or above the entry SP are not
  * frame bytes and are ignored. `above` (the incoming area, S4): the object
  * starts at the first incoming byte (`returnAddressBytes`, stack-aligned by the
- * call) and ends at its last member or at the end of the last spanning access
- * (padding); offsets below that byte are ignored, and a taken address above
- * every member starts a byte array to the next `alignment` boundary. */
+ * call) and ends at its last member; offsets below that byte are ignored, and a
+ * taken address above every member starts a byte array to the next
+ * `alignment` boundary. */
 export function frameLayout(
   accesses: readonly { readonly offset: bigint; readonly end: bigint; readonly id: string }[],
   taken: readonly bigint[],
@@ -85,13 +86,12 @@ export function frameLayout(
     }
     return low;
   };
-  // Bytes past the last member that a spanning access covers (padding).
-  let reach = returnAddressBytes;
   /** A group of overlapping accesses (sorted by offset, then end) that holds
    * several distinct intervals keeps its narrowest ones as scalar members when
-   * those are disjoint scalars and every wider access starts at one of them
-   * and ends at a member end or in padding: the wide access is then a cast at
-   * the first member. Null keeps the group one byte array. */
+   * those are disjoint scalars and no wider access starts or ends strictly
+   * inside one: padding members fill the uncovered bytes of the span, and the
+   * wide access is a cast at the member holding its first byte. Null keeps the
+   * group one byte array. */
   const split = (
     group: readonly { offset: bigint; end: bigint; id: string }[],
   ): Cluster[] | null => {
@@ -124,45 +124,63 @@ export function frameLayout(
         (index > 0 && narrow[index]!.offset < narrow[index - 1]!.end)
       )
         return null;
-    const starts = new Set(narrow.map((interval) => interval.offset)),
-      spanStart = narrow[0]!.offset;
-    let groupEnd = narrow.at(-1)!.end;
-    for (const interval of wide) {
-      if (!SCALAR_BYTES.has(interval.end - interval.offset) || !starts.has(interval.offset))
-        return null;
-      if (interval.end > groupEnd) groupEnd = interval.end;
-      // The last member starting before the wide access's end must end by it.
+    // Whether a member strictly contains byte `offset` (so an access starting
+    // or ending there would cut it).
+    const cuts = (offset: bigint): boolean => {
       let low = 0,
         high = narrow.length - 1,
         before = -1;
       while (low <= high) {
         const middle = (low + high) >> 1;
-        if (narrow[middle]!.offset < interval.end) {
+        if (narrow[middle]!.offset < offset) {
           before = middle;
           low = middle + 1;
         } else high = middle - 1;
       }
-      if (before >= 0 && narrow[before]!.end > interval.end) return null;
+      return before >= 0 && narrow[before]!.end > offset;
+    };
+    const spanStart = group[0]!.offset;
+    let spanEnd = narrow.at(-1)!.end;
+    for (const interval of wide) {
+      if (
+        !SCALAR_BYTES.has(interval.end - interval.offset) ||
+        cuts(interval.offset) ||
+        cuts(interval.end)
+      )
+        return null;
+      if (interval.end > spanEnd) spanEnd = interval.end;
     }
-    // An address taken inside padding or a member, or an indexed base inside
-    // the span, would need a byte array.
+    // Members tile the span: the narrow scalars, padding between them.
+    const members: Cluster[] = [];
+    let cursor = spanStart;
+    const pad = (end: bigint) => {
+      if (end > cursor) members.push({ offset: cursor, end, scalar: false, access_ids: [] });
+    };
+    for (const interval of narrow) {
+      pad(interval.offset);
+      members.push({
+        offset: interval.offset,
+        end: interval.end,
+        scalar: true,
+        access_ids: group
+          .filter((access) => access.offset === interval.offset && access.end === interval.end)
+          .map((access) => access.id),
+      });
+      cursor = interval.end;
+    }
+    pad(spanEnd);
+    // An address taken inside a member or padding (not at its start), or an
+    // indexed base inside the span, would need a byte array.
+    const starts = new Set(members.map((member) => member.offset));
     for (
       let index = lowerBound(takenSorted, spanStart);
-      index < takenSorted.length && takenSorted[index]! < groupEnd;
+      index < takenSorted.length && takenSorted[index]! < spanEnd;
       index++
     )
       if (!starts.has(takenSorted[index]!)) return null;
     const indexedAt = lowerBound(indexedSorted, spanStart);
-    if (indexedAt < indexedSorted.length && indexedSorted[indexedAt]! < groupEnd) return null;
-    if (groupEnd > reach) reach = groupEnd;
-    return narrow.map((interval) => ({
-      offset: interval.offset,
-      end: interval.end,
-      scalar: true,
-      access_ids: group
-        .filter((access) => access.offset === interval.offset && access.end === interval.end)
-        .map((access) => access.id),
-    }));
+    if (indexedAt < indexedSorted.length && indexedSorted[indexedAt]! < spanEnd) return null;
+    return members;
   };
   const clusters: Cluster[] = [];
   const sorted = [...accesses].sort(
@@ -243,11 +261,10 @@ export function frameLayout(
   members.sort((left, right) => order(left.offset, right.offset));
   if (direction === 'above') {
     // Members are sorted and disjoint: the last one ends the object.
-    const last = members.at(-1),
-      end = last ? last.offset + last.size : returnAddressBytes;
+    const last = members.at(-1);
     return {
       minimum_offset: returnAddressBytes,
-      size: (end > reach ? end : reach) - returnAddressBytes,
+      size: last ? last.offset + last.size - returnAddressBytes : 0n,
       members,
     };
   }

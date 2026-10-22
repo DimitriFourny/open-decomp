@@ -260,9 +260,9 @@ export function validateReconstruction(program: Reconstruction, context: Operati
     if (
       incomingObject.minimum_offset < 0n ||
       !incomingObject.members.length ||
-      end > incomingObject.minimum_offset + incomingObject.size
+      end !== incomingObject.minimum_offset + incomingObject.size
     )
-      invalid(program.function, 'an incoming object ends before its last member');
+      invalid(program.function, 'an incoming object does not end at its last member');
   }
   // Retained frame accesses of private and object storage are checked in the
   // statement scan above.
