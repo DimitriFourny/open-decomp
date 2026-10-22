@@ -60,6 +60,12 @@ export interface PreparedNativeUnit extends NativeSummaryUnit {
   readonly types: TypeRecoveryResult | null;
   readonly analysis: CallAnalysisResult | null;
   readonly observed_calls: readonly InferredCallee[];
+  /** An allowance-derived work limit stopped part of this preparation: the SSA
+   * limit, the optional type/stack or physical call/stack limit, or the local limit
+   * reached anywhere inside an optional stage (also where a nested pass turned it
+   * into a partial result, as structuring does in the variadic footprint). The unit
+   * then depends on the allowance it was prepared under and is never retained. */
+  readonly limited: boolean;
   readonly entry_prefix?: NativeInterface;
   readonly context_assumptions?: NativeContext;
   /** On a context unit: the context-free result of the baseline body, proven on
@@ -103,8 +109,11 @@ export function nativeDependencies(
   );
   const sourceConstant = sourceConstantValues(definitions, context, input.image.id);
   const constant = (value: Value) => knownConstants?.get(value.id) ?? sourceConstant(value);
+  // Content-derived, like every entity and evidence ID: the project is named by its
+  // bytes and slice, never by its random project ID (which made context evidence IDs,
+  // and the emitter's reference interning and work, differ between equal projects).
   const scope = fingerprint([
-    input.scope.store.project_id,
+    input.image.selected_slice_id,
     input.revision,
     input.image.sha256,
     input.native_types.map((record) => [record.id, record.status, record.evidence_ids]),
@@ -225,6 +234,7 @@ export function prepareNativeUnit(
       analysis: null,
       observed_calls: [],
       reasons: graph.coverage.reasons,
+      limited: false,
     };
   const lifted = components.lifter.lift(graph, abi, context);
   const liftedNodes = boundIR(lifted.ir, context);
@@ -233,7 +243,9 @@ export function prepareNativeUnit(
     ir: SSAForm,
     nodes: number;
   const ssaLimit = Math.floor(((context.remainingWork?.() ?? context.budget.work) * 3) / 4);
-  let ssaWork = 0;
+  let ssaWork = 0,
+    // Set whenever a preparation limit throws, even where a nested pass catches it.
+    limited = false;
   const ssaContext: OperationContext = {
     ...context,
     budget: { ...context.budget, work: ssaLimit },
@@ -243,6 +255,7 @@ export function prepareNativeUnit(
     checkpoint(work) {
       if (ssaWork + work > ssaLimit) {
         context.checkpoint(0);
+        limited = true;
         throw new OperationError({
           code: 'resource_limit',
           severity: 'warning',
@@ -304,6 +317,7 @@ export function prepareNativeUnit(
       entry_prefix,
       dependencies: nativeDependencies(input, lifted.ir, context),
       reasons: [...graph.coverage.reasons, `native SSA preparation work limit (${details.limit})`],
+      limited: true,
     };
   }
   const calls = resolveCalls(ir, image, input.functions, input.references, false, context);
@@ -327,6 +341,7 @@ export function prepareNativeUnit(
     checkpoint(work) {
       if (used + work > workLimit) {
         context.checkpoint(0);
+        limited = true;
         throw new OperationError({
           code: 'resource_limit',
           severity: 'warning',
@@ -397,6 +412,7 @@ export function prepareNativeUnit(
       throw error;
     context.checkpoint(0);
     optionalWorkComplete = false;
+    limited = true;
     reasons.push(`native optional type/stack work limit (${workLimit})`);
     types = null;
   }
@@ -423,15 +439,22 @@ export function prepareNativeUnit(
       )
         throw error;
       context.checkpoint(0);
+      limited = true;
       reasons.push(`native physical call/stack work limit (${details.limit})`);
       analysis = null;
     }
   }
   // Optional too: a footprint the local allowance (or a reconstruction bound)
-  // cannot afford stays unknown, and the body keeps its physical interface.
+  // cannot afford stays unknown, and the body keeps its physical interface. The
+  // footprint sees no remaining-work figure, so no limit inside it (structuring,
+  // the local validation allowance) derives from the allowance: only the local
+  // limit can stop it, and that marks the unit limited.
   let variadic: NativeVariadicFootprint | null = null;
   try {
-    if (!base.budget_truncated) variadic = nativeVariadicFootprint(ir, types, abi, analysis, local);
+    if (!base.budget_truncated) {
+      const { remainingWork: _hidden, ...footprint } = local;
+      variadic = nativeVariadicFootprint(ir, types, abi, analysis, footprint);
+    }
   } catch (error) {
     const details = error instanceof OperationError ? error.diagnostic.details : undefined;
     if (
@@ -441,6 +464,7 @@ export function prepareNativeUnit(
     )
       throw error;
     context.checkpoint(0);
+    limited = true;
   }
   const demand_index = createCallResultDemandIndex(ir, abi, context);
   const interface_index = createNativeInterfaceIndex(ir, abi, context);
@@ -457,6 +481,7 @@ export function prepareNativeUnit(
     observed_calls,
     dependencies,
     reasons,
+    limited,
     arity_complete:
       optionalWorkComplete &&
       // Discovery reports an indirect call as unresolved control flow, but the
