@@ -586,12 +586,12 @@ export function projectSourceSignature(
     const constantStep = (operand: Value, offset: bigint, sign: bigint): bigint =>
       offset + sign * BigInt.asIntN(bitWidth(operand.type), constant(operand)!);
     while (pending.length) {
-      context.checkpoint(1);
       const { value: current, offset, exit } = pending.pop()!;
       if (exit) {
         onPath.delete(current.id);
         continue;
       }
+      context.checkpoint(1);
       const active = onPath.get(current.id);
       if (active !== undefined) {
         if (active !== offset) shaped = true;
