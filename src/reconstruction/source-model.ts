@@ -7,7 +7,7 @@ import type {
   OperationContext,
   RegisterDescriptor,
 } from '../core/index.js';
-import type { DataType, Instruction, Value } from '../ir/index.js';
+import type { DataType, Instruction, RegisterBinding, Value } from '../ir/index.js';
 import type { MemoryShapeTransfer } from '../analysis/types/memory-shapes.js';
 import type { LikelyHeuristic, Requirement } from '../core/inference.js';
 import type { NativeContext } from '../service/analysis/native-context.js';
@@ -309,6 +309,14 @@ export type SourceVariadic =
 export function variadicArea(variadic: SourceVariadic | undefined): Value | null {
   return variadic?.kind === 'area' ? variadic.area : null;
 }
+/** The register outputs of a call or unknown effect as the source view prints
+ * them: `register_outputs` may replace the cells of a root with one whole. */
+export function registerOutputs(
+  source: SourcePresentation | undefined,
+  node: { readonly id: string; readonly register_outputs: readonly RegisterBinding[] },
+): readonly RegisterBinding[] {
+  return source?.register_outputs?.get(node.id) ?? node.register_outputs;
+}
 /** One named member of a frame object, in entry-SP coordinates. Bytes between
  * members are padding; every byte stays ordinary, aliasable memory. */
 export interface FrameMember {
@@ -443,6 +451,10 @@ export interface SourcePresentation {
   readonly forwarded_reloads?: ReadonlyMap<string, readonly string[]>;
   /** Ordered pure definitions after an original node; control anchors emit before control. */
   readonly definitions?: ReadonlyMap<string, readonly Extract<Instruction, { kind: 'assign' }>[]>;
+  /** Source view (E3): by call or unknown-effect id, its register outputs when
+   * one whole output replaces the cells of a root it writes (each cell is then
+   * a slice of that whole); other nodes keep their own `register_outputs`. */
+  readonly register_outputs?: ReadonlyMap<string, readonly RegisterBinding[]>;
   /** Source view only: the callee-side variadic interface (`va_start`). */
   readonly variadic?: SourceVariadic;
 }
