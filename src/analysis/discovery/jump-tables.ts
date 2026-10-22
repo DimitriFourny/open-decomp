@@ -2,9 +2,11 @@ import type {
   Address,
   Arm64Payload,
   DecodedInstruction,
+  JumpTableEntryFact,
   LoadedImage,
   OperationContext,
   RegisterDescriptor,
+  RegisterFact,
   ResolvedJumpTable,
   X86Payload,
 } from '../../core/index.js';
@@ -185,6 +187,12 @@ export interface JumpTableProofInput {
   readonly max_entries: number;
   /** `jumpTableChain` of this same input when the caller already walked it. */
   readonly chain?: readonly DecodedInstruction[];
+  /** Register facts at the chain start by root; other roots start opaque. A given state is
+   * used as is: no register facts are derived. */
+  readonly entry_state?: ReadonlyMap<string, RegisterFact>;
+  /** Full-width integer roots every call preserves (the image ABI's callee-saved registers).
+   * Without them a call forgets every register fact. */
+  readonly preserved_registers?: ReadonlySet<string>;
 }
 export type JumpTableProof = Omit<ResolvedJumpTable, 'evidence_ids'>;
 
@@ -216,33 +224,67 @@ export function jumpTableChain(
   return chain;
 }
 
-/** Prove the complete target set of one indirect branch, or return undefined.
+/** ARM64 encodings whose register writes their operands do not name (pointer authentication
+ * and other hints writing x16, x17 or x30; exception generation): the register-fact transfer
+ * forgets every value there. */
+const ARM64_WRITES_UNNAMED = /^(?:PAC|AUT|XPAC|CHKFEAT|HINT_)|_exception$/;
+/** An opaque (presentation-only) ARM64 operand naming a general register, such as a
+ * post-indexed `[xN], #imm` list address: whatever it writes is unnamed too. Opaque
+ * immediates and FP/SIMD registers name no general register. */
+const GENERAL_REGISTER_TEXT = /\b(?:[xw](?:\d+|zr)|w?sp)\b/i;
+
+interface Stepper {
+  readonly registers: ReadonlyMap<string, Node>;
+  /** The value each root had at the start, for roots seeded or read before any write. */
+  readonly initial: ReadonlyMap<string, Node>;
+  /** Opaque results of indexed loads that selected no table entry, with their address inputs. */
+  readonly indexed: ReadonlyMap<string, readonly Node[]>;
+  /** Guard bounds by value key. */
+  readonly facts: ReadonlyMap<string, Bound>;
+  seed(root: string, fact: RegisterFact | undefined): Node;
+  read(register: RegisterDescriptor): Node;
+  bound(node: Node): Bound;
+  /** The register fact a value satisfies, or undefined for an unconstrained one. */
+  fact(node: Node): RegisterFact | undefined;
+  x86Load(
+    instruction: DecodedInstruction,
+    memory: X86Payload['memory'][number],
+    signed: boolean,
+  ): Node | undefined;
+  step(instruction: DecodedInstruction, payload: Arm64Payload | X86Payload): void;
+  /** The bound a conditional branch establishes on the edge to `next`. */
+  guardFact(instruction: DecodedInstruction, next: DecodedInstruction): void;
+}
+
+/** The prover's exact evaluators over one symbolic register, slot and flag state.
  *
- * Evaluates the `jumpTableChain` ending at the branch. Values start opaque at the chain
- * start. Only exact integer moves, add/sub/shift/extension, PC-relative
- * constants, compare flags and nonvolatile stack/register slot forwarding are
- * modeled; any other instruction forgets every register, flag and slot it may
- * change (all of them on ARM64). The branch target must be a function of exactly
- * one load from a constant table base plus a stride-scaled index whose unsigned
- * maximum is established by a conditional branch on the chain (an unsigned
- * compare of that very index value against a constant) and whose entries lie
- * in immutable file-backed bytes free of relocations. Every computed target
- * must be executable (and aligned on ARM64). Callers must re-check that the
- * chain stays single-entry in the final graph and that targets decode there.
- */
-export function proveJumpTable(
-  input: JumpTableProofInput,
-  context: OperationContext,
-): JumpTableProof | undefined {
-  const { image, branch } = input;
-  const chain = input.chain ?? jumpTableChain(input, context);
-  if (chain.length < 3) return undefined;
+ * Only exact integer moves, add/sub/shift/extension, PC-relative constants, compare flags and
+ * nonvolatile stack/register slot forwarding are modeled; any other instruction forgets every
+ * register, flag and slot it may change. An ARM64 payload lists no register accesses: the
+ * prover forgets every value there, the register-fact transfer (`precise`) only the registers
+ * the instruction names (every register operand and a written-back base). */
+function createStepper(precise: boolean): Stepper {
   const values = new Values();
   const registers = new Map<string, Node>();
+  const initial = new Map<string, Node>();
+  const indexed = new Map<string, readonly Node[]>();
   const slots = new Map<string, { base: string; offset: bigint; size: number; value: Node }>();
   const facts = new Map<string, Bound>();
+  const forgotten = new Set<string>();
+  let cleared = false;
   let flags: Flags | null = null;
 
+  /** Start a root from a fact (opaque without one). */
+  const seed = (root: string, fact: RegisterFact | undefined): Node => {
+    const node = !fact
+      ? values.sym()
+      : fact.kind === 'const'
+        ? values.constant(fact.value)
+        : values.zext(fact.bits, values.sym());
+    registers.set(root, node);
+    initial.set(root, node);
+    return node;
+  };
   const read = (register: RegisterDescriptor): Node => {
     if (register.role === 'zero') return values.constant(0n);
     if (register.offset_bits !== 0) return values.sym();
@@ -250,8 +292,13 @@ export function proveJumpTable(
     if (!root) {
       root = values.sym();
       registers.set(register.root, root);
+      if (!cleared && !forgotten.has(register.root)) initial.set(register.root, root);
     }
     return values.zext(register.width_bits, root);
+  };
+  const forget = (root: string): void => {
+    registers.delete(root);
+    forgotten.add(root);
   };
   const write = (register: RegisterDescriptor, value: Node): void => {
     if (register.role === 'zero' || register.write_rule === 'discard') return;
@@ -259,10 +306,24 @@ export function proveJumpTable(
       registers.set(register.root, value);
     else if (register.offset_bits === 0 && register.write_rule === 'zero_extend_root')
       registers.set(register.root, values.zext(register.width_bits, value));
-    else registers.delete(register.root);
+    else forget(register.root);
   };
   const reset = (): void => {
     registers.clear();
+    slots.clear();
+    flags = null;
+    cleared = true;
+  };
+  const unmodeled = (payload: Arm64Payload): void => {
+    if (!precise) return reset();
+    for (const operand of payload.operands)
+      if (operand.kind === 'register') forget(operand.register.root);
+      else if (
+        (operand.kind === 'memory' || operand.kind === 'scalable_memory') &&
+        operand.writeback !== 'none' &&
+        'root' in operand.base
+      )
+        forget(operand.base.root);
     slots.clear();
     flags = null;
   };
@@ -318,7 +379,12 @@ export function proveJumpTable(
       });
     const base = sum.terms.map((term) => `${term.node.key}<<${term.shift}`).join('|');
     const slot = slots.get(`${base}@${sum.c}:${size}`);
-    const raw = slot?.value ?? values.zext(size * 8, values.sym());
+    let raw = slot?.value;
+    if (!raw) {
+      const opaque = values.sym();
+      if (selector) indexed.set(opaque.key, [address, selector.node]);
+      raw = values.zext(size * 8, opaque);
+    }
     return signed ? values.sext(size * 8, raw) : raw;
   };
   const store = (address: Node | undefined, size: number, value: Node): void => {
@@ -438,7 +504,7 @@ export function proveJumpTable(
     const isStore = /^STU?R(B|H)?_/.test(encoding);
     if (memory?.kind === 'memory' && d && (isLoad || isStore)) {
       const size = memory.access_bits / 8;
-      if (memory.index && memory.writeback !== 'none') return reset();
+      if (memory.index && memory.writeback !== 'none') return unmodeled(payload);
       const base = read(memory.base);
       let address =
         memory.writeback === 'post' ? base : values.add(base, values.constant(memory.displacement));
@@ -477,7 +543,7 @@ export function proveJumpTable(
       if (/^[A-Z]+S_/.test(encoding)) flags = null;
       return;
     }
-    reset();
+    unmodeled(payload);
   };
 
   const x86Address = (memory: X86Payload['memory'][number]): Node | undefined => {
@@ -595,7 +661,7 @@ export function proveJumpTable(
           access.access !== 'none' &&
           access.access !== 'conditional_read'
         )
-          registers.delete(access.register.root);
+          forget(access.register.root);
       if (payload.memory.some((memory) => memory.access !== 'read' && memory.access !== 'none'))
         slots.clear();
     }
@@ -645,71 +711,381 @@ export function proveJumpTable(
       });
   };
 
+  return {
+    registers,
+    initial,
+    indexed,
+    facts,
+    seed,
+    read,
+    bound,
+    fact(node) {
+      if (node.k === 'const') return { kind: 'const', value: node.v };
+      const max = bound(node).max;
+      if (max === 0n) return { kind: 'const', value: 0n };
+      const bits = max.toString(2).length;
+      return bits < 64 ? { kind: 'zext', bits } : undefined;
+    },
+    x86Load,
+    step(instruction, payload) {
+      if (payload.architecture === 'arm64') arm64(instruction, payload);
+      else x86(instruction, payload);
+    },
+    guardFact,
+  };
+}
+
+/** Evaluate the chain from `entry`: the proof, or else the roots whose start values a
+ * register fact could supply (`neededRoots`). */
+function evaluateChain(
+  input: JumpTableProofInput,
+  chain: readonly DecodedInstruction[],
+  entry: ReadonlyMap<string, RegisterFact> | undefined,
+  context: OperationContext,
+): { readonly proof?: JumpTableProof; readonly needed: ReadonlySet<string> } {
+  const { image, branch } = input;
+  const none = { needed: new Set<string>() };
+  const state = createStepper(false);
+  for (const [root, fact] of entry ?? []) state.seed(root, fact);
   let target: Node | undefined;
   for (let index = 0; index < chain.length; index++) {
     context.checkpoint(1);
     const instruction = chain[index]!,
       payload = instruction.payload;
-    if (!payload || payload.architecture !== image.target.architecture) return undefined;
+    if (!payload || payload.architecture !== image.target.architecture) return none;
     if (instruction === branch) {
       if (payload.architecture === 'arm64') {
         const operand = payload.operands[0];
         if (payload.canonical_encoding !== 'BR_64_branch_reg' || operand?.kind !== 'register')
-          return undefined;
-        target = read(operand.register);
+          return none;
+        target = state.read(operand.register);
       } else {
         const operand = payload.operands[0];
-        if (payload.mnemonic.toLowerCase() !== 'jmp') return undefined;
-        if (operand?.kind === 'register') target = read(operand.register);
+        if (payload.mnemonic.toLowerCase() !== 'jmp') return none;
+        if (operand?.kind === 'register') target = state.read(operand.register);
         else if (operand?.kind === 'memory' && operand.memory.access_bits === 64)
-          target = x86Load(instruction, operand.memory, false);
+          target = state.x86Load(instruction, operand.memory, false);
       }
       break;
     }
     if (instruction.flow.kind === 'branch') {
-      if (instruction.flow.conditional) guardFact(instruction, chain[index + 1]!);
+      if (instruction.flow.conditional) state.guardFact(instruction, chain[index + 1]!);
       continue;
     }
-    if (payload.architecture === 'arm64') arm64(instruction, payload);
-    else x86(instruction, payload);
+    state.step(instruction, payload);
   }
-  if (!target) return undefined;
+  if (!target) return none;
   const entries = new Map<string, Extract<Node, { k: 'entry' }>>();
-  if (!inputs(target, entries) || entries.size !== 1) return undefined;
-  const entry = [...entries.values()][0]!;
-  const limit = bound(entry.index);
-  if (!limit.guard || limit.max >= BigInt(input.max_entries)) return undefined;
+  if (!inputs(target, entries) || entries.size !== 1) return { needed: neededRoots(state, target) };
+  const selected = [...entries.values()][0]!;
+  const limit = state.bound(selected.index);
+  if (!limit.guard || limit.max >= BigInt(input.max_entries))
+    return { needed: neededRoots(state, target) };
   const count = Number(limit.max) + 1;
-  const length = (count - 1) * entry.stride + entry.bytes;
-  const table: Address = { image_id: image.id, space: 'va', value: entry.table };
+  const length = (count - 1) * selected.stride + selected.bytes;
+  const table: Address = { image_id: image.id, space: 'va', value: selected.table };
   const bytes = recoverDataBytes(image, table, length, context);
-  if (!bytes) return undefined;
+  if (!bytes) return none;
   const targets: Address[] = [];
   for (let index = 0; index < count; index++) {
     context.checkpoint(1);
     let raw = 0n;
-    for (let byte = entry.bytes - 1; byte >= 0; byte--)
-      raw = (raw << 8n) | BigInt(bytes[index * entry.stride + byte]!);
-    const value = entry.signed ? BigInt.asUintN(64, BigInt.asIntN(entry.bytes * 8, raw)) : raw;
+    for (let byte = selected.bytes - 1; byte >= 0; byte--)
+      raw = (raw << 8n) | BigInt(bytes[index * selected.stride + byte]!);
+    const value = selected.signed
+      ? BigInt.asUintN(64, BigInt.asIntN(selected.bytes * 8, raw))
+      : raw;
     const destination = evaluate(target, value);
     if (
       destination === undefined ||
       !input.executable(destination) ||
       (image.target.architecture === 'arm64' && destination % 4n !== 0n)
     )
-      return undefined;
+      return none;
     targets.push({ image_id: image.id, space: 'va', value: destination });
   }
   return {
-    branch: branch.id,
-    selector: { instruction: entry.load.id, register: entry.selector },
-    table: { start: table, size: BigInt(length) },
-    entry: { bytes: entry.bytes, signed: entry.signed, stride: entry.stride },
-    targets,
-    guard: limit.guard.instruction.id,
-    otherwise: limit.guard.otherwise,
-    // The bound is the guard's own fact on the index value itself.
-    guard_exact: facts.get(entry.index.key) === limit,
-    chain: chain.map((instruction) => instruction.id),
+    proof: {
+      branch: branch.id,
+      selector: { instruction: selected.load.id, register: selected.selector },
+      table: { start: table, size: BigInt(length) },
+      entry: { bytes: selected.bytes, signed: selected.signed, stride: selected.stride },
+      targets,
+      guard: limit.guard.instruction.id,
+      otherwise: limit.guard.otherwise,
+      // The bound is the guard's own fact on the index value itself.
+      guard_exact: state.facts.get(selected.index.key) === limit,
+      chain: chain.map((instruction) => instruction.id),
+    },
+    needed: none.needed,
   };
+}
+
+/** Roots whose start values feed a failed target through an indexed load: the load's base or
+ * index, or a value combined with the loaded entry. Empty when no indexed load feeds it, as for
+ * a plain register branch, where no start value can make a table. */
+function neededRoots(state: Stepper, target: Node): Set<string> {
+  const roots = new Map([...state.initial].map(([root, node]) => [node.key, root]));
+  const needed = new Set<string>();
+  const seen = new Set<string>();
+  let indexed = false;
+  const visit = (node: Node): void => {
+    if (seen.has(node.key)) return;
+    seen.add(node.key);
+    switch (node.k) {
+      case 'const':
+        return;
+      case 'sym': {
+        const root = roots.get(node.key);
+        if (root) needed.add(root);
+        const address = state.indexed.get(node.key);
+        if (address) {
+          indexed = true;
+          address.forEach(visit);
+        }
+        return;
+      }
+      case 'entry':
+        indexed = true;
+        return visit(node.index);
+      case 'add':
+        visit(node.a);
+        return visit(node.b);
+      default:
+        return visit(node.a);
+    }
+  };
+  visit(target);
+  return indexed ? needed : new Set();
+}
+
+/** A register's value on the paths reaching an instruction, with the instructions defining it
+ * and the calls it survives; `value: null` is unknown (⊤). */
+interface FactCell {
+  readonly value: RegisterFact | null;
+  readonly definitions: readonly DecodedInstruction[];
+  readonly calls: readonly DecodedInstruction[];
+}
+const UNKNOWN: FactCell = { value: null, definitions: [], calls: [] };
+
+/** Width of the narrowest zero extension a fact satisfies. */
+const factBits = (fact: RegisterFact): number =>
+  fact.kind === 'zext' ? fact.bits : fact.value === 0n ? 0 : fact.value.toString(2).length;
+function union(
+  a: readonly DecodedInstruction[],
+  b: readonly DecodedInstruction[],
+): readonly DecodedInstruction[] {
+  const extra = b.filter((item) => !a.includes(item));
+  return extra.length ? [...a, ...extra] : a;
+}
+/** Least upper bound: equal constants stay, otherwise the wider zero extension (64 bits is ⊤). */
+function joinCell(a: FactCell, b: FactCell): FactCell {
+  if (!a.value) return a;
+  if (!b.value) return b;
+  let value: RegisterFact | null = a.value;
+  if (a.value.kind !== 'const' || b.value.kind !== 'const' || a.value.value !== b.value.value) {
+    const bits = Math.max(factBits(a.value), factBits(b.value));
+    value =
+      a.value.kind === 'zext' && a.value.bits === bits
+        ? a.value
+        : bits < 64
+          ? { kind: 'zext', bits }
+          : null;
+  }
+  if (!value) return UNKNOWN;
+  const definitions = union(a.definitions, b.definitions),
+    calls = union(a.calls, b.calls);
+  return value === a.value && definitions === a.definitions && calls === a.calls
+    ? a
+    : { value, definitions, calls };
+}
+
+/** Whether an instruction may write a root: x86 from its exact register accesses, ARM64 from
+ * every register operand and a written-back base. */
+function writes(payload: Arm64Payload | X86Payload, root: string): boolean {
+  if (payload.architecture === 'x86_64')
+    return payload.registers.some(
+      (access) =>
+        access.register.root === root &&
+        access.access !== 'read' &&
+        access.access !== 'none' &&
+        access.access !== 'conditional_read',
+    );
+  return payload.operands.some(
+    (operand) =>
+      (operand.kind === 'register' && operand.register.root === root) ||
+      ((operand.kind === 'memory' || operand.kind === 'scalable_memory') &&
+        operand.writeback !== 'none' &&
+        'root' in operand.base &&
+        operand.base.root === root),
+  );
+}
+/** Whether a written value may depend on the root's previous value (it keeps its provenance). */
+function reads(payload: Arm64Payload | X86Payload, root: string): boolean {
+  if (payload.architecture === 'x86_64')
+    return payload.registers.some(
+      (access) => access.register.root === root && access.access.includes('read'),
+    );
+  return payload.operands.some(
+    (operand, index) =>
+      (operand.kind === 'register' && index > 0 && operand.register.root === root) ||
+      (operand.kind === 'memory' && (operand.base.root === root || operand.index?.root === root)),
+  );
+}
+
+/** Facts on `needed` roots at `start` that hold on every decoded path into it: a forward
+ * must-dataflow over the decoded instructions reaching `start` (its backward closure over
+ * `incoming`, which includes proved table edges), where roots start unknown. Lattice
+ * ⊥ / constant / zero-extended from k bits / ⊤. The transfer is the prover's own stepper,
+ * forgetting what an instruction may write; a call keeps only `preserved_registers` (none
+ * without them). Roots at ⊥ (no root reaches `start`) or ⊤ have no fact. */
+function registerFacts(
+  input: JumpTableProofInput,
+  start: DecodedInstruction,
+  needed: ReadonlySet<string>,
+  context: OperationContext,
+): JumpTableEntryFact[] {
+  if (input.is_entry(start.address.value)) return [];
+  const roots = [...needed].sort();
+  const successors = new Map<DecodedInstruction, DecodedInstruction[]>();
+  const entries: DecodedInstruction[] = [];
+  const seen = new Set([start]);
+  for (const stack = [start]; stack.length;) {
+    context.checkpoint(1);
+    const current = stack.pop()!;
+    if (input.is_entry(current.address.value)) {
+      entries.push(current);
+      continue;
+    }
+    for (const previous of input.incoming.get(current.address.value) ?? []) {
+      const list = successors.get(previous);
+      if (list) list.push(current);
+      else successors.set(previous, [current]);
+      if (!seen.has(previous)) {
+        seen.add(previous);
+        stack.push(previous);
+      }
+    }
+  }
+  const unknown = roots.map(() => UNKNOWN);
+  const architecture = input.image.target.architecture;
+  const transfer = (
+    instruction: DecodedInstruction,
+    state: readonly FactCell[],
+  ): readonly FactCell[] => {
+    const payload = instruction.payload,
+      flow = instruction.flow;
+    if (!payload || payload.architecture !== architecture || flow.kind === 'unknown')
+      return unknown;
+    if (flow.kind === 'call')
+      return state.map((cell, index) =>
+        cell.value && input.preserved_registers?.has(roots[index]!)
+          ? { ...cell, calls: union(cell.calls, [instruction]) }
+          : UNKNOWN,
+      );
+    if (payload.architecture === 'arm64') {
+      if (
+        payload.behavior === 'unknown' ||
+        payload.behavior === 'undefined' ||
+        ARM64_WRITES_UNNAMED.test(payload.canonical_encoding) ||
+        payload.operands.some(
+          (operand) => operand.kind === 'opaque' && GENERAL_REGISTER_TEXT.test(operand.text),
+        )
+      )
+        return unknown;
+      // ARM64 branches and returns write no general register (calls are handled above).
+      if (flow.kind === 'branch' || flow.kind === 'indirect_branch' || flow.kind === 'return')
+        return state;
+    }
+    const written = roots.map((root) => writes(payload, root));
+    if (!written.includes(true)) return state;
+    const stepper = createStepper(true);
+    const seeded = roots.map((root, index) => stepper.seed(root, state[index]!.value ?? undefined));
+    stepper.step(instruction, payload);
+    return state.map((cell, index) => {
+      const node = stepper.registers.get(roots[index]!);
+      if (!written[index] || node === seeded[index]) return cell;
+      const value = node && stepper.fact(node);
+      if (!value) return UNKNOWN;
+      return cell.value && reads(payload, roots[index]!)
+        ? { value, definitions: union(cell.definitions, [instruction]), calls: cell.calls }
+        : { value, definitions: [instruction], calls: [] };
+    });
+  };
+  const states = new Map<DecodedInstruction, readonly FactCell[]>();
+  const queue: DecodedInstruction[] = [];
+  const queued = new Set<DecodedInstruction>();
+  for (const entry of entries) {
+    states.set(entry, unknown);
+    queue.push(entry);
+    queued.add(entry);
+  }
+  for (let cursor = 0; cursor < queue.length; cursor++) {
+    context.checkpoint(1);
+    const instruction = queue[cursor]!;
+    queued.delete(instruction);
+    const out = transfer(instruction, states.get(instruction)!);
+    for (const next of successors.get(instruction) ?? []) {
+      const before = states.get(next);
+      let after = out;
+      if (before) {
+        const joined = before.map((cell, index) => joinCell(cell, out[index]!));
+        after = joined.every((cell, index) => cell === before[index]) ? before : joined;
+      }
+      if (after === before) continue;
+      states.set(next, after);
+      if (!queued.has(next)) {
+        queued.add(next);
+        queue.push(next);
+      }
+    }
+  }
+  const order = (a: DecodedInstruction, b: DecodedInstruction): number =>
+    a.address.value < b.address.value ? -1 : a.address.value > b.address.value ? 1 : 0;
+  return (states.get(start) ?? []).flatMap((cell, index) =>
+    cell.value
+      ? [
+          {
+            register: roots[index]!,
+            value: cell.value,
+            definitions: [...cell.definitions].sort(order).map((item) => item.id),
+            calls: [...cell.calls].sort(order).map((item) => item.id),
+          },
+        ]
+      : [],
+  );
+}
+
+/** Prove the complete target set of one indirect branch, or return undefined.
+ *
+ * Evaluates the `jumpTableChain` ending at the branch with the stepper's exact evaluators.
+ * Values start opaque at the chain start, or from `entry_state`. The branch target must be a
+ * function of exactly one load from a constant table base plus a stride-scaled index whose
+ * unsigned maximum is established by a conditional branch on the chain (an unsigned compare of
+ * that very index value against a constant) and whose entries lie in immutable file-backed
+ * bytes free of relocations. Every computed target must be executable (and aligned on ARM64).
+ *
+ * Without `entry_state`, a target that fails only for start values feeding an indexed load
+ * (its table base, its index, or a base combined with the entry) is evaluated once more from
+ * the `registerFacts` on exactly those roots, recorded as `entry_facts`. Callers must re-check
+ * that the chain stays single-entry in the final graph, that targets decode there and that
+ * `entry_facts` still hold on the final graph's predecessors.
+ */
+export function proveJumpTable(
+  input: JumpTableProofInput,
+  context: OperationContext,
+): JumpTableProof | undefined {
+  const chain = input.chain ?? jumpTableChain(input, context);
+  if (chain.length < 3) return undefined;
+  const first = evaluateChain(input, chain, input.entry_state, context);
+  if (first.proof || input.entry_state || !first.needed.size) return first.proof;
+  const known = registerFacts(input, chain[0]!, first.needed, context);
+  if (!known.length) return undefined;
+  const { proof } = evaluateChain(
+    input,
+    chain,
+    new Map(known.map((fact) => [fact.register, fact.value])),
+    context,
+  );
+  return proof && { ...proof, entry_facts: known };
 }
