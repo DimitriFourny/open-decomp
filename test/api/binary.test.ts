@@ -94,6 +94,11 @@ test(
     assert.equal(second.revision, revision);
     assert.equal(emission(hit).cache, 'hit');
     assert.equal(emission(hit).emission.text, emission(computed).emission.text);
+    // Work is per delivery: serving the stored result costs less than the run that computed it.
+    const computedWork = emission(computed).work;
+    const hitWork = emission(hit).work;
+    assert.ok(computedWork !== undefined && hitWork !== undefined);
+    assert.ok(hitWork > 0 && hitWork < computedWork && computedWork <= computed.budget.work);
     assert.deepEqual(hit.artifacts, computed.artifacts);
     const python = await second.decompile(
       { id: emission(hit).function_id },
@@ -157,6 +162,8 @@ test(
     assert.equal(hit.state, computed.state);
     assert.equal(emission(hit).cache, 'hit');
     assert.deepEqual(emission(hit).emission, emission(computed).emission);
+    // Artifact delivery materializes the stored analysis and keeps the delivery's own work.
+    assert.ok(emission(computed).work! > 0 && emission(hit).work! > 0);
     assert.deepEqual(hit.artifacts, computed.artifacts);
   },
 );

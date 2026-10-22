@@ -65,10 +65,11 @@ The work splits into four lanes. Lanes are independent; inside a lane, follow th
 
 Every item has to show that brotli `main` and SQLite `whereLoopAddBtreeIndex` (and every corpus function) still finish within the 10M work limit, and what it costs. Today nothing reports work consumed: `decompile --json` shows only the budget, and earlier rounds used throwaway instrumentation. The counter is `consumed` in `createOperationContext` (`src/core/operation.ts:64-140`, `remainingWork()`).
 
-- [ ] Expose the work an operation consumed in the decompile result. Use a field that does not take part in cache identity or output fingerprints, for example operation metadata next to `budget`.
+- [x] Expose the work an operation consumed in the decompile result. Use a field that does not take part in cache identity or output fingerprints, for example operation metadata next to `budget`.
   - Have the odbench OD lane record it per function (`FunctionResult.work`, `scripts/bench/odbench/od-worker.ts`, `lane-od.ts`).
   - Have `report.ts` print, in section 8, per-function work, the largest functions, and the functions above 80% of the limit.
   - Acceptance: `bun run bench run od --label m1 --tier full` records `work` for every function. brotli `main` and `whereLoopAddBtreeIndex` appear in section 8 with their counts. Outputs are byte-identical to `od-head`.
+  - Done: `data.work` on `function_decompile` results (per delivery; a cache `hit` reports the cost of serving the stored result), `FunctionResult.work` per function, report section 8. Full-tier lane `od-rm3-m1`: all 231 texts byte-identical to `od-head`; brotli `main` 9,223,523 and `whereLoopAddBtreeIndex` 9,429,670 of 10,000,000 (the latter is not a corpus function; measured with a fresh cache via the CLI).
 
 ## R: `physical_return`
 

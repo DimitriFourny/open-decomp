@@ -86,6 +86,10 @@ export async function materializeDecompilation(
   return functionDecompileResultSchema.parse({
     ...stored,
     artifacts: result.artifacts,
-    data: { ...stored.data, cache: result.data.cache },
+    data: {
+      ...stored.data,
+      cache: result.data.cache,
+      ...(result.data.work === undefined ? {} : { work: result.data.work }),
+    },
   });
 }
