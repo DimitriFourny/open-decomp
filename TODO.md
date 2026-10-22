@@ -156,7 +156,7 @@ The renderer prints `physical_return` at `src/emitters/renderer.ts:8130-8199` wh
 
 ### R5: A vector copy or fill temporary in the FP register is not a result
 
-- [ ] **Problem:**
+- [x] **Problem:**
   - `vdbePmaReaderClear` (`static void`, ends with `memset` of the reader) prints `physical_return(… "arm64:x0:0:64", address_4, "arm64:v0:0:64", 0, …)`. Here x0 is a leftover `vdbeIncrFree` result and v0 is the `movi v0.2d,#0` used by `stp q0,q0`.
   - `matrix_aggregate` (ELF/PE `-O2`, both stripped) returns its struct through the hidden pointer. OD prints `rax` = the sret pointer echo plus the `zmm0` halves of a 16-byte `movups` copy. Ghidra prints `long *matrix_aggregate(...)` with `return param_2;`.
   - **Root cause:**
@@ -180,6 +180,7 @@ The renderer prints `physical_return` at `src/emitters/renderer.ts:8130-8199` wh
     - `vdbePmaReaderClear` prints `void` with no `physical_return`.
     - The four `matrix_aggregate` texts print `<T>* …(<T>* address, …)` ending `return address;`.
     - Nothing else changes. The by-value struct parameter is S4's job.
+  - Evidence (2026-10-22): `selectSourcePrimaryResult` gains the named predicate `incidentalFloatingCarrier()` (checked before the untyped-FP `explicit` rule; records `incidental_result` + `abi_conformance` "callers read no floating-point result register"). Constants link to a stored datum only through the defining instruction of a _constant_ datum. OD lane `od-rm3-r5` vs `od-rm3-s1` (main): exactly the five acceptance texts differ (`vdbePmaReaderClear` → `void`, 4 × `matrix_aggregate` → `…_arg0_…* …(…* address, …)` / `return address;`; physical_return 1 → 0 each; texts with it 18 → 11 with R1); their checked views are byte-identical. Tests: `source-results.test.ts` AAPCS64 zero-fill (provenance-linked cells), SysV/Win64 128-bit copy executed in C and Python; 64-bit stored scalar stays explicit, vector-typed carrier stays the vector result. reconstruction/66.
 
 ### R6: An integer-built double in the FP register is a `double` result
 
@@ -212,7 +213,8 @@ A prototype of S1–S3 (unsound, measurement only) gave these results:
 
 ### S1: Incoming scalar stack arguments become formals by per-slot reach
 
-- [ ] **Problem.** `createFunctionApi` has 11 source parameters; on AAPCS64, arguments 9–11 are on the caller's stack. OD reads `*(uint64_t *)((uintptr_t)entry_sp + 0/8/16)`. Ghidra prints `param_9..param_11`.
+- [x] **Problem.** `createFunctionApi` has 11 source parameters; on AAPCS64, arguments 9–11 are on the caller's stack. OD reads `*(uint64_t *)((uintptr_t)entry_sp + 0/8/16)`. Ghidra prints `param_9..param_11`.
+  - **Done (S1):** `incomingFloor` in `expose()`, per-slot binding with `incoming_formal` / `incoming_arguments_private`; full-tier OD lane changes only `createFunctionApi` (18 → 0 `entry_sp`, `…, arg8, arg9, opaque_1* arg10`, negative slots as `frame.*`), checked views of the 13 `entry_sp` functions byte-identical; float/narrower slots not added (no corpus need).
   - **Root cause:** `src/reconstruction/source-stack.ts:1394-1433` binds incoming loads to formals (via `incomingStack`, `source-planner.ts:1356-1377`) only when all of these hold:
     - `!escaped`. But any unresolved call sets it (`:609-614`), and every callee summary here was cut by budget.
     - No store through a non-stack pointer anywhere in the function (`:1409`).
