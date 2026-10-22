@@ -1406,6 +1406,7 @@ const localEnvironmentWriters = new WeakMap<
 function environmentWriter(
   input: SourceFactsInput,
   ir: SSAForm,
+  index: NativeInterfaceIndex | undefined,
   interfaces: ReadonlyMap<string, NativeInterface>,
   context: OperationContext,
 ): boolean {
@@ -1413,10 +1414,12 @@ function environmentWriter(
   const cached = localEnvironmentWriters.get(ir);
   if (cached?.functions === input.functions && cached.references === input.references)
     return useBuilt(context, cached).writer;
+  // The interface structure is already built for this body's observation.
+  const prepared = index?.preparation(ir, context);
   const built = buildOnce(context, (quiet) => ({
     functions: input.functions,
     references: input.references,
-    writer: localEnvironmentWriter(input, ir, quiet),
+    writer: localEnvironmentWriter(input, ir, prepared, quiet),
   }));
   localEnvironmentWriters.set(ir, built);
   return built.writer;
@@ -1425,15 +1428,17 @@ function environmentWriter(
 function localEnvironmentWriter(
   input: SourceFactsInput,
   ir: SSAForm,
+  prepared: ReturnType<NativeInterfaceIndex['preparation']> | undefined,
   context: OperationContext,
 ): boolean {
-  const states = new Map(ir.register_states.map((state) => [state.block, state]));
+  const states =
+    prepared?.states ?? new Map(ir.register_states.map((state) => [state.block, state]));
   const entry = new Set<string>(),
     leaving: string[] = [],
     stack: string[] = [];
   for (const binding of states.get(ir.entry)?.entry ?? [])
     if (fpEnvironmentRegister(binding.register)) entry.add(binding.value.id);
-  for (const block of ir.blocks) {
+  for (const block of prepared ? [...prepared.exits, ...prepared.tails] : ir.blocks) {
     context.checkpoint(1);
     const control = block.terminator;
     if (control.kind !== 'return' && !(control.kind === 'indirect' && control.tail_call)) continue;
@@ -1610,7 +1615,7 @@ function observeNativeUnit(
       ],
     };
   }
-  if (environmentWriter(input, unit.ir, interfaces, context))
+  if (environmentWriter(input, unit.ir, unit.interface_index, interfaces, context))
     observed = { ...observed, fp_environment_writer: true };
   if (unit.context_assumptions) {
     const assumed = [
