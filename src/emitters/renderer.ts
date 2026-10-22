@@ -461,6 +461,10 @@ export class Renderer {
   private readonly memberTypes = new Map<string, IntegerCType>();
   /** Offsets of each structure's members this function's text accesses, by structure name. */
   private readonly usedMembers = new Map<string, Set<string>>();
+  /** One IR access node per structure name that printed a member: the subject of
+   * the structure's presentation records (a function-wide subject would cite every
+   * instruction of the function). */
+  private readonly structAccess = new Map<string, string>();
   /** Where the structure bodies are inserted once the accessed members are known. */
   private structureSlot: { readonly at: number; readonly ids: readonly string[] } | null = null;
   private readonly sourceStructs: SourceStructs;
@@ -3349,6 +3353,7 @@ export class Renderer {
     const offsets = this.usedMembers.get(used) ?? new Set<string>();
     offsets.add(usedMemberKey(member));
     this.usedMembers.set(used, offsets);
+    if (node && !this.structAccess.has(used)) this.structAccess.set(used, node);
     let access = indexedStruct
       ? `${baseText}[${this.value(index!)}].${field}`
       : `${baseText}->${field}`;
@@ -9694,25 +9699,30 @@ export class Renderer {
     const external = supportAt !== undefined && this.options.structures === 'external';
     let bodies = this.structureSlot ? this.structureBodies(!external) : [];
     const compacted = bodies.filter((body) => body.gaps.length);
-    // Without the record the rewrite may not apply: keep every gap as a pad member.
-    if (
-      compacted.length &&
-      !this.localValidation.presentation(
-        'compact_struct_members',
-        this.input.function.id,
-        COMPACT_STRUCT_MEMBERS_SCOPE,
-        undefined,
-        `omitted gaps (offset+length): ${compacted
-          .map(
-            (body) =>
-              `${body.name} ${body.gaps
-                .map((gap) => `0x${gap.offset.toString(16)}+${gap.length}`)
-                .join(' ')}`,
-          )
-          .join('; ')}`,
+    if (compacted.length) {
+      const nodes = [
+        ...new Set(compacted.flatMap((body) => this.structAccess.get(body.name) ?? [])),
+      ];
+      const gaps = `omitted gaps (offset+length): ${compacted
+        .map(
+          (body) =>
+            `${body.name} ${body.gaps
+              .map((gap) => `0x${gap.offset.toString(16)}+${gap.length}`)
+              .join(' ')}`,
+        )
+        .join('; ')}`;
+      // Without the record the rewrite may not apply: keep every gap as a pad member.
+      if (
+        !this.localValidation.presentation(
+          'compact_struct_members',
+          nodes[0] ?? this.input.function.id,
+          COMPACT_STRUCT_MEMBERS_SCOPE,
+          nodes,
+          gaps,
+        )
       )
-    )
-      bodies = this.structureBodies(false);
+        bodies = this.structureBodies(false);
+    }
     if (this.structureSlot && !external)
       insert(
         this.structureSlot.at,
