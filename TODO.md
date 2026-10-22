@@ -243,7 +243,7 @@ A prototype of S1–S3 (unsound, measurement only) gave these results:
 ### S2: The frame object coexists with live entry-SP addresses ≥ 0
 
 - [x] **Problem.** `frame()` (`source-stack.ts:1720-1731, 1775-1783`) returns the entry-SP form for the _whole_ frame whenever any address at or above the entry SP is live. The `frame_object` validation record is then `verified` but unused. This accounts for 104 of the 163 lines (createFunctionApi, SysV variadics).
-  - **Done (S2):** object variant `entry`, `frame_object_beside_entry_sp` record (+ a `frame_object` premise for addresses ≥ 0 when escaped); full-tier OD lane changes only the three SysV `matrix_variadic` texts (`entry_sp` lines 38 → 2, 31 → 4, 31 → 4; every negative access `frame.*`), no `struct { } frame;`, checked views of the 13 `entry_sp` functions byte-identical.
+  - **Done (S2):** object variant `entry`, `frame_object_beside_entry_sp` record (+ a `frame_object` premise for addresses ≥ 0 when escaped); full-tier OD lane (on main with S3) changes only the three SysV `matrix_variadic` texts (`entry_sp` lines 37 → 2, 26 → 2, 26 → 2; every negative access `frame.*`), no `struct { } frame;`, checked views of the 13 `entry_sp` functions byte-identical.
   - **Change:**
     - Extend the object variant of `SourceStackStorage` (`source-model.ts:226-234`) with `entry: Value | null`.
     - When the frame object is verified and the entry SP is live, lay out the object from accesses with `end <= 0` (minus the return address) and taken negative addresses.
