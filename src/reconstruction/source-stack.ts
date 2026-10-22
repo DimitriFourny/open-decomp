@@ -1112,7 +1112,20 @@ export function planSourceStack(
           calls.get(node.id)!.arguments.some((value) => tainted.has(value.id)))
       )
         escaped = true;
-      if (node.kind === 'unknown_effect') {
+      // A memory-free unknown effect (an ISA-bounded unlifted SIMD&FP
+      // instruction) neither reads nor writes frame bytes. Lifters emit it only
+      // for forms that read no general-purpose register, so a frame address can
+      // reach its outputs only through a vector input: that input escapes.
+      if (node.kind === 'unknown_effect' && node.clobbers.memory === 'none') {
+        for (const binding of node.register_inputs)
+          if (
+            (binding.register.bank === 'vector' || binding.register.bank === 'float') &&
+            tainted.has(binding.value.id)
+          ) {
+            escaped = true;
+            expose(binding.value);
+          }
+      } else if (node.kind === 'unknown_effect') {
         escaped = true;
         if (fpFailureArms.has(block.id)) guardEffects.add(block.id);
         else reachAll = frameExposed = true;

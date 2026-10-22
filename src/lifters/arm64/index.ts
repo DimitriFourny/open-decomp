@@ -21,6 +21,7 @@ import {
 import {
   ArmSemantics,
   Unsupported,
+  boundedUnknownClobbers,
   fpEnvironmentGuard,
   gp,
   needsFpGuard,
@@ -339,7 +340,19 @@ export class Arm64Lifter implements Lifter<RegisterIR> {
         } catch (error) {
           if (!(error instanceof Unsupported)) throw error;
           report(instruction, error.message);
-          unknown(block, error.message);
+          // A valid SIMD&FP data-processing instruction that falls through has
+          // an ISA-bounded effect; anything else stays fully unknown.
+          const bounded =
+            instruction.validity === 'valid' &&
+            instruction.flow.kind === 'fallthrough' &&
+            payload?.architecture === 'arm64' &&
+            payload.behavior === 'instruction'
+              ? boundedUnknownClobbers(payload)
+              : undefined;
+          if (bounded) {
+            block.unknown(error.message, bounded);
+            reasons.add(error.message);
+          } else unknown(block, error.message);
           if (instruction.flow.kind !== 'fallthrough' && instruction.flow.kind !== 'call') {
             block.terminate({ kind: 'unknown', reason: error.message });
             terminated = true;
