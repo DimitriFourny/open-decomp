@@ -300,25 +300,21 @@ export function sourceFpPresentation(
       reads(marks[cursor]!).forEach(observe);
     }
     const hidden = members.filter((value) => !observed.has(value.id));
-    // Recorded: the definitions whose placeholder, entry spelling or edge copy
-    // would print (call clobbers, entry bindings, phi destinations).
+    // Recorded: the definitions that would print, call-clobber placeholders and
+    // phi destinations (their edge copies). Entry bindings print only inside
+    // those copies or the omitted conditions.
     const outputs = new Set<string>();
     for (const boundary of program.calls.values())
       for (const binding of boundary.outputs) outputs.add(binding.value.id);
     const listed = hidden
-      .filter(
-        (value) =>
-          outputs.has(value.id) ||
-          sources.has(value.id) ||
-          program.expressions.get(value.id)?.kind === 'indeterminate',
-      )
+      .filter((value) => outputs.has(value.id) || sources.has(value.id))
       .map((value) => value.id);
     if (
       !listed.length ||
       validation.presentation(
         'fp_unobserved_epoch',
         program.function.id,
-        'environment epochs (entry bindings, call clobbers and their phi transports) demanded only by omitted guard conditions, directly or through other unobserved values: their placeholders and the edge copies into the listed phi destinations are not printed; checked view and metadata keep them',
+        'environment epochs (entry bindings, call clobbers and their phi transports) demanded only by omitted guard conditions, directly or through other unobserved values: the listed call-clobber placeholders and the edge copies into the listed phi destinations are not printed; checked view and metadata keep them',
         listed,
       )
     )
