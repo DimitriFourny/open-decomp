@@ -424,7 +424,8 @@ A whole-image instrumented run on sqlite3-arm64 found 21 tables proved and 291 d
 
 ### J3: Candidate functions at tail-jump targets
 
-- [ ] **Problem.** In the stripped llvm-clang23 `-O2` cells, `matrix_switch` (ELF `0x401aa0`, PE `0x140001040`) is reached only by the entry point's tail `jmp` with the index fixed at 2.
+- [x] **Problem.** In the stripped llvm-clang23 `-O2` cells, `matrix_switch` (ELF `0x401aa0`, PE `0x140001040`) is reached only by the entry point's tail `jmp` with the index fixed at 2.
+  - **Done (J3):** both stripped cells list `0x401aa0` / `0x140001040` and none of the 10 case blocks. Their texts print `uint64_t fn_function(uint32_t arg0, uint64_t arg1, uint64_t arg2)` with a 10-case `switch`, byte-identical to each other and in body to the symbol-bearing text; the entries print `return sub_401aa0(2, 7, 9);` / `return sub_140001040(2, 7, 9);`. In the full-tier OD lane only those two texts change. One-shot image-wide discovery promotes nothing in SQLite, brotli or any Mach-O or symbol-bearing cell.
   - Discovery absorbs it into the entry function: there is no symbol, no `.eh_frame`, and a leaf has no `.pdata`.
   - In the entry function the index is a constant, so the table does not prove, and the sweep turns the 10 case blocks into candidate functions.
   - `decompile --address va:0x401aa0` returns the _entry_ function, which is why OD prints `void fn_function() { return indirect_exit(0x401ada, …); }`.
