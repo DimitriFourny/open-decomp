@@ -3,6 +3,7 @@ import type { StackRecoveryResult } from '../analysis/stack/index.js';
 import {
   bitWidth,
   expressionOperands,
+  floating,
   sameType,
   type DataType,
   type Expression,
@@ -16,8 +17,10 @@ type RegisterLocation = Extract<AbiLocation, { kind: 'register' }>;
 
 /** Evidence-based choice between the ABI integer and FP primary result
  * registers of an undeclared function. `float` binds the FP register on every
- * exit; `integer` keeps the integer path without the FP alternative (`reason`
- * when the FP register also qualified); `explicit` retains the physical exit
+ * exit (`untyped` when its IEEE type rests on the ABI premise that a scalar
+ * FP-bank result is IEEE rather than on typed writes); `integer` keeps the
+ * integer path without the FP alternative (`reason` when the FP register also
+ * qualified); `explicit` retains the physical exit
  * form because candidates or caller evidence conflict; `none` infers no
  * register result (observed native results remain unless `void_like` names
  * the rule that makes the function void-like: `incidental_result` when the
@@ -34,6 +37,7 @@ export type SourcePrimaryResult =
       readonly location: RegisterLocation;
       readonly type: DataType;
       readonly rejected: string;
+      readonly untyped?: true;
     }
   | { readonly kind: 'integer'; readonly reason?: string; readonly incidental_floating?: string }
   | {
@@ -84,8 +88,10 @@ const scalarFloat = (type: DataType): boolean =>
  * one of them; otherwise the explicit form remains. An integer-only qualification
  * also keeps the explicit form when the untyped FP register is written after it
  * on every exit path, unless the FP register holds only a vector copy or fill
- * temporary (the datum of a >=128-bit store); then the integer register decides
- * as if the FP register were undefined. */
+ * temporary (the datum of a >=128-bit store), when the integer register decides
+ * as if the FP register were undefined, or an untyped scalar FP value consumed
+ * only by exits (literal-zero upper cells, one 32/64-bit width), which is the
+ * IEEE result under the ABI premise that a scalar FP-bank result is IEEE. */
 export function selectSourcePrimaryResult(
   input: SourcePrimaryResultInput,
 ): SourcePrimaryResult | null {
@@ -632,6 +638,17 @@ export function selectSourcePrimaryResult(
     }
     return `${root} holds only ${[...kinds].join(', ')} on its exit paths; no path moves it back after a clobber, copies another argument into it, passes through a final call's result, or computes a value consumed only by exits`;
   };
+  // Operands a value carries through lossless transport, or its phi sources.
+  const transportOperands = (value: Value): readonly Value[] => {
+    const expression = expressions.get(value.id);
+    if (!expression) return sources.get(value.id) ?? [];
+    if (expression.kind === 'cast')
+      return transportCasts.includes(expression.op) ? [expression.value] : [];
+    if (expression.kind === 'extract') return [expression.value];
+    if (expression.kind === 'insert') return [expression.base, expression.value];
+    if (expression.kind === 'concat') return expression.values;
+    return [];
+  };
   // Values that are, through lossless transport, the datum of a store of at
   // least 128 bits (a vector copy or fill), and the instructions that define
   // the constants among them. Folding gives each exit cell of a vector fill
@@ -662,19 +679,30 @@ export function selectSourcePrimaryResult(
       const value = pending.pop()!;
       if (values.has(value.id)) continue;
       values.add(value.id);
-      const expression = expressions.get(value.id);
-      if (expression?.kind === 'constant')
+      if (expressions.get(value.id)?.kind === 'constant')
         for (const id of definitions.get(value.id)?.provenance.instruction_ids ?? [])
           instructions.add(id);
-      else if (expression?.kind === 'cast' && transportCasts.includes(expression.op))
-        pending.push(expression.value);
-      else if (expression?.kind === 'extract') pending.push(expression.value);
-      else if (expression?.kind === 'insert') pending.push(expression.base, expression.value);
-      else if (expression?.kind === 'concat') pending.push(...expression.values);
-      else if (!expression) pending.push(...(sources.get(value.id) ?? []));
+      else pending.push(...transportOperands(value));
     }
     vectorData = { values, instructions, definitions };
     return vectorData;
+  };
+  // Values that are, through lossless transport, the datum of a store of any
+  // width: data the function also writes to memory.
+  let storedData: ReadonlySet<string> | undefined;
+  const storedValues = (): ReadonlySet<string> => {
+    if (storedData) return storedData;
+    const values = new Set<string>(),
+      pending = [...storeValues.values()];
+    while (pending.length) {
+      context.checkpoint(1);
+      const value = pending.pop()!;
+      if (values.has(value.id)) continue;
+      values.add(value.id);
+      pending.push(...transportOperands(value));
+    }
+    storedData = values;
+    return storedData;
   };
   // Reason the FP result register is an incidental vector copy or fill
   // temporary, or undefined. Callers must not demand it; on every exit, each
@@ -729,6 +757,66 @@ export function selectSourcePrimaryResult(
     return stored
       ? `${root} holds only the datum of a vector store of at least 128 bits (copy or fill), its folded constants or call results left in place before later effects on its exit paths`
       : undefined;
+  };
+  // IEEE type of an untyped scalar FP value the FP result register holds on
+  // every exit, or undefined. On every exit the FP-root cells tile the whole
+  // register; every slice leaf is a value consumed only by exits: no call or
+  // register-read output, load, value that also addresses memory or feeds
+  // calls or branches, stored datum (of any width) or vector-store constant.
+  // Literal exits are neutral. On every other exit the cells from some width
+  // up are literal zero (a scalar `fmov`/`movq` write) and the cells below
+  // carry a non-literal leaf up to that width; the widths agree and are 32 or
+  // 64 bits. Unchanged entry bits, frame addresses and undefined cells
+  // disqualify.
+  const untypedScalarFloating = (): DataType | undefined => {
+    const root = input.floating.register.root;
+    const vector = vectorStoreData(),
+      stored = storedValues();
+    const zero = (value: Value): boolean => {
+      const expression = expressions.get(value.id);
+      return expression?.kind === 'constant' && expression.bits === 0n;
+    };
+    let width: number | undefined;
+    for (const block of exits) {
+      const cells = block.register_exit
+        .filter((binding) => binding.register.root === root)
+        .sort((left, right) => left.register.offset_bits - right.register.offset_bits);
+      let covered = 0,
+        top = 0;
+      const literal: { readonly offset: number; readonly zero: boolean }[] = [];
+      for (const cell of cells) {
+        if (cell.register.offset_bits !== covered) return undefined;
+        covered += cell.register.width_bits;
+        const walked = walk(cell.value, root);
+        if (walked.kind !== 'written' || walked.self.length) return undefined;
+        for (const value of walked.constants)
+          if (
+            vector.values.has(value.id) ||
+            vector.definitions
+              .get(value.id)
+              ?.provenance.instruction_ids.some((id) => vector.instructions.has(id))
+          )
+            return undefined;
+        for (const value of walked.leaves)
+          if (
+            computed.has(value.id) ||
+            callResults.has(value.id) ||
+            loads.has(value.id) ||
+            stored.has(value.id) ||
+            vector.values.has(value.id) ||
+            observedElsewhere(value)
+          )
+            return undefined;
+        if (walked.leaves.length) top = covered;
+        else literal.push({ offset: cell.register.offset_bits, zero: walked.constants.every(zero) });
+      }
+      if (!cells.length || covered !== cells[0]!.register.root_width_bits) return undefined;
+      if (!top) continue;
+      if (literal.some((cell) => cell.offset >= top && !cell.zero)) return undefined;
+      if ((top !== 32 && top !== 64) || (width !== undefined && width !== top)) return undefined;
+      width = top;
+    }
+    return width === undefined ? undefined : floating(width as 32 | 64);
   };
   const exitValue = (block: BlockRegion, location: RegisterLocation): Value | undefined =>
     block.register_exit.find(
@@ -868,7 +956,8 @@ export function selectSourcePrimaryResult(
     // Without IEEE type evidence the FP register still contradicts an integer
     // result when it is written on every exit, after the integer register on
     // every exit path (an untyped reload into the FP result register before
-    // returning): the explicit form remains.
+    // returning): the explicit form remains, unless that FP value is an
+    // untyped scalar consumed only by exits.
     if (
       !floatingIncidental &&
       !integerDemanded &&
@@ -884,12 +973,22 @@ export function selectSourcePrimaryResult(
           later(integerValue, floatingValue) === 'second'
         );
       })
-    )
+    ) {
+      const scalar = untypedScalarFloating();
+      if (!scalar)
+        return {
+          kind: 'explicit',
+          written,
+          reason: `${floatingName} is written after ${integerName} on every exit path without typed IEEE evidence`,
+        };
       return {
-        kind: 'explicit',
-        written,
-        reason: `${floatingName} is written after ${integerName} on every exit path without typed IEEE evidence`,
+        kind: 'float',
+        location: { ...input.floating, width_bits: bitWidth(scalar) },
+        type: scalar,
+        rejected: `${integerName} is written before an untyped scalar FP value consumed only by exits on every exit path`,
+        untyped: true,
       };
+    }
     // A tail transfer passes its callee's result through; its storage is not
     // classified here, so only return-only functions become void-like.
     const incidental =
