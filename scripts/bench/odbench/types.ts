@@ -107,6 +107,12 @@ export interface BinaryTiming {
   readonly repeats_cold_ms?: readonly number[];
 }
 
+/** Work one Open Decomp decompile consumed against the limit its result reported. */
+export interface FunctionWork {
+  readonly consumed: number;
+  readonly limit: number;
+}
+
 export interface FunctionResult {
   readonly state: FunctionState;
   /** Tool reason/diagnostic for partial/failed/not_found (e.g. `unsupported_subset`, `budget`). */
@@ -123,6 +129,10 @@ export interface FunctionResult {
     readonly address: string;
     readonly method: string;
   };
+  /** Open Decomp: work this function's decompile consumed (`consumed`) against the work limit
+   * its result reported (`limit`), taken from the first repeat; for a work-limit failure `consumed` is the count its diagnostic reports. Absent on lanes
+   * recorded before this field and on other tools; null when no result carried it (failures). */
+  readonly work?: FunctionWork | null;
   /** Open Decomp with repeat > 1: every repeat printed byte-identical text. */
   readonly deterministic?: boolean;
 }

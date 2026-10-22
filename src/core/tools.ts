@@ -1096,6 +1096,10 @@ export const functionDecompileResultSchema = resultSchema(
       emission: emissionSchema,
       capabilities: z.array(capabilitySchema).max(1000),
       cache: z.enum(['hit', 'computed']),
+      /** Work this request charged (what `budget.work` bounds), reported per delivery: a
+       * `hit` reports the cost of serving the stored result, not of the run that computed it.
+       * Absent from stored analyses; never part of cache identity or the emission. */
+      work: z.number().int().nonnegative().optional(),
     }),
     z.strictObject({
       delivery: z.literal('artifact'),
@@ -1103,6 +1107,10 @@ export const functionDecompileResultSchema = resultSchema(
       artifact_id: artifactSchema.shape.id,
       delivery_reason: z.enum(['requested', 'output_limit']),
       cache: z.enum(['hit', 'computed']),
+      /** Work this request charged (what `budget.work` bounds), reported per delivery: a
+       * `hit` reports the cost of serving the stored result, not of the run that computed it.
+       * Absent from stored analyses; never part of cache identity or the emission. */
+      work: z.number().int().nonnegative().optional(),
     }),
   ]),
 ).superRefine((result, context) => {
@@ -1151,6 +1159,7 @@ export function projectDecompilationArtifactResult(
         function_id: result.data.function_id,
         artifact_id: artifact.id,
         cache: result.data.cache,
+        ...(result.data.work === undefined ? {} : { work: result.data.work }),
       },
     });
   return functionDecompileResultSchema.parse({
@@ -1181,6 +1190,7 @@ export function projectDecompilationArtifactResult(
       function_id: result.data.function_id,
       artifact_id: artifact.id,
       cache: result.data.cache,
+      ...(result.data.work === undefined ? {} : { work: result.data.work }),
     },
   });
 }
