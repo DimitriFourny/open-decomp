@@ -415,7 +415,8 @@ the private frame, a result, an indirect exit, an access at unknown offset)
 contributes the lowest entry-SP offset it can take: exact offsets, constant
 steps, nonnegative (zero-extended, masked or shifted) index addends, cell halves,
 phis and exact spill/reload copies keep that bound; signed or other arithmetic,
-and cycles that keep lowering it, lose it. The stack grows downward, so an object
+and cycles that keep lowering it, lose it. A phi proven to be one frame address on
+every incoming edge prints as that address, so no edge copy assigns it. The stack grows downward, so an object
 designated by an escaped pointer extends toward the entry SP and the caller
 frame: bytes at or above the lowest escaped offset stay explicit frame memory
 (members of the frame object, below), slots wholly below it promote under the recorded
