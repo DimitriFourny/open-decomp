@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { analyzeValues, simplifySSA } from '../../../src/analysis/values/index.js';
 import { evaluateIR, integer, verifyIR } from '../../../src/ir/index.js';
+import type { BlockBuilder, Edge, RegisterIR, Value } from '../../../src/ir/index.js';
 import { builder, register, returned } from '../../ir/support.js';
 import { equivalent, forms } from '../ssa/support.js';
 
@@ -378,4 +379,155 @@ test('sparse propagation is independent of reverse block layout and unrelated ph
   const optimized = simplifySSA(reversed, { max_work: 20_000 });
   assert.equal(optimized.state, 'complete', JSON.stringify(optimized.diagnostics));
   assert.deepEqual(returned(evaluateIR(optimized.value)), [42n]);
+});
+
+/** Both simplification modes of one program: the same SSA, which returns what
+ * the program returns for every input. */
+function bothModes(
+  program: RegisterIR,
+  inputs: readonly (readonly bigint[])[],
+): { readonly incremental: number; readonly full: number } {
+  const { ssa } = forms(program);
+  const incremental = simplifySSA(ssa),
+    full = simplifySSA(ssa, {}, 'full');
+  assert.equal(incremental.state, 'complete');
+  assert.equal(full.state, 'complete');
+  assert.deepEqual(incremental.value, full.value);
+  assert.deepEqual(verifyIR(incremental.value), []);
+  for (const values of inputs) {
+    const expected = evaluateIR(program, { arguments: values }),
+      actual = evaluateIR(incremental.value, { arguments: values });
+    assert.equal(actual.status, expected.status);
+    assert.deepEqual(actual.values, expected.values);
+  }
+  return { incremental: incremental.work, full: full.work };
+}
+
+test('incremental rounds reach the full rounds’ SSA through threading, joined tests, chained constants and phi rewrites', () => {
+  const ir = builder('ssa-incremental-rounds');
+  const entry = ir.block('entry', [i1, i32]),
+    dispatch = ir.block('dispatch', [i1, i32]),
+    yes = ir.block('yes', [i32]),
+    no = ir.block('no', [i32]),
+    left = ir.block('left'),
+    right = ir.block('right'),
+    join = ir.block('join', [i32, i32]),
+    exit = ir.block('exit', [i32]);
+  // Threading on the entry test bypasses `dispatch`, which the next round removes.
+  entry.branch(
+    entry.parameters[0]!,
+    entry.edge(dispatch, entry.parameters),
+    entry.edge(dispatch, entry.parameters),
+  );
+  dispatch.branch(
+    dispatch.parameters[0]!,
+    dispatch.edge(yes, [dispatch.parameters[1]!]),
+    dispatch.edge(no, [dispatch.parameters[1]!]),
+  );
+  // The same test with the same destinations in two blocks is joined at the fixpoint.
+  for (const block of [yes, no])
+    block.branch(
+      block.compare('ult', block.parameters[0]!, block.constant(i32, 8n)),
+      block.edge(left),
+      block.edge(right),
+    );
+  // Both arms pass 5 through the phi: the select on it is constant, and `x == x`
+  // of the other phi folds.
+  left.jump(join, [
+    left.int('add', left.constant(i32, 2n), left.constant(i32, 3n)),
+    left.constant(i32, 1n),
+  ]);
+  right.jump(join, [
+    right.int('sub', right.constant(i32, 9n), right.constant(i32, 4n)),
+    right.constant(i32, 2n),
+  ]);
+  const chosen = join.select(
+    join.compare('eq', join.parameters[0]!, join.constant(i32, 5n)),
+    join.parameters[1]!,
+    join.parameters[0]!,
+  );
+  const same = join.cast(
+    'zero_extend',
+    i32,
+    join.compare('eq', join.parameters[1]!, join.parameters[1]!),
+  );
+  join.jump(exit, [join.int('add', join.int('add', chosen, same), join.constant(i32, 0n))]);
+  exit.return([exit.parameters[0]!]);
+  const program = ir.finish(entry, [i32]);
+  const inputs = [0n, 1n].flatMap((test) => [3n, 8n, 200n].map((value) => [test, value]));
+  for (const values of inputs)
+    assert.deepEqual(returned(evaluateIR(program, { arguments: values })), [
+      values[1]! < 8n ? 2n : 3n,
+    ]);
+  const work = bothModes(program, inputs);
+  // Rounds after the first reuse or restrict the value analysis.
+  assert.ok(work.incremental < work.full, `${work.incremental} < ${work.full}`);
+});
+
+test('incremental and full simplification agree on random graphs with constant tests, selects and reflexive comparisons', () => {
+  let seed = 0x3c6ef372;
+  const next = (bound: number): number => {
+    seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+    return (seed >>> 8) % bound;
+  };
+  let cheaper = 0;
+  for (let index = 0; index < 200; index++) {
+    const ir = builder(`ssa-incremental-random-${index}`),
+      count = 5 + next(8);
+    const list = Array.from({ length: count }, (_, id) =>
+      ir.block(`n${id}`, id === 0 ? [i32, i32] : Array.from({ length: next(3) }, () => i32)),
+    );
+    list.forEach((block, id) => {
+      const values: Value[] = [...block.parameters];
+      if (!values.length) values.push(block.constant(i32, BigInt(next(4))));
+      const pick = (): Value => values[next(values.length)]!;
+      for (let statements = next(4); statements > 0; statements--) {
+        const roll = next(6);
+        if (roll === 0) values.push(block.constant(i32, BigInt(next(4))));
+        else if (roll === 1)
+          values.push(
+            block.int((['add', 'sub', 'and', 'xor', 'or'] as const)[next(5)]!, pick(), pick()),
+          );
+        else if (roll === 2) values.push(block.int('add', pick(), block.constant(i32, 0n)));
+        else if (roll === 3)
+          values.push(block.select(block.compare('ult', pick(), pick()), pick(), pick()));
+        else if (roll === 4) {
+          const value = pick();
+          values.push(block.cast('zero_extend', i32, block.compare('sle', value, value)));
+        } else values.push(block.select(block.constant(i1, BigInt(next(2))), pick(), pick()));
+      }
+      const edge = (target: BlockBuilder): Edge =>
+        block.edge(
+          target,
+          target.parameters.map(() => pick()),
+        );
+      if (id === count - 1) {
+        block.return([pick()]);
+        return;
+      }
+      const later = (): BlockBuilder => list[id + 1 + next(Math.min(3, count - id - 1))]!;
+      const yes = later();
+      let no = later();
+      if (no === yes) no = yes === list[id + 1] ? list[count - 1]! : list[id + 1]!;
+      const roll = next(4);
+      if (roll === 0 || no === yes) block.jump(yes, edge(yes).arguments);
+      else
+        block.branch(
+          roll === 1
+            ? block.compare('eq', block.constant(i32, BigInt(next(2))), block.constant(i32, 0n))
+            : block.compare((['ult', 'eq', 'ne'] as const)[next(3)]!, pick(), pick()),
+          edge(yes),
+          edge(no),
+        );
+    });
+    const work = bothModes(ir.finish(list[0]!, [i32]), [
+      [0n, 0n],
+      [1n, 2n],
+      [3n, 1n],
+      [0xffffffffn, 7n],
+    ]);
+    if (work.incremental < work.full) cheaper++;
+  }
+  // The sample does take incremental rounds.
+  assert.ok(cheaper > 0);
 });
