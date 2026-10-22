@@ -1310,7 +1310,20 @@ every direct store holds typed FP bits, literal bits or a reload of another such
 slot (an O0 slot-to-slot copy, also through same-width bitcasts) counts as a
 typed write. When only the integer register qualifies but the FP register is
 written on every exit, after the integer register on every exit path, the
-explicit form remains instead of an integer result.
+explicit form remains instead of an integer result, unless the untyped FP
+register is an incidental vector copy or fill temporary: no caller demands it
+and, on every exit, each slice leaf of every FP-root cell is the datum of a store
+of at least 128 bits (through lossless transport), a constant whose defining
+instruction also defines such a datum (folding gives each cell of a `movi`
+zero-fill its own constant), or a call result left in place before later
+effects; unchanged and undefined cells are neutral and typed FP cells
+disqualify. A scalar FP value stored at its own width stays explicit. The
+integer register then decides as if the FP register were undefined: an echoed
+hidden result pointer (SysV `rdi`, Win64 `rcx` in `rax`) is the exact pointer
+result, otherwise the void-like `incidental_result` rule applies. This records
+an `incidental_result` presentation inference and an `abi_conformance`
+requirement that callers read no FP result register; the FP register keeps its
+exact exit value in exit metadata and the checked view.
 When both qualify, positive caller demand decides; then the register written last
 on every path into every exit wins: a definition whose block is dominated by the
 other's definition (or follows it in the same block) is later, and merges compare
