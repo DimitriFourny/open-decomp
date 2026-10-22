@@ -46,6 +46,9 @@ export interface OperationContext {
   /** Actual shared work remaining; methods survive context wrappers/spreads.
    * Optional custom contexts cannot safely grant optional dependency work. */
   remainingWork?(): number;
+  /** Actual work this operation has been charged so far (the `remainingWork` counterpart,
+   * measured from the same counter). Read it on `root` for the whole operation. */
+  consumedWork?(): number;
   /** The operation's own context: `createOperationContext` sets it and every wrapper or
    * spread keeps it. Charges that belong to the whole request (per-process index builds,
    * see `buildOnce`) are made on it, so sub-budgets and measured reuse never see them. */
