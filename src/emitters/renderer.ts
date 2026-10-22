@@ -1945,6 +1945,22 @@ export class Renderer {
     return closed;
   }
 
+  /** An open indirect call prints only its proven arguments in a function-pointer cast of
+   * exactly those positions: the one `open arity` comment states that it may take more. */
+  private openIndirectCall(origin: Origin): void {
+    // The instruction's virtual address; provenance ranges are file offsets, which
+    // print as such only where no address mapping is supplied.
+    const address = this.input.instruction_address?.(origin.provenance.instruction_ids[0] ?? '');
+    const start = origin.provenance.ranges[0]?.start;
+    const where =
+      address?.space === 'va'
+        ? ` at 0x${address.value.toString(16)}`
+        : start
+          ? ` at ${start.space === 'va' ? '' : start.space === 'file' ? 'file offset ' : `${start.space} `}0x${start.value.toString(16)}`
+          : '';
+    this.openCallees.add(`indirect call${where}`);
+  }
+
   /** Source view: whether a direct call to `key` prints only its proven arguments, the
    * callee's open arity being stated once in the `open arity` comment. An interface that
    * proves no argument keeps the marker (an empty list would read as zero arguments), as
@@ -4556,124 +4572,14 @@ export class Renderer {
     operand = false,
   ): string {
     const projection = this.program.calls.get(node.id)!;
-    const literals: string[] = [],
-      objcLiterals: string[] = [];
     const objcCandidate = this.objcSend(node);
-    const args = projection.arguments.map((value, index) => {
-      this.context.checkpoint(1);
-      const parameter = projection.signature?.signature.parameters[index];
-      const parameterType = parameter && this.typeRecords.get(parameter.type_id)?.definition;
-      const pointer = parameterType?.kind === 'pointer';
-      const pointee = pointer ? this.typeRecords.get(parameterType.to)?.definition : undefined;
-      const bytePointer =
-        pointee?.kind === 'void' || (pointee?.kind === 'integer' && pointee.bits === 8);
-      const code =
-        !pointer && this.characterParameter(projection, index) ? this.constantOf(value) : undefined;
-      const character = code === undefined ? undefined : this.printer.character(code, true);
-      if (character && this.printer.simplify('character_literal', [value.id]))
-        return character.text;
-      const objcLiteral = literalsAllowed ? this.objcLiteral(value) : undefined;
-      const literal =
-        objcLiteral ??
-        (!literalsAllowed || (pointer && !bytePointer)
-          ? undefined
-          : this.sourceLiteral(value, pointer && bytePointer));
-      if (objcLiteral !== undefined) objcLiterals.push(value.id);
-      else if (literal !== undefined) literals.push(value.id);
-      // A declared pointer local (or held call result), possibly through inline
-      // same-width bitcasts of its bits, already has the parameter's pointer
-      // spelling, or is a message operand: no conversion is printed.
-      let operandValue = value;
-      for (let step = 0; step < 4 && this.inline.has(operandValue.id); step++) {
-        if (this.pendingCalls.has(operandValue.id)) break;
-        const alias = this.program.expressions.get(operandValue.id);
-        if (
-          alias?.kind !== 'cast' ||
-          alias.op !== 'bitcast' ||
-          bitWidth(alias.value.type) !== bitWidth(operandValue.type)
-        )
-          break;
-        operandValue = alias.value;
-      }
-      const declared =
-        this.sourceView &&
-        this.language === 'c-like' &&
-        literal === undefined &&
-        (this.pendingCalls.has(operandValue.id) || !this.inline.has(operandValue.id))
-          ? this.declaredSpelling(operandValue)
-          : '';
-      if (
-        declared.endsWith('*') &&
-        (pointer
-          ? this.callParameterType(projection, index) === declared
-          : objcCandidate !== undefined)
-      )
-        return this.local(operandValue);
-      // A message operand read from a declared pointer member or typed global is
-      // that lvalue itself: message syntax needs no integer conversion.
-      const loaded =
-        objcCandidate && literal === undefined && this.sourceView
-          ? this.inlined.get(operandValue.id)?.node
-          : undefined;
-      if (loaded?.kind === 'load' && this.inline.has(operandValue.id)) {
-        const storage = this.storage(loaded);
-        if (this.memberPointers.has(loaded.id) || this.typedPointerGlobal(loaded.id))
-          return storage;
-      }
-      const printed = pointer
-        ? literal === undefined
-          ? this.sourceAddressPrinted(value, !this.sourceView)
-          : undefined
-        : literal === undefined
-          ? this.printed(value)
-          : undefined;
-      const text = literal ?? printed!.text;
-      // A message operand needs no C parameter conversion: message syntax has none.
-      if (pointer && objcCandidate && literal === undefined) return this.value(value);
-      if (pointer && this.language === 'c-like') {
-        const spelling = this.callParameterType(projection, index);
-        if (literal !== undefined)
-          return /^(?:const )?(?:char|void)\s*\*$/.test(spelling)
-            ? literal
-            : `(${spelling})${literal}`;
-        const loaded = this.inlined.get(value.id)?.node;
-        if (loaded?.kind === 'load' && this.typedPointerGlobal(loaded.id)?.c === spelling)
-          return this.storage(loaded);
-        return this.pointerValue(printed!, spelling);
-      }
-      const type = parameter && this.typeRecords.get(parameter.type_id)?.definition;
-      if (type?.kind === 'integer' && type.signed && this.language === 'python-like')
-        return this.call(
-          `int${type.bits}`,
-          'Interpret source integer argument with its established signed ABI type.',
-          [text],
-        );
-      // A declared prototype converts an argument to its parameter type: the
-      // value's own signed variable passes unchanged to a signed parameter.
-      if (printed && type?.kind === 'integer' && type.signed && this.language === 'c-like')
-        return this.signedContext(printed, type.bits);
-      // An undeclared parameter reads the callee's observed interface: an
-      // argument that is a declared pointer variable passes as that pointer.
-      if (printed?.pointer && !parameter && this.language === 'c-like') return printed.pointer.text;
-      return text;
-    });
-    if (
-      (literals.length &&
-        !this.localValidation.presentation(
-          'string_literal',
-          node.id,
-          STRING_LITERAL_SCOPE,
-          literals,
-        )) ||
-      (objcLiterals.length &&
-        !this.localValidation.presentation(
-          'objc_string_literal',
-          node.id,
-          'pointer-width constant call arguments addressing an exact __cfstring constant object (isa bound to ___CFConstantStringClassReference, explicit length), printed as that NSString literal',
-          objcLiterals,
-        ))
-    )
-      return this.sourceCall(node, depth, false, operand);
+    const args = this.callArguments(
+      projection,
+      node.id,
+      objcCandidate !== undefined,
+      literalsAllowed,
+    );
+    if (!args) return this.sourceCall(node, depth, false, operand);
     if (this.sourceView && !this.callEffectsAdmitted(node))
       this.writer.statement(depth, this.clobbers(node.clobbers));
     const guessed = this.likelyArgumentList(projection);
@@ -4704,7 +4610,8 @@ export class Renderer {
         target,
         `${projection.kind === 'source' ? 'Established' : 'Inferred or incomplete'} source call. Original target: ${node.target.kind === 'direct' ? this.writer.quote(this.addressKey(node.target.address)) : 'indirect'}. Original memory effect: ${node.clobbers.memory}. Calls remain ordered; unused machine clobbers are not source results.`,
       );
-    // A function-pointer cast spells the open arity (`T (*)(A, ...)`) at the call itself.
+    // A function-pointer cast names exactly the printed argument positions; its open arity is
+    // stated in the header note, as for a direct call.
     const pointerCast =
       !send &&
       this.sourceView &&
@@ -4712,7 +4619,7 @@ export class Renderer {
       this.localValidation.presentation(
         'function_pointer_call',
         node.id,
-        'indirect call target presented through a function-pointer type spelled from the projected argument and result types; an open arity keeps a trailing ellipsis and the remainder marker',
+        'indirect call target presented through a function-pointer type spelled from the projected argument and result types; the cast names exactly the printed argument positions and keeps a trailing ellipsis only for a declared variadic prototype; an open arity is stated in the file header note',
         [node.target.value.id],
       );
     if (pointerCast) target = this.functionPointer(projection, target, open);
@@ -4723,7 +4630,8 @@ export class Renderer {
           node.target.kind === 'direct' &&
           this.statesOpenArity(projection, this.addressKey(node.target.address));
       if (!stated) args.push(this.inlineEllipsis());
-      else if (!pointerCast) this.openCallees.add(target);
+      else if (pointerCast) this.openIndirectCall(node);
+      else this.openCallees.add(target);
     }
     let operation: string;
     if (send) {
@@ -4753,6 +4661,162 @@ export class Renderer {
     return results.length
       ? `${results.length === 1 ? this.local(results[0]!) : `(${this.writer.join(results.map((value) => this.local(value)))})`} = ${operation}`
       : operation;
+  }
+
+  /** The printed arguments of a source call or tail transfer, one routine for both:
+   * string and Objective-C literals, character constants, declared pointer locals,
+   * signed parameter contexts and pointer conversions follow the callee's parameter.
+   * `objc` marks a call printed as a message (no C conversions). Undefined when a literal
+   * record is refused (the caller retries without literals). */
+  private callArguments(
+    projection: BoundaryProjection,
+    subject: string,
+    objcCandidate: boolean,
+    literalsAllowed: boolean,
+  ): string[] | undefined {
+    const literals: string[] = [],
+      objcLiterals: string[] = [];
+    const args = projection.arguments.map((value, index) =>
+      this.callArgument(
+        projection,
+        objcCandidate,
+        index,
+        value,
+        literalsAllowed,
+        literals,
+        objcLiterals,
+      ),
+    );
+    if (
+      (literals.length &&
+        !this.localValidation.presentation(
+          'string_literal',
+          subject,
+          STRING_LITERAL_SCOPE,
+          literals,
+        )) ||
+      (objcLiterals.length &&
+        !this.localValidation.presentation(
+          'objc_string_literal',
+          subject,
+          'pointer-width constant call arguments addressing an exact __cfstring constant object (isa bound to ___CFConstantStringClassReference, explicit length), printed as that NSString literal',
+          objcLiterals,
+        ))
+    )
+      return undefined;
+    return args;
+  }
+
+  private callArgument(
+    projection: BoundaryProjection,
+    objcCandidate: boolean,
+    index: number,
+    value: Value,
+    literalsAllowed: boolean,
+    literals: string[],
+    objcLiterals: string[],
+  ): string {
+    this.context.checkpoint(1);
+    const parameter = projection.signature?.signature.parameters[index];
+    const parameterType = parameter && this.typeRecords.get(parameter.type_id)?.definition;
+    const pointer = parameterType?.kind === 'pointer';
+    const pointee = pointer ? this.typeRecords.get(parameterType.to)?.definition : undefined;
+    const bytePointer =
+      pointee?.kind === 'void' || (pointee?.kind === 'integer' && pointee.bits === 8);
+    const code =
+      !pointer && this.characterParameter(projection, index) ? this.constantOf(value) : undefined;
+    const character = code === undefined ? undefined : this.printer.character(code, true);
+    if (character && this.printer.simplify('character_literal', [value.id])) return character.text;
+    const objcLiteral = literalsAllowed ? this.objcLiteral(value) : undefined;
+    const literal =
+      objcLiteral ??
+      (!literalsAllowed || (pointer && !bytePointer)
+        ? undefined
+        : this.sourceLiteral(value, pointer && bytePointer));
+    if (objcLiteral !== undefined) objcLiterals.push(value.id);
+    else if (literal !== undefined) literals.push(value.id);
+    // A declared pointer local (or held call result), possibly through inline
+    // same-width bitcasts of its bits, already has the parameter's pointer
+    // spelling, or is a message operand: no conversion is printed.
+    let operandValue = value;
+    for (let step = 0; step < 4 && this.inline.has(operandValue.id); step++) {
+      if (this.pendingCalls.has(operandValue.id)) break;
+      const alias = this.program.expressions.get(operandValue.id);
+      if (
+        alias?.kind !== 'cast' ||
+        alias.op !== 'bitcast' ||
+        bitWidth(alias.value.type) !== bitWidth(operandValue.type)
+      )
+        break;
+      operandValue = alias.value;
+    }
+    const declared =
+      this.sourceView &&
+      this.language === 'c-like' &&
+      literal === undefined &&
+      (this.pendingCalls.has(operandValue.id) || !this.inline.has(operandValue.id))
+        ? this.declaredSpelling(operandValue)
+        : '';
+    if (
+      declared.endsWith('*') &&
+      (pointer ? this.callParameterType(projection, index) === declared : objcCandidate)
+    )
+      return this.local(operandValue);
+    // A message operand read from a declared pointer member or typed global is
+    // that lvalue itself: message syntax needs no integer conversion.
+    const loaded =
+      objcCandidate && literal === undefined && this.sourceView
+        ? this.inlined.get(operandValue.id)?.node
+        : undefined;
+    if (loaded?.kind === 'load' && this.inline.has(operandValue.id)) {
+      const storage = this.storage(loaded);
+      if (this.memberPointers.has(loaded.id) || this.typedPointerGlobal(loaded.id)) return storage;
+    }
+    const printed = pointer
+      ? literal === undefined
+        ? this.sourceAddressPrinted(value, !this.sourceView)
+        : undefined
+      : literal === undefined
+        ? this.printed(value)
+        : undefined;
+    const text = literal ?? printed!.text;
+    // A message operand needs no C parameter conversion: message syntax has none.
+    if (pointer && objcCandidate && literal === undefined) return this.value(value);
+    if (pointer && this.language === 'c-like') {
+      const spelling = this.callParameterType(projection, index);
+      if (literal !== undefined)
+        return /^(?:const )?(?:char|void)\s*\*$/.test(spelling)
+          ? literal
+          : `(${spelling})${literal}`;
+      const loaded = this.inlined.get(value.id)?.node;
+      if (loaded?.kind === 'load' && this.typedPointerGlobal(loaded.id)?.c === spelling)
+        return this.storage(loaded);
+      return this.pointerValue(printed!, spelling);
+    }
+    const type = parameter && this.typeRecords.get(parameter.type_id)?.definition;
+    if (type?.kind === 'integer' && type.signed && this.language === 'python-like')
+      return this.call(
+        `int${type.bits}`,
+        'Interpret source integer argument with its established signed ABI type.',
+        [text],
+      );
+    // A declared prototype converts an argument to its parameter type: the
+    // value's own signed variable passes unchanged to a signed parameter.
+    if (printed && type?.kind === 'integer' && type.signed && this.language === 'c-like')
+      return this.signedContext(printed, type.bits);
+    // An undeclared parameter reads the callee's observed interface: an
+    // argument that is a declared pointer variable passes as that pointer.
+    if (printed?.pointer && !parameter && this.language === 'c-like') return printed.pointer.text;
+    return text;
+  }
+
+  /** The printed arguments of a tail transfer: the routine of an ordinary call. */
+  private tailArguments(subject: string, boundary: BoundaryProjection, ids: string[]): string[] {
+    for (const value of boundary.arguments) ids.push(value.id);
+    return (
+      this.callArguments(boundary, subject, false, true) ??
+      this.callArguments(boundary, subject, false, false)!
+    );
   }
 
   /** A tail transfer returns its callee's result; a proven-void callee is a
@@ -4828,7 +4892,8 @@ export class Renderer {
     }
   }
 
-  /** C: `((R (*)(T0, T1, ...))target)`; Python-like: `function_pointer(target, "R (*)(...)")`.
+  /** C: `((R (*)(T0, T1))target)` (`...` ends the list only for a declared variadic
+   * signature); Python-like: `function_pointer(target, "R (*)(...)")`.
    * The result type is `result` when given, else the single projected result,
    * void only for a projected source/inferred interface without results, and
    * unknown_result otherwise. */
@@ -4851,7 +4916,9 @@ export class Renderer {
           this.context.checkpoint(1);
           return this.valueType(value);
         });
-    if (declared ? declared.variadic : open)
+    // `...` declares a variadic prototype: only a declared variadic signature has one. An open
+    // interface names its proven positions; with none, a lone `uintptr_t` stands for them.
+    if (declared ? declared.variadic : open && !parameters.length)
       parameters.push(parameters.length ? '...' : 'uintptr_t');
     const signature = `${result} (*)(${parameters.length ? this.writer.join(parameters) : 'void'})`;
     if (this.language === 'python-like')
@@ -8580,15 +8647,12 @@ export class Renderer {
           this.localValidation.presentation(
             'function_pointer_call',
             control.id,
-            "indirect tail-call target presented through a function-pointer type spelled from the observed argument types and this function's own result type (void when it returns nothing); an open arity keeps a trailing ellipsis",
+            "indirect tail-call target presented through a function-pointer type spelled from the observed argument types and this function's own result type (void when it returns nothing); the cast names exactly the printed argument positions and an open arity is stated in the file header note",
             [control.target.id],
           )
         ) {
           const voidResult = this.returnSpelling === 'void';
-          const arguments_ = tail.boundary.arguments.map((value) => {
-            ids.push(value.id);
-            return this.valueLiteral(value)?.text ?? this.value(value);
-          });
+          const arguments_ = this.tailArguments(control.id, tail.boundary, ids);
           const open = this.openList(tail.boundary);
           if (open) {
             this.openRemainder(
@@ -8596,6 +8660,7 @@ export class Renderer {
               'Unresolved remainder of a call interface; not zero arguments or a purity claim.',
             );
             if (!arguments_.length) arguments_.push(this.inlineEllipsis());
+            else if (!tail.boundary.signature) this.openIndirectCall(control);
           }
           ids.push(control.target.id);
           const target = this.functionPointer(
@@ -8679,10 +8744,7 @@ export class Renderer {
                 `sub_${tail.target.value.toString(16)}`,
             );
           this.sourceNames.set(key, name);
-          const arguments_ = tail.boundary.arguments.map((value) => {
-            ids.push(value.id);
-            return this.valueLiteral(value)?.text ?? this.value(value);
-          });
+          const arguments_ = this.tailArguments(control.id, tail.boundary, ids);
           const guessedTail = this.likelyArgumentList(tail.boundary);
           if (tail.boundary.argument_list_complete === false && !guessedTail) {
             const remainder = this.openRemainder(

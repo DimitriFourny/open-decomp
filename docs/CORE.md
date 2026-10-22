@@ -63,7 +63,7 @@ register transfers establish the independent value input passed to the callback;
 the caller's subsequent 32-bit arithmetic establishes which result bits it
 consumes. Neither fact establishes a complete argument list or defined upper
 result bits. Both dialects retain the known argument, the consumed result and an
-explicit open-argument marker: an indirect call's function-pointer type spells it (C `((T (*)(A, ...))target)(a)`, Python-like `function_pointer(target, "T (*)(A, ...)")(a)`), and a direct callee without an established prototype is named once on the `open arity` comment line while its calls print only the proven arguments. An interface that proves no argument, a callee that also has a closed or guessed call, and a callee with an established prototype keep an inline `...` (the file header states its meaning once). The `unknown_argument_remainder`/`unknown_arguments` helper entries stay in the emission metadata and the checked view keeps the named helper. Unknown callback memory effects
+explicit open-argument marker: an indirect call's function-pointer type names exactly the printed argument positions (C `((T (*)(A))target)(a)`, Python-like `function_pointer(target, "T (*)(A)")(a)`; a trailing `...` would declare a variadic prototype and appears only for a declared variadic signature), and an open indirect call or a direct callee without an established prototype is named once on the `open arity` comment line (`indirect call at 0x…`: the call instruction's virtual address, supplied by the service as `EmissionInput.instruction_address`; synthetic IR without that mapping prints `at file offset 0x…` from its provenance range) while its calls print only the proven arguments. An interface that proves no argument, a callee that also has a closed or guessed call, and a callee with an established prototype keep an inline `...` (the file header states its meaning once). The `unknown_argument_remainder`/`unknown_arguments` helper entries stay in the emission metadata and the checked view keeps the named helper. Unknown callback memory effects
 and potentially outgoing stack storage remain conservative. These observations
 do not follow or execute arbitrary callback targets.
 
@@ -801,9 +801,11 @@ that qualifies as a `frame_save` with this exit included; the latter records an
 return address (x86-64) no store may overlap those entry-SP bytes and no store may
 have an unknown address. Accepted exits count as tail exits for frame saves and
 print the indirect-call function-pointer spelling with the observed
-argument-register prefix and an open list: `((R (*)(uint64_t, ...))target)(a)`
-returned when the function has a result type R, else the call and a plain
-`return;` (`function_pointer_call` record). The runtime target is no result
+argument-register prefix, the open list stated on the `open arity` comment line:
+`((R (*)(uint64_t))target)(a)` returned when the function has a result type R, else the call and a plain
+`return;` (`function_pointer_call` record). Tail-call arguments print through the
+routine of an ordinary call's arguments, so a declared pointer local is passed as itself
+rather than as `(uintptr_t)local`. The runtime target is no result
 evidence, so a void-like interface stays void. The checked view keeps
 `indirect_exit`.
 
