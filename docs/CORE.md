@@ -859,17 +859,38 @@ with upper cells that slice `sign_extend(v)`/`zero_extend(v)`; low slices with
 literal-zero upper cells, i.e. a 32-bit or narrower write that zero-extends; all
 literal constants; cells that are each an unknown (unavailable) value of the same
 reason (for example non-argument entry registers), which jointly form one unknown
-value of the full width; or the unchanged cells of another recombined phi, which is
-resolved as a fixpoint. A cell that range analysis already folded to a constant
-(`value7 = 1` on every edge) still counts as a cell of the group, but then every
-edge must write one constant per cell: the group becomes one whole-width
-parameter with one whole constant per edge (`0x100060ce8`, not `value6 | value7 << 32`),
-and source-fact discovery also offers each such whole constant as a candidate address,
-so function-pointer and global naming applies to it. Each constant is proved on its
-own edge by exact interpreter evaluation (a `bitvector` record: the cells'
-concatenation equals the constant; no BDD allowance is spent); a non-constant cell
-on any edge keeps every cell separate. Other register banks keep the complete-root rule with
-identical whole values. Original SSA cells and transfers remain immutable;
+value of the full width; the unprojected register outputs of one call or unknown
+effect whose outputs of the root are integer cells that tile it from bit 0; or the
+unchanged cells of another recombined phi, which is resolved as a fixpoint. An
+instruction-output edge gives the instruction one whole output of the root and makes
+its original cells slices of it: a source call prints one
+`unknown_value("uint64_t", "call clobbers x0")` instead of the `x0_low32`/`x0_high32`
+pair, and a physical call or unknown effect lists one boundary key
+(`"arm64:x27:0:64"`). Adjacent cells of one such instruction that a concat reads
+together outside any phi get the same whole output. A projected call result is a
+definition, never an unprojected output: a callee result bound to `w0` stays the low
+half of `x0` (`call_result | (uint64_t)high << 32`). A cell that range analysis
+already folded to a constant (`value7 = 1` on every edge) still counts as a cell of
+the group. When every edge writes one constant per cell, the group becomes one
+whole-width parameter with one whole constant per edge (`0x100060ce8`, not
+`value6 | value7 << 32`), and source-fact discovery also offers each such whole
+constant as a candidate address, so function-pointer and global naming applies to it.
+Each constant is proved on its own
+edge by exact interpreter evaluation (a `bitvector` record: the cells' concatenation
+equals the constant; no BDD allowance is spent). Otherwise a folded group needs some
+edge that carries a wider value (corresponding slices of one value, or another
+recombined group), and its other edges may be zero extensions or carried groups. Each
+folded cell's slice on those edges must be a non-constant value, which the interval
+fixed point over the reachable incoming copies proves equal to the folded constant,
+or a constant equal to it. Unknown and instruction-output edges keep a folded group
+split. `matrix_multi_exit` `-O2` (ELF/PE) keeps its sum below 0x10000 inside the loop,
+and its accumulator prints as one `uint64_t` instead of `value0 | value1 << 32`;
+`isDate` names its `sqlite3UpperToLower` table address (0x100132f08) instead of
+reassembling it from `0x132f08` and an upper cell at each dereference; loops that
+only zero-extend a 32-bit counter keep their cells. Other register banks
+keep the complete-root rule with identical whole values or one instruction's whole
+output, so a phi covering only part of a vector root (`isDate`'s `v0` double) keeps
+its cells. Original SSA cells and transfers remain immutable;
 source aliases extract slices from the new whole phi, preserving parallel copies
 and full-width arithmetic carries. Independently written cells (for example a
 partial write that preserves the other half), missing cells, differing whole
@@ -879,10 +900,15 @@ copy: publication validation accepts that edge only when the original edge copie
 every cell aliased to a slice of the whole to itself and those cells cover all of its
 bits (`sqlite3PagerSavepoint`, and `jsonTranslateTextToBlob` once its table proves,
 were rejected before). The `register_cell_recombination` presentation record documents this
-exact bitvector identity without an ABI assumption; checked output does not
-apply it. `test/reconstruction/source-loop-cells.test.ts` executes both dialects
-against independent oracles for a 32-bit-immediate-entered 64-bit loop variable,
-CRC-style byte/24-bit lanes and an independently written-halves refusal.
+exact bitvector identity without an ABI assumption (its subjects include each
+instruction whose whole output an edge uses, and a second scope covers joint reads
+of one instruction's cells); checked output does not apply it.
+`test/reconstruction/source-loop-cells.test.ts` executes both dialects against
+independent oracles for a 32-bit-immediate-entered 64-bit loop variable, CRC-style
+byte/24-bit lanes, an independently written-halves refusal and the `multi_exit`
+loop (including its overflow path and a carry into the upper cell);
+`test/reconstruction/source-cells.test.ts` executes phis fed by a call's clobbered
+`x0` and `v0` cells and by a bound 32-bit result.
 
 The same source-only rule also follows straight-line integer bit wiring through
 identity casts, extracts, extensions, concatenations, inserts, constant shifts,
