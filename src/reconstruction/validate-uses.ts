@@ -128,8 +128,12 @@ export function validateEmittedUses(
     for (const definition of program.source?.definitions?.get(control.id) ?? [])
       for (const operand of expressionOperands(definition.expression))
         use(operand, id, order - 1, definition);
-    if (control.kind === 'if') use(control.condition, id, order, control);
-    else if (control.kind === 'switch') use(control.value, id, order, control);
+    // The dropped `al` guard of a SysV va_start (S7) prints no test.
+    const variadic = program.source?.variadic;
+    if (control.kind === 'if') {
+      if (variadic?.kind !== 'va_list' || variadic.guard !== control.id)
+        use(control.condition, id, order, control);
+    } else if (control.kind === 'switch') use(control.value, id, order, control);
     else if (control.kind === 'indirect') use(control.target, id, order, control);
     if (control.kind === 'return') {
       const projection = program.returns.get(control.id)!;

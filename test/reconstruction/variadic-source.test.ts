@@ -2,10 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   createOperationContext,
+  newIdentity,
   type AbiProfile,
   type RegisterDescriptor,
 } from '../../src/core/index.js';
 import { windowsX64Abi } from '../../src/abi/windows-x64/index.js';
+import { sysvAMD64Abi } from '../../src/abi/sysv-amd64/index.js';
 import { constructSSA } from '../../src/analysis/ssa/index.js';
 import { recoverTypes } from '../../src/analysis/types/index.js';
 import { integer, type SSAForm } from '../../src/ir/index.js';
@@ -246,5 +248,227 @@ for (const variant of ['missing_store', 'direct_use'] as const)
       const output = emit(fixture.ir, fixture.extra, language).emission;
       assert.match(output.text, /\bentry_sp\b/, output.text);
       assert.doesNotMatch(output.text, /\.\.\.|va_start/, output.text);
+    }
+  });
+
+// SysV AMD64 (S7): fixture_variadic's va_start lowering (rsi..r9 saved, the
+// al-guarded xmm0..7 saves, va_list = {8, 48, entry SP + 8, save area}) is
+// va_start(frame.va, count) on a va_list frame member.
+test('elf-x86_64-symbols: fixture_variadic prints ... and va_start on a va_list frame member', async (t) => {
+  const p = await project(t, 'elf-x86_64-symbols');
+  const fn = p.functions.find((candidate) => candidate.entry.value === 0x4019c0n);
+  assert.ok(fn);
+  for (const emitter of ['c-like', 'python-like'] as const) {
+    const result: StoredDecompilation = p.payload(
+      (await p.decompile(fn.id, { options: { emitter } })).result,
+    ).result;
+    const emission: StoredDecompilation['data']['emission'] = result.data.emission;
+    assert.doesNotMatch(
+      emission.text,
+      /\bentry_sp\b|uint128_t|unknown_value\("bits8_t"/,
+      emission.text,
+    );
+    assert.match(emission.text, /\(\w+ \w+, \.\.\.\)|\(\w+: \w+, \.\.\.\)/, emission.text);
+    assert.match(emission.text, /va_start\(frame\.va, \w+\)/, emission.text);
+    assert.match(emission.text, /frame\.va\[0\]\.fp_offset/, emission.text);
+    assert.ok(
+      emission.local_validation?.some(
+        (record) => record.kind === 'presentation' && record.rule === 'va_start',
+      ),
+    );
+    const formals = emittedFormals(emission);
+    assert.equal(formals.length, 1, emission.text);
+    // 13 doubles: xmm0..7 in the register save area, the rest on the stack.
+    const values = [...doubles, 3.25, -7, 2 ** 60];
+    const save = 0xa000n;
+    for (let count = 0; count <= 12; count++) {
+      const memory = new Map<bigint, number>();
+      for (let byte = 0n; byte < 176n; byte++) memory.set(save + byte, 0x5a);
+      values
+        .slice(0, count)
+        .forEach((value, index) =>
+          writeWord(
+            memory,
+            index < 8 ? save + 48n + 16n * BigInt(index) : area + 8n * BigInt(index - 8),
+            doubleBits(value),
+          ),
+        );
+      const observation = execute(
+        emission,
+        new Map([
+          [formals[0]!.statement_id, BigInt(count)],
+          ['...', area],
+          ['...registers', save],
+        ]),
+        memory,
+        0n,
+        new Map(),
+        new Map(),
+        new Map(),
+        acknowledgeRequirements(emission),
+      );
+      const expected = values.slice(0, count).reduce((sum, value) => sum + value, 0);
+      assert.equal(observation.exit, 'machine_return', `${emitter} ${count}`);
+      assert.deepEqual(observation.values, [doubleBits(expected)], `${emitter} ${count}`);
+    }
+  }
+});
+
+/** SysV `uint64_t f(uint64_t count, ...)` whose body reads `va.gp_offset`
+ * after the exact va_start lowering: rsi..r9 saved at R + 8i, xmm0..7 at
+ * R + 48 + 16j under `al != 0`, then gp_offset/fp_offset, overflow_arg_area
+ * and reg_save_area. `variant` drops the xmm7 store, adds a use of rsi, or
+ * puts a call between the footprint stores. */
+function sysvFixture(variant: 'complete' | 'missing_xmm' | 'rsi_use' | 'call_between') {
+  const abi = sysvAMD64Abi;
+  const integers = abi
+    .classifyCall({
+      returns: { kind: 'void' },
+      parameters: Array.from({ length: 6 }, () => ({
+        kind: 'integer' as const,
+        bits: 64,
+        signed: false,
+      })),
+      variadic: false,
+      fixed_parameter_count: 6,
+    })
+    .parameters.map((parameter) => {
+      const found = parameter.locations[0]!;
+      assert.equal(found.kind, 'register');
+      return found.register;
+    });
+  const vectors = abi
+    .classifyCall({
+      returns: { kind: 'void' },
+      parameters: Array.from({ length: 8 }, () => ({ kind: 'float' as const, bits: 64 as const })),
+      variadic: false,
+      fixed_parameter_count: 8,
+    })
+    .parameters.map((parameter) => {
+      const found = parameter.locations[0]!;
+      assert.equal(found.kind, 'register');
+      return { ...found.register, width_bits: 128 };
+    });
+  const al = abi.classifyCall({
+    returns: { kind: 'void' },
+    parameters: [],
+    variadic: true,
+    fixed_parameter_count: 0,
+  }).implicit_register_inputs[0]!.register;
+  const rax = abi.classifyCall({
+    returns: { kind: 'integer', bits: 64, signed: false },
+    parameters: [],
+    variadic: false,
+    fixed_parameter_count: 0,
+  }).returns[0]!;
+  assert.equal(rax.kind, 'register');
+  const b = builder(`sysv-variadic-${variant}`),
+    entry = b.block('entry'),
+    guarded = b.block('guarded'),
+    join = b.block('join');
+  const sp = entry.readRegister(abi.stack_pointer);
+  const at = (block: typeof entry, offset: bigint) =>
+    block.int(offset < 0n ? 'sub' : 'add', sp, block.constant(u64, offset < 0n ? -offset : offset));
+  const save = -184n,
+    va = -216n;
+  for (let index = 1; index < 6; index++)
+    entry.store(at(entry, save + 8n * BigInt(index)), entry.readRegister(integers[index]!));
+  const lowByte = entry.readRegister(al);
+  entry.branch(
+    entry.compare('eq', lowByte, entry.constant(integer(8), 0n)),
+    entry.edge(join),
+    entry.edge(guarded),
+  );
+  for (let index = 0; index < 8; index++)
+    if (variant !== 'missing_xmm' || index < 7)
+      guarded.store(
+        at(guarded, save + 48n + 16n * BigInt(index)),
+        guarded.readRegister(vectors[index]!),
+      );
+  guarded.jump(join);
+  join.store(at(join, va + 16n), at(join, save));
+  if (variant === 'call_between')
+    join.call(
+      { kind: 'direct', address: { image_id: image, space: 'va', value: 0x2000n } },
+      [],
+      [],
+      abi.unknown_call_clobbers,
+      [newIdentity('evidence')],
+    );
+  join.store(at(join, va + 8n), at(join, 8n));
+  join.store(at(join, va), join.constant(u64, 0x3000000008n));
+  // An indexed read through reg_save_area: integer slot `count` of the area.
+  const slotOffset = join.int('shl', join.readRegister(integers[0]!), join.constant(u64, 3n));
+  const word = join.load(u64, join.int('add', join.load(u64, at(join, va + 16n)), slotOffset));
+  join.writeRegister(
+    rax.register,
+    variant === 'rsi_use' ? join.int('add', word, join.readRegister(integers[1]!)) : word,
+  );
+  join.return([join.readRegister(rax.register)]);
+  const ir = constructSSA(b.finish(entry, [u64])).value as SSAForm;
+  const types = recoverTypes(ir, abi, createOperationContext(), {
+    image_id: image,
+    slice_id: slice,
+    revision: 0,
+  });
+  const extra = { types, source: { abi, callees: [], addresses: [] } };
+  const structured = structureControlFlow(ir, createOperationContext());
+  assert.ok(structured.value);
+  return {
+    ir,
+    extra,
+    view: (view: 'source' | 'checked') =>
+      reconstruct({ function: structured.value!, ...extra }, createOperationContext(), view),
+  };
+}
+
+test('sysv-amd64: the va_start lowering hides its stores and va_arg reads the save area through reg_save_area', () => {
+  const fixture = sysvFixture('complete');
+  const source = fixture.view('source');
+  assert.ok(source.local_validation?.some((record) => record.rule === 'va_start'));
+  assert.ok(
+    source.local_validation_session?.abiConformance.some(
+      (site) => site.rule === 'variadic_convention',
+    ),
+  );
+  for (const language of ['c-like', 'python-like'] as const) {
+    const output = emit(fixture.ir, fixture.extra, language).emission;
+    assert.doesNotMatch(output.text, /\bentry_sp\b|uint128_t|unknown_value/, output.text);
+    assert.match(output.text, /\.\.\.\)/, output.text);
+    const formals = emittedFormals(output);
+    assert.equal(formals.length, 1, output.text);
+    // Slot 1 of the register save area holds the first anonymous integer argument.
+    for (const word of words) {
+      const memory = new Map<bigint, number>();
+      for (let byte = 0n; byte < 176n; byte++) memory.set(0xa000n + byte, 0);
+      writeWord(memory, 0xa008n, word);
+      const observation = execute(
+        output,
+        new Map([
+          [formals[0]!.statement_id, 1n],
+          ['...', area],
+          ['...registers', 0xa000n],
+        ]),
+        memory,
+      );
+      assert.deepEqual(observation.values, [word], `${language}`);
+      // The footprint stores are va_start's own effect: only va_arg's reads remain.
+      assert.deepEqual(observation.events, ['load', 'load'], `${language}`);
+    }
+  }
+});
+
+for (const variant of ['missing_xmm', 'rsi_use', 'call_between'] as const)
+  test(`sysv-amd64: ${variant} leaves the footprint stores and the guard`, () => {
+    const fixture = sysvFixture(variant);
+    assert.ok(
+      !fixture.view('source').local_validation?.some((record) => record.rule === 'va_start'),
+    );
+    for (const language of ['c-like', 'python-like'] as const) {
+      const output = emit(fixture.ir, fixture.extra, language).emission;
+      // No `...` formal list (an open-arity call may print `f(...)`), no va_start.
+      assert.doesNotMatch(output.text, /\w+, \.\.\.\)|va_start|\.va\b/, output.text);
+      // The 128-bit vector saves still print.
+      assert.match(output.text, /uint128_t/, output.text);
     }
   });

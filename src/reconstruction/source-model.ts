@@ -248,15 +248,39 @@ export function stackEntry(stack: SourceStackStorage | null | undefined): Value 
   return stack?.kind === 'entry' ? stack.base : stack?.kind === 'object' ? stack.entry : null;
 }
 /** Source view: the function's anonymous arguments follow its named formals
- * (`...`). `area` is a source-only value holding `va_start`'s result, the
- * address of the first anonymous argument; it prints as `va` (`va_list`,
- * `char *` on every supported ABI) after a `va_list va; va_start(va, <last
- * named>);` prologue, and replaces the entry SP as the base of every address
- * at or above it: entry-SP offset `k` prints as `(uintptr_t)va + (k - offset)`. */
-export interface SourceVariadic {
-  readonly area: Value;
-  /** Entry-SP offset of the first anonymous argument. */
-  readonly offset: bigint;
+ * (`...`).
+ * - `area` (Darwin arm64, Win64; S6): `area` is a source-only value holding
+ *   `va_start`'s result, the address of the first anonymous argument; it
+ *   prints as `va` (`va_list`, `char *` on these ABIs) after a `va_list va;
+ *   va_start(va, <last named>);` prologue, and replaces the entry SP as the
+ *   base of every address at or above it: entry-SP offset `k` prints as
+ *   `(uintptr_t)va + (k - offset)`.
+ * - `va_list` (SysV AMD64; S7): the 24-byte `va_list` the code `va_start`
+ *   lowers to initializes is the frame-object member `va` at entry-SP
+ *   `offset` (fields `va[0].gp_offset`, `fp_offset`, `overflow_arg_area`,
+ *   `reg_save_area`); its initializing stores and the register save area
+ *   stores are hidden, `va_start(frame.va, <last named>);` prints where the
+ *   last of them was (`anchor`), and the `al` guard `if` around the vector
+ *   register stores (`guard`) prints nothing and is no liveness root. */
+export type SourceVariadic =
+  | {
+      readonly kind: 'area';
+      readonly area: Value;
+      /** Entry-SP offset of the first anonymous argument. */
+      readonly offset: bigint;
+    }
+  | {
+      readonly kind: 'va_list';
+      /** Entry-SP offset of the `va_list` frame member. */
+      readonly offset: bigint;
+      /** The last hidden `va_start` store: `va_start` prints in its place. */
+      readonly anchor: string;
+      /** Control id of the dropped `al != 0` guard, or null. */
+      readonly guard: string | null;
+    };
+/** The source-only `va` value of an `area` interface (S6), else null. */
+export function variadicArea(variadic: SourceVariadic | undefined): Value | null {
+  return variadic?.kind === 'area' ? variadic.area : null;
 }
 /** One named member of a frame object, in entry-SP coordinates. Bytes between
  * members are padding; every byte stays ordinary, aliasable memory. */
@@ -268,6 +292,9 @@ export interface FrameMember {
   readonly scalar: boolean;
   /** The known-offset frame accesses inside these bytes. */
   readonly access_ids: readonly string[];
+  /** SysV `va_list` (S7): the 24-byte member `va`; every access inside it is
+   * exactly one of its fields. */
+  readonly va?: true;
 }
 /** Source view (S4): the incoming stack-argument bytes this activation keeps
  * as memory (a by-value aggregate modified in place), printed as one struct

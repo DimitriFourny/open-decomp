@@ -47,6 +47,8 @@ import { foldSourceCondition } from '../reconstruction/source-conditions.js';
 import { constantRotationOperands } from '../reconstruction/source-shifts.js';
 import {
   stackEntry,
+  variadicArea,
+  type SourceVariadic,
   type FrameMember,
   type IncomingObject,
   type ObjCMessage,
@@ -183,6 +185,16 @@ interface StackObjectView {
   /** Field name of the member starting at entry-SP `offset`. */
   readonly field: (offset: bigint) => string;
 }
+/** SysV AMD64 `va_list` (`__va_list_tag[1]`) fields by byte offset (S7). */
+const VA_LIST_FIELDS: ReadonlyMap<
+  bigint,
+  { readonly name: string; readonly bytes: bigint; readonly pointer: boolean }
+> = new Map([
+  [0n, { name: 'gp_offset', bytes: 4n, pointer: false }],
+  [4n, { name: 'fp_offset', bytes: 4n, pointer: false }],
+  [8n, { name: 'overflow_arg_area', bytes: 8n, pointer: true }],
+  [16n, { name: 'reg_save_area', bytes: 8n, pointer: true }],
+]);
 /** One test of a merged `if` chain: its printed form and the value it tests. */
 interface ConditionTerm {
   readonly printed: Printed;
@@ -433,6 +445,15 @@ export class Renderer {
   private readonly localSpellings = new Map<string, string>();
   /** Load/store nodes accessing a declared pointer member: that pointer type. */
   private readonly memberPointers = new Map<string, string>();
+  /** Source view: the last named formal before `...` (`va_start`'s second argument). */
+  private namedLast: string | undefined;
+  /** C stores into a `void *` field of the SysV `va_list` (see `frameStorage`). */
+  private readonly vaPointerStores = new Set<string>();
+  /** Source view: the SysV `va_list` interface (S7), when the function has one. */
+  private get vaList(): Extract<SourceVariadic, { kind: 'va_list' }> | undefined {
+    const variadic = this.program.source?.variadic;
+    return this.sourceView && variadic?.kind === 'va_list' ? variadic : undefined;
+  }
   private readonly sourceRoleNames: ReadonlyMap<string, string | null>;
   /** Loop header phis: each is its own loop-carried variable (see planSourceNames). */
   private readonly sourceCarried: ReadonlySet<string>;
@@ -741,7 +762,7 @@ export class Renderer {
       stackEntry(this.program.source?.stack)?.id === id ||
       this.program.parameter_registers.get(id)?.role === 'stack_pointer';
     const stem =
-      this.program.source?.variadic?.area.id === id
+      variadicArea(this.program.source?.variadic)?.id === id
         ? 'va'
         : entryStack
           ? 'entry_sp'
@@ -1668,9 +1689,10 @@ export class Renderer {
     if (replacement) value = replacement;
     const source = this.sourceView,
       python = this.language === 'python-like';
-    const variadic = this.program.source?.variadic;
-    // `va_list` is `char *` on every supported ABI: its address bits.
-    if (variadic?.area.id === value.id) {
+    const variadic = this.program.source?.variadic,
+      area = variadic?.kind === 'area' ? variadic : undefined;
+    // `va_list` is `char *` on Darwin arm64 and Win64: its address bits.
+    if (area?.area.id === value.id) {
       const name = this.local(value);
       return python
         ? this.printer.primary(name, { bits: 64, signed: false })
@@ -1686,7 +1708,7 @@ export class Renderer {
       if (entry) {
         if (source) {
           // The variadic area is entry-SP offset `variadic.offset`.
-          if (variadic?.area.id === entry.id) offset -= variadic.offset;
+          if (area?.area.id === entry.id) offset -= area.offset;
           const base = this.printed(entry);
           if (offset === 0n) return base;
           const amount = this.printer.literal(offset < 0n ? -offset : offset, 64);
@@ -4017,6 +4039,31 @@ export class Renderer {
     const name = object.name,
       found = this.frameMemberAt(object, offset),
       address = { bits: 64, signed: false } as const;
+    // SysV `va_list` (S7): `frame.va`, or one of its fields.
+    if (found?.member.va) {
+      const va = `${name}.va`,
+        field = VA_LIST_FIELDS.get(found.delta);
+      if (this.language === 'python-like') {
+        const base = this.printer.primary(
+          `address_of(${field && found.delta ? `${va}[0].${field.name}` : va})`,
+          address,
+        );
+        return field
+          ? base
+          : this.printer.binary('+', base, this.printer.literal(found.delta, 64), address);
+      }
+      if (field && found.delta) {
+        const pointer = {
+          text: `&${va}[0].${field.name}`,
+          type: field.pointer ? 'void**' : 'uint32_t*',
+        };
+        return { text: `(uintptr_t)${pointer.text}`, precedence: UNARY, ctype: address, pointer };
+      }
+      const base: Printed = { text: `(uintptr_t)${va}`, precedence: UNARY, ctype: address };
+      return found.delta
+        ? this.printer.binary('+', base, this.printer.literal(found.delta, 64), address)
+        : base;
+    }
     const member =
       found && (found.delta === 0n || !found.member.scalar)
         ? `${name}.${object.field(found.member.offset)}`
@@ -4067,6 +4114,17 @@ export class Renderer {
       found = this.frameMemberAt(object, offset),
       spelled = this.plainAccessSpelling(node);
     const member = found && `${name}.${object.field(found.member.offset)}`;
+    if (found?.member.va) {
+      // SysV `va_list` (S7): exactly one field; its pointers read as address
+      // bits and are written from `void *` (`vaPointerStores`).
+      const field = VA_LIST_FIELDS.get(found.delta);
+      if (field?.bytes !== bits / 8n || !this.permitUnaligned(node)) return undefined;
+      const text = `${name}.va[0].${field.name}`;
+      if (!field.pointer || this.language !== 'c-like') return text;
+      if (node.kind === 'load') return `(uintptr_t)${text}`;
+      this.vaPointerStores.add(node.id);
+      return text;
+    }
     let text: string | undefined;
     if (
       found?.member.scalar &&
@@ -4090,6 +4148,21 @@ export class Renderer {
           : `*(${spelled} *)((uint8_t *)&${name} + ${this.printer.literal(delta, 64).text})`;
     }
     return this.permitUnaligned(node) ? text : undefined;
+  }
+
+  /** SysV `va_list` (S7): `va_start(frame.va, <last named>);` in place of the
+   * last hidden store of its lowering (`anchor`), which it maps to. */
+  private vaStart(anchor: Instruction, depth: number): void {
+    const stack = this.program.source?.stack;
+    if (stack?.kind !== 'object' || !stack.members.some((member) => member.va))
+      this.invalid('A SysV va_start has no va_list frame member');
+    const start = this.writer.offset,
+      last = this.namedLast;
+    this.writer.statement(
+      depth,
+      `va_start(${this.sourceIdentifier(stack.id, 'frame')}.va${last ? `, ${last}` : ''})`,
+    );
+    this.map(anchor, start);
   }
 
   /** Source view (S4): the struct tag of the incoming object and its member
@@ -4809,6 +4882,10 @@ export class Renderer {
           const punned = this.punnedLocal(node);
           if (node.kind === 'store' && punned) {
             text = `${storage} = ${this.reinterpret(this.value(node.value), node.value.type, punned.type, node.id, true)!.text}`;
+            break;
+          }
+          if (node.kind === 'store' && this.vaPointerStores.has(node.id)) {
+            text = `${storage} = ${this.pointerValue(this.printed(node.value), 'void *')}`;
             break;
           }
           if (node.kind === 'store') {
@@ -6476,6 +6553,7 @@ export class Renderer {
       block.statements.some(
         (node) =>
           printed(node.id) ||
+          node.id === this.vaList?.anchor ||
           (this.program.retained.has(node.id) &&
             !this.flagAccesses.has(node.id) &&
             !('result' in node && this.inlined.has(node.result.id)) &&
@@ -8128,6 +8206,15 @@ export class Renderer {
         for (const copy of control.transfer.copies) ids.push(copy.source.id, copy.destination.id);
         break;
       case 'if': {
+        // Source view (S7): the dropped `al` guard of a SysV va_start. Its arms
+        // print nothing (the vector stores are va_start's), nor does its pure test.
+        if (control.id === this.vaList?.guard) {
+          if (!this.emptyArm(control.when_true) || !this.emptyArm(control.when_false))
+            this.invalid('The dropped va_start guard has a printed arm');
+          this.silentArm(control.when_true, depth, control);
+          this.silentArm(control.when_false, depth, control);
+          break;
+        }
         ids.push(control.condition.id);
         const flag = this.sourceView ? this.flagTests.get(control.id) : undefined;
         if (flag) {
@@ -8632,6 +8719,7 @@ export class Renderer {
           !('result' in node && this.inlined.has(node.result.id))
         )
           this.reader(() => this.instruction(node, depth));
+        if (node.id === this.vaList?.anchor) this.vaStart(node, depth);
         this.sourceDefinitions(node.id, depth);
         for (const store of this.deferred.get(node.id) ?? [])
           this.reader(() => this.instruction(store, depth));
@@ -9030,9 +9118,11 @@ export class Renderer {
             w.statement(2, `uint8_t pad_${(-end).toString(16)}[${member.offset - end}]`);
           w.statement(
             2,
-            member.scalar
-              ? `${this.frameMemberType(member)} ${field}`
-              : `uint8_t ${field}[${member.size}]`,
+            member.va
+              ? 'va_list va'
+              : member.scalar
+                ? `${this.frameMemberType(member)} ${field}`
+                : `uint8_t ${field}[${member.size}]`,
           );
           packed ||= member.scalar && (member.offset - stack.minimum_offset) % member.size !== 0n;
           end = member.offset + member.size;
@@ -9046,9 +9136,12 @@ export class Renderer {
         );
         for (const member of stack.members) {
           this.context.checkpoint(1);
+          // The SysV `va_list` (S7) states its offset beside its name.
           w.statement(
             1,
-            `${name}.local_${(-member.offset).toString(16)}: ${member.scalar ? this.frameMemberType(member) : `array<uint8_t, ${member.size}>`}`,
+            member.va
+              ? `${name}.va: va_list  # at entry-SP offset -0x${(-member.offset).toString(16)}`
+              : `${name}.local_${(-member.offset).toString(16)}: ${member.scalar ? this.frameMemberType(member) : `array<uint8_t, ${member.size}>`}`,
           );
         }
       }
@@ -9098,7 +9191,7 @@ export class Renderer {
         this.inlinedCalls.has(value.id) ||
         formals.has(value.id) ||
         this.program.source?.stack_addresses.has(value.id) ||
-        this.program.source?.variadic?.area.id === value.id ||
+        variadicArea(this.program.source?.variadic)?.id === value.id ||
         this.vanishedVariable(value)
       )
         continue;
@@ -9112,7 +9205,9 @@ export class Renderer {
       this.mapped(this.dataOrigin(value.id), start, [value.id]);
       this.emitNotes(value.id, 1);
     }
-    const variadic = ellipsis ? this.program.source!.variadic!.area : undefined;
+    // A SysV `va_list` (S7) prints `va_start` where its lowering ended.
+    this.namedLast = ellipsis ? parameters.at(-1)?.name : undefined;
+    const variadic = ellipsis ? variadicArea(this.program.source!.variadic) : null;
     if (variadic) {
       // `va_start` names the last named formal; with none (C23) only `va`.
       const name = this.local(variadic),

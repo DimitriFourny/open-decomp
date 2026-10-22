@@ -1,4 +1,4 @@
-import type { OperationContext, RegisterDescriptor } from '../core/index.js';
+import type { AbiProfile, OperationContext, RegisterDescriptor } from '../core/index.js';
 import type { StackFact } from '../analysis/stack/index.js';
 import { instructionOperands } from '../analysis/effects/index.js';
 import {
@@ -322,54 +322,10 @@ export function classifyVariadicArea(
   }
   const entry = blocks.get(input.function.entry)!;
   if (facts.reentered) return null;
-  const registers = (type: 'integer' | 'float'): RegisterDescriptor[] =>
-    abi
-      .classifyCall({
-        returns: { kind: 'void' },
-        parameters: Array.from({ length: 4 }, () =>
-          type === 'integer'
-            ? { kind: 'integer' as const, bits: 64, signed: false }
-            : { kind: 'float' as const, bits: 64 as const },
-        ),
-        variadic: false,
-        fixed_parameter_count: 4,
-      })
-      .parameters.flatMap((parameter) => {
-        const location = parameter.locations[0];
-        return location?.kind === 'register' && parameter.locations.length === 1
-          ? [{ ...location.register, width_bits: location.width_bits }]
-          : [];
-      });
-  const integers = registers('integer'),
-    floats = registers('float');
+  const integers = argumentRegisters(abi, 'integer', 4),
+    floats = argumentRegisters(abi, 'float', 4);
   if (integers.length !== 4 || floats.length !== 4) return null;
   const named = Number((area - 8n) / 8n);
-  // The whole 64-bit entry value of `root`: its one full cell or its cells
-  // concatenated low to high, possibly through same-width bitcasts.
-  const entryValue = (start: Value, root: string): boolean => {
-    let value = start;
-    for (let depth = 0; depth < 8 && bitWidth(value.type) === 64; depth++) {
-      const expression = facts.expressions.get(value.id);
-      let low = 0;
-      for (const piece of expression?.kind === 'concat' ? expression.values : [value]) {
-        const binding = entry.register_entry.find(
-          (candidate) => candidate.value.id === piece.id && candidate.register.root === root,
-        );
-        if (
-          binding?.register.offset_bits !== low ||
-          bitWidth(piece.type) !== binding.register.width_bits
-        ) {
-          low = -1;
-          break;
-        }
-        low += binding.register.width_bits;
-      }
-      if (low === 64) return true;
-      if (expression?.kind !== 'cast' || expression.op !== 'bitcast') return false;
-      value = expression.value;
-    }
-    return false;
-  };
   const stores: string[] = [];
   for (let index = named; index < 4; index++) {
     const slot = 8n + 8n * BigInt(index);
@@ -378,7 +334,7 @@ export function classifyVariadicArea(
         access.node.kind === 'store' &&
         access.offset === slot &&
         access.end === slot + 8n &&
-        entryValue(access.node.value, integers[index]!.root),
+        entryBits(facts.expressions, entry, access.node.value, integers[index]!.root, 0, 64),
     );
     if (
       own.length !== 1 ||
@@ -404,28 +360,157 @@ export function classifyVariadicArea(
     const access = offsets.get(node.id);
     if (access ? access.offset < 40n && access.end > area : facts.unknownOffset(node)) return null;
   }
-  // Uses: every value an effect, a control decision, a call or tail argument,
-  // or a projected result depends on. The home stores' values are va_start's.
-  // A memory access's register snapshot is fault state, not a source use.
+  // The home stores' values are va_start's.
+  const { used } = entryRegisterUses(facts, entry, new Set(), homeStores, context);
+  const positions: RegisterDescriptor[] = [];
+  for (let index = 0; index < 4; index++) {
+    const integer = used(integers[index]!),
+      float = used(floats[index]!);
+    if (index >= named ? integer || float : integer && float) return null;
+    if (index < named) positions.push(float ? floats[index]! : integers[index]!);
+  }
+  return { offset: area, named: positions, stores };
+}
+
+/** The first `count` argument registers of one class (64-bit integers or
+ * doubles), as the ABI assigns them to a prototyped call; fewer when the
+ * class has fewer registers. */
+function argumentRegisters(
+  abi: AbiProfile,
+  type: 'integer' | 'float',
+  count: number,
+): RegisterDescriptor[] {
+  return abi
+    .classifyCall({
+      returns: { kind: 'void' },
+      parameters: Array.from({ length: count }, () =>
+        type === 'integer'
+          ? { kind: 'integer' as const, bits: 64, signed: false }
+          : { kind: 'float' as const, bits: 64 as const },
+      ),
+      variadic: false,
+      fixed_parameter_count: count,
+    })
+    .parameters.flatMap((parameter) => {
+      const location = parameter.locations[0];
+      return location?.kind === 'register' && parameter.locations.length === 1
+        ? [{ ...location.register, width_bits: location.width_bits }]
+        : [];
+    });
+}
+
+/** `value` is exactly the entry bits `[low, low + width)` of register `root`
+ * in `entry`: one entry cell, entry cells concatenated low to high, a slice
+ * of such a value, or a same-width bitcast of one. */
+function entryBits(
+  expressions: ReadonlyMap<string, Expression>,
+  entry: BlockRegion,
+  value: Value,
+  root: string,
+  low: number,
+  width: number,
+  depth = 0,
+): boolean {
+  if (depth > 8 || bitWidth(value.type) !== width) return false;
+  const binding = entry.register_entry.find((cell) => cell.value.id === value.id);
+  if (binding)
+    return (
+      binding.register.root === root &&
+      binding.register.offset_bits === low &&
+      binding.register.width_bits === width
+    );
+  const expression = expressions.get(value.id);
+  if (expression?.kind === 'cast' && expression.op === 'bitcast')
+    return entryBits(expressions, entry, expression.value, root, low, width, depth + 1);
+  if (expression?.kind === 'extract')
+    return (
+      low >= expression.offset &&
+      entryBits(
+        expressions,
+        entry,
+        expression.value,
+        root,
+        low - expression.offset,
+        bitWidth(expression.value.type),
+        depth + 1,
+      )
+    );
+  if (expression?.kind !== 'concat') return false;
+  let offset = low;
+  for (const piece of expression.values) {
+    if (!entryBits(expressions, entry, piece, root, offset, bitWidth(piece.type), depth + 1))
+      return false;
+    offset += bitWidth(piece.type);
+  }
+  return offset === low + width;
+}
+
+/** Source uses of the entry register values: every value an effect, a control
+ * decision, a call or tail argument, or a projected result depends on.
+ * Statements and controls in `ignored` are no uses; the stored values of the
+ * stores in `spilled` are not either (their addresses are). A memory access's
+ * register snapshot is fault state, and a register still holding its own entry
+ * bits at an exit, on any path into it, is not a use. `used` reads only the
+ * argument bits of a register: a vector register's upper lanes may flow
+ * through unchanged into a result's register image. */
+function entryRegisterUses(
+  facts: {
+    readonly blocks: ReadonlyMap<string, BlockRegion>;
+    readonly expressions: ReadonlyMap<string, Expression>;
+    readonly incoming: ReadonlyMap<string, readonly Value[]>;
+    readonly calls: ReadonlyMap<string, BoundaryProjection>;
+    readonly returns: ReadonlyMap<string, BoundaryProjection>;
+  },
+  entry: BlockRegion,
+  ignored: ReadonlySet<string>,
+  spilled: ReadonlySet<string>,
+  context: OperationContext,
+): {
+  /** Values used directly: memory addresses, stored values, arguments, tests, results. */
+  readonly roots: ReadonlySet<string>;
+  readonly reached: ReadonlySet<string>;
+  readonly used: (
+    register: Pick<RegisterDescriptor, 'root' | 'offset_bits' | 'width_bits'>,
+  ) => boolean;
+} {
   const reached = new Set<string>(),
     pending: Value[] = [];
-  // A register still holding its own entry value at an exit is not a use.
   const exits = (bindings: readonly { register: RegisterDescriptor; value: Value }[]) => {
-    for (const binding of bindings)
-      if (
-        !entry.register_entry.some(
-          (cell) =>
-            cell.value.id === binding.value.id && cell.register.root === binding.register.root,
+    for (const { register, value: exit } of bindings) {
+      const seen = new Set<string>(),
+        walk = [exit];
+      while (walk.length) {
+        context.checkpoint(1);
+        const value = walk.pop()!;
+        if (seen.has(value.id)) continue;
+        seen.add(value.id);
+        if (
+          entry.register_entry.some(
+            (cell) => cell.value.id === value.id && cell.register.root === register.root,
+          ) ||
+          entryBits(
+            facts.expressions,
+            entry,
+            value,
+            register.root,
+            register.offset_bits,
+            register.width_bits,
+          )
         )
-      )
-        pending.push(binding.value);
+          continue;
+        const sources = facts.expressions.has(value.id) ? undefined : facts.incoming.get(value.id);
+        if (sources) walk.push(...sources);
+        else pending.push(value);
+      }
+    }
   };
-  for (const block of blocks.values()) {
+  for (const block of facts.blocks.values()) {
     for (const node of block.statements) {
       context.checkpoint(1);
+      if (ignored.has(node.id)) continue;
       if (node.kind === 'load') pending.push(node.address);
       else if (node.kind === 'store')
-        pending.push(...(homeStores.has(node.id) ? [node.address] : [node.address, node.value]));
+        pending.push(...(spilled.has(node.id) ? [node.address] : [node.address, node.value]));
       else if (node.kind === 'call') {
         const projection = facts.calls.get(node.id);
         if (node.target.kind === 'indirect') pending.push(node.target.value);
@@ -438,6 +523,7 @@ export function classifyVariadicArea(
       } else if (node.kind !== 'assign') pending.push(...instructionOperands(node));
     }
     const control = block.control;
+    if (ignored.has(control.id)) continue;
     if (control.kind === 'if') pending.push(control.condition);
     else if (control.kind === 'switch') pending.push(control.value);
     else if (control.kind === 'indirect') {
@@ -451,6 +537,7 @@ export function classifyVariadicArea(
       } else exits(block.register_exit);
     }
   }
+  const roots = new Set(pending.map((value) => value.id));
   while (pending.length) {
     context.checkpoint(1);
     const value = pending.pop()!;
@@ -460,22 +547,397 @@ export function classifyVariadicArea(
     if (expression) pending.push(...expressionOperands(expression));
     pending.push(...(facts.incoming.get(value.id) ?? []));
   }
-  // Only the argument bits count: a vector register's upper lanes may flow
-  // through unchanged into a result's register image.
-  const used = (register: RegisterDescriptor): boolean =>
-    entry.register_entry.some(
-      (binding) =>
-        binding.register.root === register.root &&
-        binding.register.offset_bits < register.offset_bits + register.width_bits &&
-        binding.register.offset_bits + binding.register.width_bits > register.offset_bits &&
-        reached.has(binding.value.id),
-    );
-  const positions: RegisterDescriptor[] = [];
-  for (let index = 0; index < 4; index++) {
-    const integer = used(integers[index]!),
-      float = used(floats[index]!);
-    if (index >= named ? integer || float : integer && float) return null;
-    if (index < named) positions.push(float ? floats[index]! : integers[index]!);
+  return {
+    roots,
+    reached,
+    used: (register) =>
+      entry.register_entry.some(
+        (binding) =>
+          binding.register.root === register.root &&
+          binding.register.offset_bits < register.offset_bits + register.width_bits &&
+          binding.register.offset_bits + binding.register.width_bits > register.offset_bits &&
+          reached.has(binding.value.id),
+      ),
+  };
+}
+
+/** A SysV AMD64 callee-side `va_start` footprint (`classifySysvVaStart`). */
+export interface SysvVaStart {
+  /** Entry-SP offset of the 24-byte `va_list`. */
+  readonly va: bigint;
+  /** Entry-SP offset of the 176-byte register save area. */
+  readonly save: bigint;
+  /** Entry-SP offset of the first anonymous stack argument (`overflow_arg_area`). */
+  readonly overflow: bigint;
+  /** The named argument registers: the first `g` integer ones, then the first
+   * `f` vector ones (one valid order: SysV assigns the classes independently). */
+  readonly named: readonly RegisterDescriptor[];
+  /** Every footprint store, in program order. */
+  readonly stores: readonly string[];
+  /** The last footprint store, on every path. */
+  readonly anchor: string;
+  /** The `al != 0` guard `if` around the vector register stores, or null. */
+  readonly guard: string | null;
+}
+
+const SAVE_AREA_BYTES = 176n;
+
+/** Source view, SysV AMD64: the exact code `va_start` lowers to. With `g`
+ * named integer and `f` named vector argument registers and `s` bytes of named
+ * stack arguments:
+ * - register save area at entry-SP offset R (a 16-aligned address): for each
+ *   i in [g, 6) one 64-bit store of the entry value of integer argument
+ *   register i at R + 8i, unconditional (entry block or join); for each j in
+ *   [f, 8) one 128-bit store of the entry value of vector argument register j
+ *   at R + 48 + 16j, all in the one block the entry block's `al != 0` test
+ *   enters (and leaves only for the join it skips to; no edge copies);
+ * - `va_list` at offset v, unconditional: `gp_offset = 8g` and
+ *   `fp_offset = 48 + 16f` (two 32-bit stores or one 64-bit store),
+ *   `overflow_arg_area` (v + 8) = entry SP + 8 + s, `reg_save_area`
+ *   (v + 16) = R; named stack formals tile [8, 8 + s);
+ * - before the last footprint store (on every path) no call, unknown effect,
+ *   escape of a frame address, other access to either area or access through
+ *   a frame address of unknown offset;
+ * - anywhere: no other access to the save area, and no use of an address in
+ *   it except the footprint's; every other access to the `va_list` is exactly
+ *   one of its fields, kept in memory; no indexed `va_list` address and no
+ *   taken one strictly inside a field; no other known-offset access at or above
+ *   the entry SP than bound named formals and return-address reads;
+ * - the entry values of the saved registers and of `al` have no other use.
+ * Anything else: null, no rewrite. */
+export function classifySysvVaStart(
+  facts: {
+    readonly input: EmissionInput;
+    readonly blocks: ReadonlyMap<string, BlockRegion>;
+    readonly expressions: ReadonlyMap<string, Expression>;
+    /** Phi destination -> its incoming sources. */
+    readonly incoming: ReadonlyMap<string, readonly Value[]>;
+    readonly predecessors: ReadonlyMap<string, readonly string[]>;
+    readonly calls: ReadonlyMap<string, BoundaryProjection>;
+    readonly returns: ReadonlyMap<string, BoundaryProjection>;
+    readonly accesses: readonly {
+      readonly node: Extract<Instruction, { kind: 'load' | 'store' }>;
+      readonly block: string;
+      readonly offset: bigint;
+      readonly end: bigint;
+    }[];
+    /** Known entry-SP offsets of frame-derived values (the analysis map). */
+    readonly addresses: ReadonlyMap<string, bigint>;
+    /** The addresses printed as such (not read back from memory). */
+    readonly presented: ReadonlyMap<string, bigint>;
+    /** A value derived from a frame address. */
+    readonly tainted: (value: Value) => boolean;
+    /** A memory access the stack plan keeps as memory (not hidden or promoted). */
+    readonly kept: (id: string) => boolean;
+    /** Statement ids of incoming slots bound as named formals. */
+    readonly bound: ReadonlySet<string>;
+    /** Frame offsets dynamically indexed accesses derive from. */
+    readonly indexed: ReadonlySet<bigint>;
+  },
+  context: OperationContext,
+): SysvVaStart | null {
+  const { input, blocks, expressions, accesses, addresses } = facts;
+  const abi = input.source!.abi;
+  if (abi.id !== 'sysv-amd64') return null;
+  const entry = blocks.get(input.function.entry)!;
+  if (facts.predecessors.get(entry.id)?.length) return null;
+  const integers = argumentRegisters(abi, 'integer', 6),
+    vectors = argumentRegisters(abi, 'float', 8);
+  // `al` bounds the vector registers a variadic call uses.
+  const al = abi
+    .classifyCall({
+      returns: { kind: 'void' },
+      parameters: [],
+      variadic: true,
+      fixed_parameter_count: 0,
+    })
+    .implicit_register_inputs.find(
+      (input) => input.purpose === 'vector_argument_register_upper_bound',
+    )?.register;
+  if (integers.length !== 6 || vectors.length !== 8 || !al) return null;
+  // The entry block's `al` test: the block it enters when al != 0 (the vector
+  // stores) and the join both reach.
+  let guard: { control: string; stores: BlockRegion; join: BlockRegion } | null = null;
+  const control = entry.control;
+  if (control.kind === 'if') {
+    // Exactly `al` (possibly `al & al`, `al | al` or extended).
+    const alOnly = (value: Value, depth = 0): boolean => {
+      if (depth > 8) return false;
+      if (
+        entry.register_entry.some(
+          (binding) =>
+            binding.value.id === value.id &&
+            binding.register.root === al.root &&
+            binding.register.offset_bits === al.offset_bits &&
+            binding.register.width_bits === al.width_bits,
+        )
+      )
+        return true;
+      const expression = expressions.get(value.id);
+      if (expression?.kind === 'cast')
+        return (
+          (expression.op === 'bitcast' || expression.op === 'zero_extend') &&
+          alOnly(expression.value, depth + 1)
+        );
+      return (
+        expression?.kind === 'integer' &&
+        (expression.op === 'and' || expression.op === 'or') &&
+        expression.left.id === expression.right.id &&
+        alOnly(expression.left, depth + 1)
+      );
+    };
+    const zero = (value: Value): boolean => {
+      const expression = expressions.get(value.id);
+      return (
+        expression?.kind === 'constant' &&
+        BigInt.asUintN(bitWidth(value.type), expression.bits) === 0n
+      );
+    };
+    const test = expressions.get(control.condition.id);
+    if (
+      test?.kind !== 'compare' ||
+      (test.op !== 'eq' && test.op !== 'ne') ||
+      !((alOnly(test.left) && zero(test.right)) || (alOnly(test.right) && zero(test.left)))
+    )
+      return null;
+    const nonzero = test.op === 'ne' ? control.when_true : control.when_false,
+      skip = test.op === 'ne' ? control.when_false : control.when_true;
+    const stores = blocks.get(nonzero.transfer.target),
+      join = blocks.get(skip.transfer.target);
+    if (
+      !stores ||
+      !join ||
+      stores.id === join.id ||
+      stores.control.kind !== 'jump' ||
+      stores.control.transfer.target !== join.id ||
+      nonzero.transfer.copies.length ||
+      skip.transfer.copies.length ||
+      stores.control.transfer.copies.length ||
+      facts.predecessors.get(stores.id)?.length !== 1 ||
+      facts.predecessors.get(join.id)?.length !== 2
+    )
+      return null;
+    guard = { control: control.id, stores, join };
   }
-  return { offset: area, named: positions, stores };
+  // Unconditional footprint blocks, in program order, and the guarded one.
+  const plain = guard ? [entry, guard.join] : [entry];
+  const plainIds = new Set(plain.map((block) => block.id));
+  const byNode = new Map(accesses.map((access) => [access.node.id, access]));
+  const stored = (block: (id: string) => boolean, offset: bigint, bytes: bigint) =>
+    accesses.filter(
+      (access) =>
+        access.node.kind === 'store' &&
+        block(access.block) &&
+        access.offset === offset &&
+        access.end === offset + bytes &&
+        !access.node.access.volatile &&
+        access.node.access.endian === abi.layout.endian &&
+        facts.kept(access.node.id),
+    ) as (Omit<(typeof accesses)[number], 'node'> & {
+      readonly node: Extract<Instruction, { kind: 'store' }>;
+    })[];
+  const constant = (value: Value): bigint | undefined => {
+    const expression = expressions.get(value.id);
+    return expression?.kind === 'constant'
+      ? BigInt.asUintN(bitWidth(value.type), expression.bits)
+      : undefined;
+  };
+  const unconditional = (id: string): boolean => plainIds.has(id);
+  // `overflow_arg_area`: the one unconditional frame store of an incoming address.
+  const overflow = accesses.filter(
+    (access) =>
+      access.node.kind === 'store' &&
+      unconditional(access.block) &&
+      access.end - access.offset === 8n &&
+      access.end <= 0n &&
+      (addresses.get(access.node.value.id) ?? -1n) >= 8n,
+  );
+  if (overflow.length !== 1) return null;
+  const va = overflow[0]!.offset - 8n,
+    incoming = addresses.get(
+      (overflow[0]!.node as Extract<Instruction, { kind: 'store' }>).value.id,
+    )!;
+  if (stored(unconditional, va + 8n, 8n).length !== 1 || incoming % 8n) return null;
+  const saveStore = stored(unconditional, va + 16n, 8n);
+  if (saveStore.length !== 1) return null;
+  const save = addresses.get(saveStore[0]!.node.value.id);
+  if (
+    save === undefined ||
+    (save + abi.stack_return_address_bytes) % 16n !== 0n ||
+    save + SAVE_AREA_BYTES > 0n ||
+    !(va + 24n <= save || save + SAVE_AREA_BYTES <= va)
+  )
+    return null;
+  // `gp_offset` and `fp_offset`: one 64-bit store or two 32-bit stores.
+  const wide = stored(unconditional, va, 8n),
+    gpStores = stored(unconditional, va, 4n),
+    fpStores = stored(unconditional, va + 4n, 4n);
+  let offsets: bigint | undefined;
+  const counters: string[] = [];
+  if (wide.length === 1 && !gpStores.length && !fpStores.length) {
+    offsets = constant(wide[0]!.node.value);
+    counters.push(wide[0]!.node.id);
+  } else if (!wide.length && gpStores.length === 1 && fpStores.length === 1) {
+    const gp = constant(gpStores[0]!.node.value),
+      fp = constant(fpStores[0]!.node.value);
+    if (gp !== undefined && fp !== undefined) offsets = gp | (fp << 32n);
+    counters.push(gpStores[0]!.node.id, fpStores[0]!.node.id);
+  }
+  if (offsets === undefined) return null;
+  const gp = offsets & 0xffffffffn,
+    fp = offsets >> 32n;
+  if (gp % 8n || gp > 48n || fp < 48n || (fp - 48n) % 16n || fp > 176n) return null;
+  const g = Number(gp / 8n),
+    f = Number((fp - 48n) / 16n);
+  // A guard needs vector stores; without one there are none.
+  if ((guard !== null) !== f < 8) return null;
+  const footprint = new Set<string>([overflow[0]!.node.id, saveStore[0]!.node.id, ...counters]);
+  for (let index = g; index < 6; index++) {
+    const own = stored(unconditional, save + 8n * BigInt(index), 8n).filter((access) =>
+      entryBits(expressions, entry, access.node.value, integers[index]!.root, 0, 64),
+    );
+    if (own.length !== 1) return null;
+    footprint.add(own[0]!.node.id);
+  }
+  for (let index = f; index < 8; index++) {
+    const own = stored(
+      (id) => id === guard!.stores.id,
+      save + 48n + 16n * BigInt(index),
+      16n,
+    ).filter((access) =>
+      entryBits(expressions, entry, access.node.value, vectors[index]!.root, 0, 128),
+    );
+    if (own.length !== 1) return null;
+    footprint.add(own[0]!.node.id);
+  }
+  // The guarded block holds the vector stores and pure definitions only.
+  if (guard?.stores.statements.some((node) => node.kind !== 'assign' && !footprint.has(node.id)))
+    return null;
+  // Named stack formals tile the bytes up to the first anonymous one.
+  const stack = incoming - 8n;
+  if (stack > 0n && g < 6 && f < 8) return null;
+  for (let slot = 8n; slot < incoming; slot += 8n)
+    if (
+      !accesses.some(
+        (access) =>
+          access.offset === slot && access.end === slot + 8n && facts.bound.has(access.node.id),
+      )
+    )
+      return null;
+  const inSave = (offset: bigint, end: bigint): boolean =>
+    offset < save + SAVE_AREA_BYTES && end > save;
+  const inVa = (offset: bigint, end: bigint): boolean => offset < va + 24n && end > va;
+  // Program order through the footprint; the anchor is its last store, which
+  // must lie on every path.
+  const order = guard ? [entry, guard.stores, guard.join] : [entry];
+  const stores: Instruction[] = [],
+    blockOf = new Map<string, string>();
+  for (const block of order)
+    for (const node of block.statements)
+      if (footprint.has(node.id)) {
+        stores.push(node);
+        blockOf.set(node.id, block.id);
+      }
+  const anchor = stores.at(-1)!;
+  if (stores.length !== footprint.size || !unconditional(blockOf.get(anchor.id)!)) return null;
+  scan: for (const block of order)
+    for (const node of block.statements) {
+      context.checkpoint(1);
+      if (node === anchor) break scan;
+      if (footprint.has(node.id) || node.kind === 'assign') continue;
+      if (node.kind !== 'load' && node.kind !== 'store') return null;
+      if (node.kind === 'store' && facts.tainted(node.value)) return null;
+      const access = byNode.get(node.id);
+      if (
+        access
+          ? inSave(access.offset, access.end) || inVa(access.offset, access.end)
+          : facts.tainted(node.address)
+      )
+        return null;
+    }
+  const fields = new Set([
+    `${va}:${va + 4n}`,
+    `${va + 4n}:${va + 8n}`,
+    `${va + 8n}:${va + 16n}`,
+    `${va + 16n}:${va + 24n}`,
+  ]);
+  for (const access of accesses) {
+    context.checkpoint(1);
+    if (footprint.has(access.node.id)) continue;
+    const type = access.node.kind === 'load' ? access.node.result.type : access.node.value.type;
+    if (inSave(access.offset, access.end)) return null;
+    if (
+      inVa(access.offset, access.end) &&
+      (!fields.has(`${access.offset}:${access.end}`) ||
+        type.kind !== 'integer' ||
+        access.node.access.volatile ||
+        access.node.access.endian !== 'little' ||
+        !facts.kept(access.node.id))
+    )
+      return null;
+    // A load of the pushed return address is the return's own read.
+    if (
+      access.end > 0n &&
+      !facts.bound.has(access.node.id) &&
+      !(
+        access.node.kind === 'load' &&
+        access.offset === 0n &&
+        access.end <= abi.stack_return_address_bytes
+      )
+    )
+      return null;
+  }
+  for (const offset of facts.indexed) if (inVa(offset, offset + 1n)) return null;
+  for (const offset of facts.presented.values())
+    if (
+      offset > va &&
+      offset < va + 24n &&
+      offset !== va + 4n &&
+      offset !== va + 8n &&
+      offset !== va + 16n
+    )
+      return null;
+  // Neither the save area's addresses, nor the saved registers, nor `al` have
+  // any use but the footprint (and the dropped guard). A save-area address
+  // may only be the base of another printed address (the stack pointer below
+  // a red-zone frame is the base of every frame address).
+  const { roots, reached, used } = entryRegisterUses(
+    facts,
+    entry,
+    new Set([...footprint, ...(guard ? [guard.control] : [])]),
+    new Set(),
+    context,
+  );
+  const users = new Map<string, string[]>();
+  const user = (operand: Value, result: string): void => {
+    const row = users.get(operand.id) ?? [];
+    row.push(result);
+    users.set(operand.id, row);
+  };
+  for (const [id, expression] of expressions) {
+    context.checkpoint(1);
+    if (reached.has(id)) for (const operand of expressionOperands(expression)) user(operand, id);
+  }
+  for (const [id, sources] of facts.incoming)
+    if (reached.has(id)) for (const source of sources) user(source, id);
+  for (const [id, offset] of facts.presented)
+    if (
+      reached.has(id) &&
+      inSave(offset, offset + 1n) &&
+      (roots.has(id) || users.get(id)?.some((result) => !facts.presented.has(result)))
+    )
+      return null;
+  if (used(al)) return null;
+  for (let index = g; index < 6; index++) if (used(integers[index]!)) return null;
+  for (let index = f; index < 8; index++)
+    if (used({ root: vectors[index]!.root, offset_bits: 0, width_bits: 128 })) return null;
+  return {
+    va,
+    save,
+    overflow: incoming,
+    named: [...integers.slice(0, g), ...vectors.slice(0, f)],
+    stores: stores.map((node) => node.id),
+    anchor: anchor.id,
+    guard: guard?.control ?? null,
+  };
 }

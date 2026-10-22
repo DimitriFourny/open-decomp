@@ -1410,7 +1410,7 @@ export function planSource(
   let entryParameter: Value | null = null,
     incomingObjectParameter: Value | null = null,
     // Source view: the named formals before `...`, when they follow ABI
-    // argument positions (Win64); `variadicArea` alone for Darwin.
+    // argument positions (Win64, SysV); `variadicArea` alone for Darwin.
     variadicNamed: readonly Value[] | null = null,
     variadicArea: Value | null = null;
   return {
@@ -1491,6 +1491,11 @@ export function planSource(
             .map((binding) => binding.value),
         );
         return variadicArea;
+      },
+      list(named: readonly Value[]): boolean {
+        if (functionSignature) return false;
+        variadicNamed = named;
+        return true;
       },
     },
     /** Source view (S4): the struct formal naming the incoming bytes kept as
