@@ -267,7 +267,8 @@ A prototype of S1–S3 (unsound, measurement only) gave these results:
 
 ### S3: Stack addresses read back from memory print through their load
 
-- [ ] **Problem.** In the SysV and PE variadic texts, values are assigned to undeclared names (`value4 = …`, `address_5 = …`, `address_2 = address;`); the graders flagged these. Also, `entry_sp + 8` appears where the binary _reloads_ `va.overflow_arg_area`.
+- [x] **Problem.** In the SysV and PE variadic texts, values are assigned to undeclared names (`value4 = …`, `address_5 = …`, `address_2 = address;`); the graders flagged these. Also, `entry_sp + 8` appears where the binary _reloads_ `va.overflow_arg_area`.
+  - **Done (S3):** source-view presentation map (analysis map minus retained-load results and values computed from them) feeds `stack_addresses`, liveness, inline and frame extent; a stored address ≥ 0 requires `entry_sp`; negative reloads are declared (no hiding rule); `assignmentText` assigns only declared variables (source view). Full-tier OD lane changes only the five SysV/PE variadic texts (`-O0 0x401d10`, `-O2 0x401bd0`, stripped `sub@0x401bd0`, PE `-O2 0x140001170`, stripped `sub@0x140001160`); the 13 `entry_sp` functions have no undeclared assignment target (test Parser); their checked views are byte-identical.
   - **Root cause:**
     - The stack plan seeds its address map from every value with a stack fact, including load results (`source-stack.ts:133-137`).
     - The renderer prints such values as address constants (`renderer.ts:1650-1653`) and skips their declarations (`:8933`).
