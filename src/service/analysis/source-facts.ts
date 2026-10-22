@@ -1359,11 +1359,12 @@ function nativeArgumentReaching(
   );
 }
 
-/** A prepared body whose exit FP control state may differ from its entry
- * state: it writes that state (an exit binding differs from the entry binding,
- * an opaque effect or a writer-import call clobbers it) in a block that reaches
- * a return or tail exit, tails into a writer import, or calls a writer callee.
- * A body that restores a saved state through a writer call still counts. */
+/** A prepared body that shows a changed FP control state at a return or tail
+ * exit: a writer-import call in a block that reaches such an exit, a tail into
+ * a writer import, a writer callee, or an exit binding that an explicit write
+ * defines (traced through phis and bitcasts back to anything but the entry
+ * state). An opaque effect is no such evidence: like an unknown callee, the body
+ * rests on `fp_environment_preserved`. A restore through a writer call counts. */
 function environmentWriter(
   input: SourceFactsInput,
   ir: SSAForm,
@@ -1373,6 +1374,9 @@ function environmentWriter(
   if ([...interfaces.values()].some((callee) => callee.fp_environment_writer)) return true;
   const tails = environmentWriterCalls(ir, input.image, input.functions, input.references, context);
   const predecessors = new Map<string, string[]>(),
+    incoming = new Map<string, (readonly Value[])[]>(),
+    parameters = new Map<string, { readonly block: string; readonly index: number }>(),
+    definitions = new Map<string, Instruction>(),
     leaving: string[] = [];
   for (const block of ir.blocks) {
     context.checkpoint(1);
@@ -1380,24 +1384,26 @@ function environmentWriter(
     if (tails.has(control.id)) return true;
     if (control.kind === 'return' || (control.kind === 'indirect' && control.tail_call))
       leaving.push(block.id);
+    for (const [index, value] of block.parameters.entries())
+      parameters.set(value.id, { block: block.id, index });
     for (const edge of successors(control)) {
       const row = predecessors.get(edge.target) ?? [];
       row.push(block.id);
       predecessors.set(edge.target, row);
+      const args = incoming.get(edge.target) ?? [];
+      args.push(edge.arguments);
+      incoming.set(edge.target, args);
     }
   }
-  const entry = new Map<string, string>();
   const states = new Map(ir.register_states.map((state) => [state.block, state]));
+  const entry = new Set<string>(),
+    stack: string[] = [];
   for (const binding of states.get(ir.entry)?.entry ?? [])
-    if (fpEnvironmentRegister(binding.register)) entry.set(binding.register.id, binding.value.id);
+    if (fpEnvironmentRegister(binding.register)) entry.add(binding.value.id);
   for (const id of leaving)
     for (const binding of states.get(id)?.exit ?? []) {
       context.checkpoint(1);
-      if (
-        fpEnvironmentRegister(binding.register) &&
-        entry.get(binding.register.id) !== binding.value.id
-      )
-        return true;
+      if (fpEnvironmentRegister(binding.register)) stack.push(binding.value.id);
     }
   const reaching = new Set(leaving);
   for (let cursor = 0; cursor < leaving.length; cursor++)
@@ -1407,17 +1413,41 @@ function environmentWriter(
       reaching.add(parent);
       leaving.push(parent);
     }
-  return ir.blocks.some(
-    (block) =>
-      reaching.has(block.id) &&
-      block.instructions.some((node) => {
-        context.checkpoint(1);
-        return (
-          (node.kind === 'call' || node.kind === 'unknown_effect') &&
+  for (const block of ir.blocks)
+    for (const node of block.instructions) {
+      context.checkpoint(1);
+      if (node.kind === 'assign') definitions.set(node.result.id, node);
+      else if (node.kind === 'call' || node.kind === 'unknown_effect') {
+        if (
+          node.kind === 'call' &&
+          reaching.has(block.id) &&
           node.clobbers.registers.some(fpEnvironmentRegister)
-        );
-      }),
-  );
+        )
+          return true;
+        for (const binding of node.register_outputs) definitions.set(binding.value.id, node);
+      }
+    }
+  const seen = new Set<string>();
+  while (stack.length) {
+    context.checkpoint(1);
+    const id = stack.pop()!;
+    if (entry.has(id) || seen.has(id)) continue;
+    seen.add(id);
+    const parameter = parameters.get(id);
+    if (parameter) {
+      for (const args of incoming.get(parameter.block) ?? []) {
+        const value = args[parameter.index];
+        if (value) stack.push(value.id);
+      }
+      continue;
+    }
+    const node = definitions.get(id);
+    if (node?.kind === 'unknown_effect') continue;
+    if (node?.kind === 'assign' && node.expression.kind === 'cast' && node.expression.op === 'bitcast')
+      stack.push(node.expression.value.id);
+    else return true;
+  }
+  return false;
 }
 
 function observeNativeUnit(
