@@ -26,12 +26,14 @@ import type {
   IncomingObject,
   SourceLocal,
   SourceStackStorage,
+  SourceVariadic,
 } from './source-model.js';
 import type { Requirement } from '../core/inference.js';
 import { LocalValidationSession } from './local-validation.js';
 import { type ForwardedByte, validateStackPromotion } from './local-storage-validation.js';
 import { sourceRequirementPredicates } from './source-requirements.js';
 import { classifyIndirectTails } from './source-tails.js';
+import { classifyVariadicArea } from './source-variadic.js';
 
 type MemoryNode = Extract<Instruction, { kind: 'load' | 'store' }>;
 const FRAME_OBJECT_SCOPE =
@@ -403,6 +405,14 @@ export function planSourceStack(
   validation = new LocalValidationSession(context),
   view: PresentationView = 'checked',
   requirements?: readonly Requirement[],
+  /** Source view: the planner's callee-side variadic interface (`...`). */
+  variadic?: {
+    /** The named formals of these argument registers, in order; null when
+     * the interface is declared or a register has no formal. */
+    readonly named: (registers: readonly RegisterDescriptor[]) => readonly Value[] | null;
+    /** Commits `...`: creates the `va` area value at entry-SP `offset`. */
+    readonly area: (offset: bigint, named: readonly Value[] | null) => Value | null;
+  },
 ) {
   const addresses = new Map<string, bigint>(),
     facts = input.types?.calls?.stack;
@@ -600,7 +610,11 @@ export function planSourceStack(
     // addresses, by-value aggregates, va_start) use the same bound.
     incomingFloor: bigint | undefined,
     reachAll = false;
-  const exposedOffsets = new Set<bigint>();
+  const exposedOffsets = new Set<bigint>(),
+    // Source view: floors of exposures derived from the incoming area alone:
+    // every base is known and at or above the entry SP (a pointer into the
+    // incoming arguments, stepped or indexed).
+    incomingBased = new Set<bigint>();
   // Known frame offsets of every address a tainted value is derived from (cell
   // halves, indexed/phi'd pointers, pointers spilled to the frame and reloaded),
   // or null when some tainted leaf has no known origin.
@@ -801,11 +815,10 @@ export function planSourceStack(
     if (floor === null) reachAll = true;
     else {
       if (reachFloor === undefined || floor < reachFloor) reachFloor = floor;
-      if (
-        (bases === null || floor >= 0n || bases.some((offset) => offset >= 0n)) &&
-        (incomingFloor === undefined || floor < incomingFloor)
-      )
-        incomingFloor = floor;
+      if (bases === null || floor >= 0n || bases.some((offset) => offset >= 0n)) {
+        if (incomingFloor === undefined || floor < incomingFloor) incomingFloor = floor;
+        if (bases?.length && bases.every((offset) => offset >= 0n)) incomingBased.add(floor);
+      }
     }
     return bases;
   };
@@ -1560,7 +1573,9 @@ export function planSourceStack(
   }
   const hidden = new Set<string>([...saveStores, ...saveReloads, ...returnAddressPushes]),
     privateLoads = new Set<string>(),
-    locals = new Map<string, SourceLocal>();
+    locals = new Map<string, SourceLocal>(),
+    // Source view: loads bound to incoming formals (named stack arguments).
+    incomingFormalLoads = new Set<string>();
   const saves: FrameSaves = { stores: saveStores, reloads: saveReloads, bytes: saveBytes };
   // An unchanged incoming slot is entry storage supplied by the caller, not a
   // byte array allocated by this function. Bind only exact, loads-only,
@@ -1624,6 +1639,7 @@ export function planSourceStack(
       }
       for (const node of loads) {
         hidden.add(node.id);
+        incomingFormalLoads.add(node.id);
         alias(node.result, { kind: 'cast', op: 'bitcast', value });
       }
     }
@@ -1899,6 +1915,52 @@ export function planSourceStack(
       forward(access.node.result, read);
     }
   }
+  // Source view (S6): the callee's `va_start` area (`classifyVariadicArea`).
+  // Its address replaces the entry SP as the base of every address at or above
+  // it, and Win64's home stores of the anonymous argument registers, which
+  // are `va_start`'s own effect, are hidden.
+  let variadicArea: SourceVariadic | null = null;
+  if (view === 'source' && variadic && !reachAll && facts?.state === 'complete') {
+    const area = classifyVariadicArea(
+      {
+        input,
+        blocks,
+        expressions,
+        incoming,
+        calls,
+        returns,
+        accesses,
+        bound: incomingFormalLoads,
+        floor: incomingFloor,
+        based: incomingBased,
+        unknownOffset: (node) => tainted.has(node.address.id) && !addresses.has(node.address.id),
+        reentered: (predecessors.get(input.function.entry)?.length ?? 0) > 0,
+      },
+      context,
+    );
+    const named = area?.named ? variadic.named(area.named) : null;
+    if (
+      area &&
+      (!area.named || named) &&
+      validation.presentation(
+        'va_start',
+        input.function.id,
+        `callee-side variadic interface: the named formals, then ...; va_start's result (the address of the first anonymous argument, entry SP ${area.offset}) is the source-only va (va_list, char *) and the base of every address at or above it; ${area.stores.length ? `the ${area.stores.length} home-area stores of the anonymous argument registers are va_start's own effect and are hidden; ` : ''}a value based there is dereferenced at non-constant offsets or escapes, and only named formals are accessed below it`,
+        [input.function.id, ...area.stores],
+      )
+    ) {
+      const value = variadic.area(area.offset, named);
+      if (value) {
+        validation.requireAbi(
+          'variadic_convention',
+          [input.function.id, ...area.stores],
+          `Presenting ... and va_start assumes the ${input.source!.abi.id} variadic calling convention: callers pass the anonymous arguments in consecutive 8-byte slots starting at entry SP ${area.offset}${area.stores.length ? ' (the anonymous register arguments spilled to their home slots, as va_start does)' : ''}, and the named formals are exactly those printed before .... Every remaining load and store keeps its address, width and order; the checked view keeps the entry-SP form and the home stores.`,
+        );
+        for (const id of area.stores) hidden.add(id);
+        variadicArea = { area: value, offset: area.offset };
+      }
+    }
+  }
   // Source view: the presentation map, a subset of the analysis map
   // `addresses` (which keeps every offset for taint, escape, floors and slot
   // decisions). An address read back from memory by a load that stays in the
@@ -1987,6 +2049,7 @@ export function planSourceStack(
   const incomingCandidate =
     view === 'source' &&
     !reachAll &&
+    !variadicArea &&
     incomingFloor === undefined &&
     facts?.state === 'complete' &&
     (frameObject || !sharedEntry) &&
@@ -2002,7 +2065,12 @@ export function planSourceStack(
   /** Source view (S4): a presented address inside the incoming object. */
   const requiresIncoming = (id: string): boolean =>
     incomingFormal !== null && (presented.get(id) ?? -1n) >= incomingOrigin;
-  const entryStorage = sharedEntry || entryAddresses.size ? entryStack() : null;
+  // A variadic area stands in for the entry SP: entry SP = va - offset.
+  const entryStorage = variadicArea
+    ? variadicArea.area
+    : sharedEntry || entryAddresses.size
+      ? entryStack()
+      : null;
   const requiresEntry = (id: string): boolean =>
     !requiresIncoming(id) &&
     (entryAddresses.has(id) ||
@@ -2014,7 +2082,20 @@ export function planSourceStack(
         binding.register.root === input.source!.abi.stack_pointer.root &&
         sameType(binding.value.type, entryStorage.type)
       )
-        alias(binding.value, { kind: 'cast', op: 'bitcast', value: entryStorage });
+        alias(
+          binding.value,
+          variadicArea?.offset
+            ? {
+                kind: 'integer',
+                op: 'sub',
+                left: entryStorage,
+                right: make('variadic-entry-offset', entryStorage.type, entry.id, {
+                  kind: 'constant',
+                  bits: variadicArea.offset,
+                }),
+              }
+            : { kind: 'cast', op: 'bitcast', value: entryStorage },
+        );
   const returnAddressLoads = new Map<
     string,
     { node: Extract<Instruction, { kind: 'load' }>; block: string }
@@ -2177,5 +2258,7 @@ export function planSourceStack(
     forwardedReloads,
     /** Source view: indirect exits accepted by `classifyIndirectTails`. */
     indirectTails,
+    /** Source view: the callee-side variadic interface, or null. */
+    variadic: variadicArea,
   };
 }

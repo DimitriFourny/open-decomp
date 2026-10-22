@@ -77,7 +77,12 @@ export function validateReconstruction(program: Reconstruction, context: Operati
     reachable.add(id);
     for (const transfer of transfers(program, id)) pending.push(transfer.target);
   }
-  const definitions = new Set(program.parameters.map((value) => value.id));
+  // The variadic area (`va`) is defined by the `va_start` prologue.
+  const variadic = program.source?.variadic?.area;
+  const definitions = new Set([
+    ...program.parameters.map((value) => value.id),
+    ...(variadic ? [variadic.id] : []),
+  ]);
   const coverage = new Map(program.function.coverage.map((item) => [item.block_id, item]));
   const checkValue = (value: Value): void => {
     context.checkpoint(1);
@@ -224,7 +229,8 @@ export function validateReconstruction(program: Reconstruction, context: Operati
   const entry = stackEntry(storage);
   if (
     entry &&
-    (!program.parameters.some((value) => value.id === entry.id) || !program.live.has(entry.id))
+    ((!program.parameters.some((value) => value.id === entry.id) && entry.id !== variadic?.id) ||
+      !program.live.has(entry.id))
   )
     invalid(program.function, 'entry-backed storage has no live explicit incoming base');
   if (storage?.kind === 'object') {

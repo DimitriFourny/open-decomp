@@ -247,6 +247,17 @@ export type SourceStackStorage = {
 export function stackEntry(stack: SourceStackStorage | null | undefined): Value | null {
   return stack?.kind === 'entry' ? stack.base : stack?.kind === 'object' ? stack.entry : null;
 }
+/** Source view: the function's anonymous arguments follow its named formals
+ * (`...`). `area` is a source-only value holding `va_start`'s result, the
+ * address of the first anonymous argument; it prints as `va` (`va_list`,
+ * `char *` on every supported ABI) after a `va_list va; va_start(va, <last
+ * named>);` prologue, and replaces the entry SP as the base of every address
+ * at or above it: entry-SP offset `k` prints as `(uintptr_t)va + (k - offset)`. */
+export interface SourceVariadic {
+  readonly area: Value;
+  /** Entry-SP offset of the first anonymous argument. */
+  readonly offset: bigint;
+}
 /** One named member of a frame object, in entry-SP coordinates. Bytes between
  * members are padding; every byte stays ordinary, aliasable memory. */
 export interface FrameMember {
@@ -361,4 +372,6 @@ export interface SourcePresentation {
   readonly forwarded_reloads?: ReadonlyMap<string, readonly string[]>;
   /** Ordered pure definitions after an original node; control anchors emit before control. */
   readonly definitions?: ReadonlyMap<string, readonly Extract<Instruction, { kind: 'assign' }>[]>;
+  /** Source view only: the callee-side variadic interface (`va_start`). */
+  readonly variadic?: SourceVariadic;
 }
