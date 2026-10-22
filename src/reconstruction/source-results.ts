@@ -27,7 +27,10 @@ type RegisterLocation = Extract<AbiLocation, { kind: 'register' }>;
  * the rule that makes the function void-like: `incidental_result` when the
  * integer register qualifies, but no exit path establishes it deliberately,
  * no caller demands it and the FP carrier is unchanged, undefined or
- * incidental on every exit; the register stays in exit metadata).
+ * incidental on every exit; the register stays in exit metadata;
+ * `caller_consensus`, set by the planner over any selection here, tail
+ * transfers included, when no caller in the closed image observes a result
+ * register).
  * `incidental_floating` explains why the untyped FP carrier holds only a
  * vector copy or fill temporary and is no result (an `incidental_result`
  * premise of its own). Null means no decision: the caller's existing
@@ -40,13 +43,22 @@ export type SourcePrimaryResult =
       readonly rejected: string;
       readonly untyped?: true;
     }
-  | { readonly kind: 'integer'; readonly reason?: string; readonly incidental_floating?: string }
+  | {
+      readonly kind: 'integer';
+      readonly reason?: string;
+      readonly incidental_floating?: string;
+      readonly floating_inert?: true;
+    }
   | {
       readonly kind: 'explicit' | 'none';
       readonly written: boolean;
       readonly reason: string;
-      readonly void_like?: 'incidental_result' | 'indirect_result';
+      readonly void_like?: 'incidental_result' | 'indirect_result' | 'caller_consensus';
       readonly incidental_floating?: string;
+      /** `integer` and `none`: the FP carrier is unchanged or undefined (unknown entry
+       * value or unprojected call clobber) on every exit, so it carries no result of
+       * this function's own. */
+      readonly floating_inert?: true;
     };
 
 type ExitState =
@@ -828,6 +840,11 @@ export function selectSourcePrimaryResult(
       : item?.kind === 'unchanged'
         ? 'holds the unchanged entry value of a non-argument register on some exit'
         : 'is undefined on some exit (unknown entry value or unprojected call clobber)';
+  const inert: { floating_inert?: true } = floatingStates.every(
+    (item) => item.kind === 'unchanged' || item.kind === 'undefined',
+  )
+    ? { floating_inert: true }
+    : {};
   const integerName = input.integer.register.root,
     floatingName = input.floating.register.root;
   let choice: 'float' | 'integer' | undefined,
@@ -943,12 +960,13 @@ export function selectSourcePrimaryResult(
           void_like: 'incidental_result',
           ...floating,
         }
-      : { kind: 'integer', ...floating };
+      : { kind: 'integer', ...floating, ...inert };
   } else
     return {
       kind: 'none',
       written,
       reason: `neither ${integerName} nor typed ${floatingName} is defined by this function on every exit`,
+      ...inert,
     };
   return choice === 'float'
     ? {

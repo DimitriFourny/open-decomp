@@ -62,6 +62,8 @@ export function planSource(
     calls = new Map<string, BoundaryProjection>(),
     returns = new Map<string, BoundaryProjection>();
   const tails = new Map<string, TailProjection>();
+  /** Tails whose observed callee writes no FP result register (caller consensus). */
+  const floatingInertTails = new Set<string>();
   const callResults = new Map<string, readonly Value[]>(),
     parameterNames = new Map<string, string>();
   const demotedParameters = new Set<string>();
@@ -772,6 +774,14 @@ export function planSource(
       view === 'source' && !args.missing && !variadic && callee.argument_list_closure === undefined
         ? evidence.likely_arity?.get(control.id)
         : undefined;
+    // An observed callee interface whose result storage holds no FP register leaves
+    // the FP carrier unchanged or clobbered: it forwards no FP result.
+    if (
+      callee.parameter_state === 'observed' &&
+      callee.returns.every((register) => register.bank === 'integer') &&
+      (callee.return_types ?? []).every((type) => type.kind === 'integer')
+    )
+      floatingInertTails.add(control.id);
     tails.set(control.id, {
       target: callee.target,
       result_types:
@@ -1259,6 +1269,68 @@ export function planSource(
         )
       )
         primaryResult = { kind: 'explicit', written: true, reason: 'presentation record bound' };
+    }
+  }
+  // Closed-world caller consensus (premise D1): no caller in the image observes a
+  // result register, so the function returns nothing on any path, tails included.
+  // Asked only where the function would otherwise present a result: a selection
+  // that is not void-like, or tail transfers only (no return exit to select from).
+  const tailIds = [...blocks.values()].flatMap((block) =>
+    block.control.kind === 'indirect' && block.control.tail_call ? [block.control.id] : [],
+  );
+  const tailsOnly =
+    primaryResult === null &&
+    !exitIds.length &&
+    tailIds.length > 0 &&
+    integerReturn?.kind === 'register' &&
+    floatingReturn?.kind === 'register';
+  if (
+    view === 'source' &&
+    !functionSignature &&
+    !indirectResult &&
+    !callerDemand?.length &&
+    tailIds.every((id) => tails.has(id)) &&
+    (tailsOnly ||
+      (primaryResult !== null &&
+        (primaryResult.kind !== 'none' ||
+          (!primaryResult.void_like &&
+            ([...tails.values()].some((tail) => !tail.result_void) ||
+              !!evidence.function_returns?.registers.length)))))
+  ) {
+    // The FP carrier holds no result of this function when it is unchanged or
+    // undefined (unknown entry value, unprojected call clobber) on every return exit,
+    // or an incidental copy, and every tail callee writes no FP result register:
+    // then only the integer result register is followed into callers.
+    const floatingInert =
+      (tailsOnly ||
+        ((primaryResult?.kind === 'integer' || primaryResult?.kind === 'none') &&
+          (primaryResult.floating_inert === true ||
+            primaryResult.incidental_floating !== undefined))) &&
+      [...tails].every(([id, tail]) => tail.result_void || floatingInertTails.has(id));
+    const consensus = evidence.function_result_use?.(context, !floatingInert);
+    const anchors = [...exitIds, ...tailIds];
+    if (
+      consensus &&
+      validation.presentation(
+        'caller_consensus',
+        input.function.id,
+        'closed-world caller consensus: the function is not exported, no relocation/rebase/bind/chained fixup targets its entry, no instruction materializes it (ADR, ADRP+ADD; RIP-relative references) or reaches it by a conditional branch or fallthrough, every direct call and tail transfer to it is enumerated and lies in a known function, and after each call the integer result register (and the FP one unless it is unchanged or undefined on every exit and no tail callee writes an FP result) is overwritten before any read or reaches only the return of a caller with the same consensus (tail transfers likewise); the function returns nothing on every path and every tail transfer forwards no result',
+        anchors,
+        `${floatingInert ? 'integer result register' : 'integer and FP result registers'} ignored after ${consensus.sites.map((site) => `0x${site.value.toString(16)}`).join(', ')}`,
+      )
+    ) {
+      validation.requireAbi(
+        'caller_consensus',
+        anchors,
+        'Presenting a void interface assumes a closed world: no code outside the image transfers control to the function (not exported, address never materialized, every direct branch to it enumerated), and callers read results only in the ABI result registers. The result registers keep their exact exit values in the exit metadata and checked view.',
+      );
+      primaryResult = {
+        kind: 'none',
+        written: true,
+        reason: 'every caller ignores the result registers',
+        void_like: 'caller_consensus',
+      };
+      for (const [id, tail] of tails) tails.set(id, { ...tail, result_void: true });
     }
   }
   const primaryScope =

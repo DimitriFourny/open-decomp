@@ -48,11 +48,12 @@ import type { DebugRecovery } from '../../metadata/debug/index.js';
 import type { LibraryContracts } from '../../metadata/library-contracts/index.js';
 import type {
   CallerResultDemand,
+  FunctionResultUse,
   InferredCallee,
   SourceAddress,
   SourceEvidence,
 } from '../../reconstruction/source-model.js';
-import { callerResultDemands } from './caller-result-use.js';
+import { callerResultConsensus, callerResultDemands } from './caller-result-use.js';
 import {
   createNativeUnitPersistence,
   preparedSize,
@@ -2097,6 +2098,18 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
   let callerDemand: CallerResultDemand | null | undefined;
   const callerDemands = (scanContext: OperationContext): CallerResultDemand | undefined =>
     (callerDemand ??= callerResultDemands(input, preparedUnits, scanContext) ?? null) ?? undefined;
+  const resultUse = new Map<boolean, FunctionResultUse | null>();
+  const functionResultUse = (
+    scanContext: OperationContext,
+    floating: boolean,
+  ): FunctionResultUse | undefined => {
+    let found = resultUse.get(floating);
+    if (found === undefined) {
+      found = callerResultConsensus(input, scanContext, floating) ?? null;
+      resultUse.set(floating, found);
+    }
+    return found ?? undefined;
+  };
   const ruleCalls = variadicRuleCalls(input.ir, input.types.calls, input.library, context);
   const objc = objcSourceFacts({
     ir: input.ir,
@@ -2130,6 +2143,7 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
     memory_transfers,
     function_return_demands: [...functionReturnDemands.values()],
     caller_result_demands: callerDemands,
+    function_result_use: functionResultUse,
     ...(function_returns === undefined ? {} : { function_returns }),
     ...(likely_arity === undefined ? {} : { likely_arity }),
     ...(likely_types === undefined ? {} : { likely_types }),
