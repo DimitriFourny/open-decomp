@@ -785,8 +785,8 @@ export function discoverFunctions(
    * explained extent becomes a candidate root when every decoded edge into it is an unconditional
    * direct jump J and every root R whose traversal reaches J has SP at J equal to its entry SP
    * (stack-delta must-dataflow) with T outside R's body: before R's entry, or at or after the next
-   * root above it. R's jump then reads as a direct tail call; the transfer is the same edge. True
-   * when a root was added. */
+   * root above it, so R is not the greatest root at or below T. R's jump then reads as a direct
+   * tail call; the transfer is the same edge. True when a root was added. */
   const promoteTailTargets = (): boolean => {
     const entries = [...seeds.keys()].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
     const depths = new Map<bigint, Map<bigint, StackDelta>>();
@@ -810,14 +810,16 @@ export function discoverFunctions(
       }
       return known;
     };
-    /** Roots whose traversal may reach `value`: backward over decoded edges, stopping at roots. */
-    const owners = (value: bigint): bigint[] => {
+    /** Roots whose traversal may reach `value` (backward over decoded edges, stopping at roots),
+     * or undefined once `home` is among them. */
+    const owners = (value: bigint, home: bigint | undefined): bigint[] | undefined => {
       const roots: bigint[] = [];
       const seen = new Set([value]);
       const work = [value];
       while (work.length) {
         context.checkpoint(1);
         const current = work.pop()!;
+        if (current === home) return undefined;
         if (seedAt(current)) {
           roots.push(current);
           continue;
@@ -856,23 +858,27 @@ export function discoverFunctions(
         )
       )
         continue;
+      // T lies in the body span of the greatest root at or below it, and of no other root.
+      let low = 0,
+        high = entries.length;
+      while (low < high) {
+        context.checkpoint(1);
+        const mid = (low + high) >>> 1;
+        if (entries[mid]! <= target) low = mid + 1;
+        else high = mid;
+      }
+      const home = low > 0 ? entries[low - 1] : undefined;
       const parents: string[] = [];
       const qualified = sources.every((source) => {
+        // The home root's own traversal (shared by every jump into its span) rejects first.
+        if (home !== undefined && depth(home).has(source.address.value)) return false;
+        const roots = owners(source.address.value, home);
+        if (!roots) return false;
         let owned = false;
-        for (const root of owners(source.address.value)) {
+        for (const root of roots) {
           const delta = depth(root).get(source.address.value);
           if (delta === undefined) continue;
-          let low = 0,
-            high = entries.length;
-          while (low < high) {
-            context.checkpoint(1);
-            const mid = (low + high) >>> 1;
-            if (entries[mid]! <= root) low = mid + 1;
-            else high = mid;
-          }
-          const next = entries[low];
-          if (delta !== 0n || (target >= root && (next === undefined || target < next)))
-            return false;
+          if (delta !== 0n) return false;
           owned = true;
           parents.push(...seedAt(root)!.evidence);
         }

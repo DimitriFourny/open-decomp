@@ -39,8 +39,20 @@ One gate; no ordering among sources, only merged evidence.
 | unwind region start                         | no           | none (region may span functions) | executable backing                            |
 | user assertion                              | no           | its ranges                       | assertion-origin evidence; retracted ignored  |
 | direct call target (found later)            | yes          | –                                | executable backing                            |
+| tail-jump target (after the seeded drain)   | no           | –                                | the four guards of 2a                         |
 
 Data regions (data hints, sized object symbols) veto _candidate_ seeds and stop decoding. No prologue scan.
+
+### 2a. Tail-jump targets (image-wide and continuation mode)
+
+After the seeded worklist drains, and before the sweep, a target T of a decoded unconditional direct jump becomes a **candidate** root (rule `unconditional jump at entry stack depth to code outside the root body`, citing each jump's flow evidence and its roots' seed evidence) when:
+
+1. T is decoded, no root, no object-symbol address and not explained by a boundary claim or a final function's ranges;
+2. every decoded edge into T is an unconditional direct jump J to T;
+3. every root R whose traversal reaches J (found backward over decoded edges, confirmed by R's forward walk) has T outside its body: before R's entry, or at or after the next root above R;
+4. SP at J equals R's entry SP by the SP-delta must-dataflow (`stack-delta.ts`) over R's walk: x86 push/pop, `add`/`sub` of an immediate and `lea` from SP; ARM64 `add`/`sub` of an immediate and SP pre/post-index writeback. Any other SP write, an unknown ARM64 behavior or a different delta on another path gives no delta. A call keeps SP (the callee returns with SP restored, the ABI premise every caller relies on).
+
+Rounds repeat (each followed by a drain, so J1's re-proof runs on the new root's chain) until none promotes; none runs once the instruction limit is hit, nor in selected-entry mode. R's jump then crosses a root and reads as a direct `tail_call`; the transfer is the same edge, so the boundary is presentation only. Stripped llvm-clang23 `-O2` ELF and PE: the entry's `jmp` with the index fixed at 2 seeds `matrix_switch` (`0x401aa0` / `0x140001040`), whose table then proves on its own chain. The 10 case blocks no longer become sweep candidates, the function prints `(uint32_t, uint64_t, uint64_t)` with a 10-case `switch` like the symbol-bearing cells, and the entry prints `return sub_401aa0(2, 7, 9);`.
 
 ### 2b. Whole-image enumeration (image-wide mode)
 
@@ -101,7 +113,7 @@ Leaders: entry; successors of any non-fallthrough instruction; addresses with in
 
 ## Design decisions
 
-- **Evidence-grounded roots.** A wrong function costs more than a missing one; incompleteness is reported (`partial`), never papered over. Sweep roots are always `candidate`, never `established`.
+- **Evidence-grounded roots.** A wrong function costs more than a missing one; incompleteness is reported (`partial`), never papered over. Sweep roots and promoted tail-jump targets are always `candidate`, never `established`.
 - **Gaps, not guesses**; invalid instructions end flow.
 - **Candidate ≠ fact.** Candidate seeds, jump-table inventory and loaded pointer values never create edges. Claims are checked against reachable code, never permission to decode.
 - **Observed vs claimed ranges** separate; conflicts recorded, not resolved.
@@ -111,8 +123,8 @@ Leaders: entry; successors of any non-fallthrough instruction; addresses with in
 
 ## Limits and improvement levers
 
-- **Sweep roots are linear-sweep guesses.** Stripped images without entry/unwind/symbol hints get their unreached code as candidates (quality matrix stripped ELF `-O0`: the 25 `nm` functions exactly). Code reached only through an unresolved jump table is split into candidates too (stripped llvm-clang23 ELF `-O2` `matrix_switch`: the relative `movslq`/`add` table itself proves, as in the symbol-bearing cells, but nothing seeds the function; the entry tail-jumps into it with a constant index, so the proof fails in the entry's flow and its 10 case blocks become candidates). x86 decoding can desynchronize in data inside text sections without a data hint.
-- **Tail calls need a seed.** A jump to an unseeded function is absorbed into the caller; a spurious candidate seed (export, unwind start) mid-function turns an internal jump into `tail_call`. No tail-call heuristic, no promotion of branch targets to seeds.
+- **Sweep roots are linear-sweep guesses.** Stripped images without entry/unwind/symbol hints get their unreached code as candidates (quality matrix stripped ELF `-O0`: the 25 `nm` functions exactly). Code reached only through an unresolved jump table is split into candidates too, unless its function is reached by a tail jump that seeds it first (2a). x86 decoding can desynchronize in data inside text sections without a data hint.
+- **Tail calls need a seed or the 2a guards.** A jump to an unseeded function that fails a guard is absorbed into the caller: a function also entered by a conditional branch or a fallthrough, a jump below the entry stack depth or one whose depth the must-dataflow loses (an SP write other than the modeled ones), a target inside the root's own address span (before the next root above it), and every jump from swept code or after the instruction limit. Conversely, a spurious candidate seed (export, unwind start) mid-function turns an internal jump into `tail_call`. Promotion runs only on the roots a step traversed: in a budget-limited import, roots published by earlier steps and roots swept later are not revisited.
 - **Noreturn only from library contracts on imports.** Local `abort`-like wrappers fall through into the next function (conflict, or garbage absorbed). Lever: feed callee-summary noreturn ([calls-abi](calls-abi.md)) back into discovery — needs iteration.
 - **Jump tables:** unsigned bound on the exact index node, single-entry chain, ≤256 entries, immutable relocation-free bytes. Values are opaque at the chain start, so a table base or index fact set before a merge or a call is unknown (the chain stops there). Misses signed bounds, guards across merged paths, writable or relocated tables (absolute-pointer tables in PIE/dylib/DLL). Failure → `unknown` edge, `partial` function. Rangeless candidates are unusable by target recovery.
 - **Global instruction budget** (default 10,000) in import: late-queue roots starve to `budget` gaps and partial ranges until `functions_discover` continues them (API/CLI selection runs it to completion when a selection is `incomplete`; MCP clients call it). A single root larger than the limit can never finish: the index stays `partial`. Strings referenced only by continuation-found code stay `candidate` (no promotion in continuation steps).
