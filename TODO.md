@@ -112,7 +112,8 @@ The renderer prints `physical_return` at `src/emitters/renderer.ts:8130-8199` wh
 
 ### R3: A context-specialized callee summary keeps the callee's result root
 
-- [ ] **Problem.** `matrix_variadic_call` `-O2` (ELF `0x401d60`, PE `0x140001260`, stripped ELF `sub@0x401d50` and PE `sub@0x140001250`) is two tail calls to the variadic `matrix_variadic` (returns `double`). OD prints a `void` function whose two exits return different registers through `physical_return`, under the header `/* ABI scratch at return, not results: … */`.
+- [x] **Problem.** `matrix_variadic_call` `-O2` (ELF `0x401d60`, PE `0x140001260`, stripped ELF `sub@0x401d50` and PE `sub@0x140001250`) is two tail calls to the variadic `matrix_variadic` (returns `double`). OD prints a `void` function whose two exits return different registers through `physical_return`, under the header `/* ABI scratch at return, not results: … */`.
+  - Evidence (2026-10-22): `generic_result` on the context unit = `nativeReturnInterface(baseline, …, untypedFloatWrites)` (no seeding; a literal-zero FP exit counts as a write of the root another exit types), applied by `inheritGenericResult` (`native-transfer.ts`) in `observeNativeUnit` for the summary and `source_interface`; context units are not persisted, so `NATIVE_SUMMARY_FORMAT` stays; `stack-calls/11`. OD lane full tier: exactly the four texts changed (`double …`, `return matrix_variadic(0);` / `return matrix_variadic(2…);`, no "ABI scratch", 0 `physical_return`); `fts3UpdateMethod`, `analyzeDatabase` byte-identical; coverage unchanged. Tests: assembled SysV callee (`native-interface.test.ts`), caller executed as `double` with a stub callee in both dialects (`native-context.test.ts`).
   - **Root cause:**
     - `native-context-prepare.ts:28-67` specializes the callee to the call's constants. For `matrix_variadic(0)` only the `xorpd %xmm0,%xmm0; ret` exit survives.
     - A literal zero has no IEEE type, so `native-transfer.ts:428-453` skips xmm0 (`if (floating && !type) continue;`) and claims `rax[0:64]`, which the `va_list` setup writes.
@@ -377,7 +378,8 @@ A whole-image instrumented run on sqlite3-arm64 found 21 tables proved and 291 d
 
 ### J1: Re-prove jump tables on settled chains
 
-- [ ] **Problem.** `selectInnerLoop` (`0x1000bc1e4`) prints `if (value7 <= 12) return indirect_exit(0x1000bc594 + ((uint64_t)data_100132d3e[value7] << 2), …)`. Its graph holds 253 of the function's 639 instructions, so the case bodies are lost. Ghidra prints the `switch`.
+- [x] **Problem.** `selectInnerLoop` (`0x1000bc1e4`) prints `if (value7 <= 12) return indirect_exit(0x1000bc594 + ((uint64_t)data_100132d3e[value7] << 2), …)`. Its graph holds 253 of the function's 639 instructions, so the case bodies are lost. Ghidra prints the `switch`.
+  - **Done (J1):** `selectInnerLoop` proves the table at branch `0x1000bc590` (13 targets, guard exact), holds 639 instructions and prints `void selectInnerLoop(…)` with a `switch (value7)` (case 1 shares the out-of-range exit) and no `indirect_exit`; SQLite image-wide proved tables 21 → 22 (none lost); the full-tier OD lane changes only that text.
   - **Root cause:**
     - `proveJumpTable` (`src/analysis/discovery/jump-tables.ts:205-702`) runs once, when the branch is first decoded, on the predecessor map decoded so far (`discovery/index.ts:542-566`).
     - Per-graph validation (`:788-883`) only re-checks the recorded chain. When a chain member later gains predecessors, the table is rejected for good (`:877-880`).
