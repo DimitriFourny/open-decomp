@@ -473,7 +473,7 @@ Files that several items touch:
 
 ### K6: Call spelling: no `...` in open-arity casts; tail arguments printed like ordinary arguments
 
-- [ ] **Problem:**
+- [x] **Done** (measured on the full OD lane `od-rm4-k6` vs `od-main-afb7691`: 51 texts changed, `, ...` casts 77 → 0, `(uintptr_t)` in `return f(` tail lines 46 → 0 in 21 functions, 30 `open arity` header lines gained `indirect call at 0x<VA>`, nothing else, states and work unchanged, checked view byte-identical; emitters 87). **Problem:**
   - 77 function-pointer casts spell open arity as `(T (*)(A, B, ...))`, which in C declares a variadic prototype. This caused 4 wrong claims (`matrix_callback` ×2, `sub@0x100000450`, `sub@0x1400010f0`).
   - 46 `(uintptr_t)` casts on tail-call arguments in 21 functions: `return sqlite3SrcListDelete((uintptr_t)address_2, (uintptr_t)address_1)`, where `address_1` is a declared pointer.
   - **Root cause:**
@@ -703,7 +703,7 @@ Files that several items touch:
 
 ### E1: Rematerialize constant-offset derived pointers; print byte-pointer sums without `uintptr_t`
 
-- [ ] **Problem.** The texts contain 202 temporaries of the form `x = (T*)((uintptr_t)b ± k)` and 436 dereferences `*(T *)((uintptr_t)x + k)`. Example: `sqlite3_collation_needed16` prints `address_1 = (uint8_t*)((uintptr_t)address + 0x190); *(uint64_t *)address_1 = 0; *(uint64_t *)((uintptr_t)address_1 + 8) = arg2;` (an ARM64 `stp` with a computed base). Ghidra prints `*(undefined8 *)(param_1 + 400)`.
+- [x] **Problem.** The texts contain 202 temporaries of the form `x = (T*)((uintptr_t)b ± k)` and 436 dereferences `*(T *)((uintptr_t)x + k)`. Example: `sqlite3_collation_needed16` prints `address_1 = (uint8_t*)((uintptr_t)address + 0x190); *(uint64_t *)address_1 = 0; *(uint64_t *)((uintptr_t)address_1 + 8) = arg2;` (an ARM64 `stp` with a computed base). Ghidra prints `*(undefined8 *)(param_1 + 400)`. _Done (E1): OD lane vs `od-main-afb7691`: 58 texts changed, 57 shorter (−3.1k regex-lexer tokens); `sqlite3_collation_needed16` prints `address->field_0x190 = 0; address->field_0x198 = arg2;`, `sqlite3PagerSavepoint` `address_10->field_0x1e0 = 0;` (−437), `vdbePmaReaderClear` `+ 64`; states unchanged, checked view unchanged; brotli `main` needs C2 first (shared 256-record bound)._
   - **Root cause:**
     - The renderer repeats `x ± k` only inside one reader statement (`src/emitters/source-inlining.ts:585-616`, gate at `:616`).
     - `memberAccess` builds fields only through inline bases (`renderer.ts:3146`).
@@ -979,7 +979,7 @@ Files that several items touch:
 
 ### T2: Charge-exact reuse and an explicit `limited` flag
 
-- [ ] **Problem.** Charged work depends on history:
+- [x] **Problem.** Charged work depends on history: _(done: `PreparedNativeUnit.limited` set at every preparation limit and when the variadic footprint is cut; footprint limits no longer allowance-derived; context evidence scope content-derived instead of the random project ID (the real cause of run-to-run work noise); reused record index records its build's reads. Two full odbench runs of one build give identical per-function work; 45 functions' work and 1 text (`matrix_checksum` PE O0: open-arity note for a limited `adler32_z`) changed vs `od-main-afb7691`.)_
   - `_sqlite3Initialize` charges 275,857 at its first preparation and 278,384 in 46 later ones;
   - `_sqlite3_config` charges 333,203, 294,349 or 246,292 depending on the load;
   - about 21 SQLite functions differ in work between two runs of one build.

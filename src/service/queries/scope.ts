@@ -67,6 +67,18 @@ export function records<K extends keyof StoredRecordKinds>(
   return { items, state };
 }
 
+/** The dependency reads of a `records` scan, without the scan: one row per kind. An
+ * operation that finds a `buildOnce` structure built makes the store reads its build
+ * made, so its readset (and their capture charges) equals the building operation's. */
+function rereadScopes(
+  scope: ReadScope,
+  revision: number,
+  image_id: string,
+  kinds: readonly (keyof StoredRecordKinds)[],
+): void {
+  for (const kind of kinds) scope.store.queryRecords({ kind, image_id, revision, limit: 1 });
+}
+
 /** Resolve identity before decoding; cache hits need no full function-index scan. */
 export function loadFunctionScope(
   scope: ReadScope,
@@ -97,9 +109,10 @@ export function loadFunctionGraph(
 ): QueryFunctionGraph {
   const image = loaded.image;
   let indexed = navigation.get(image);
-  if (indexed?.project_id === scope.store.project_id && indexed.revision === revision)
+  if (indexed?.project_id === scope.store.project_id && indexed.revision === revision) {
     useBuilt(scope.context, indexed);
-  else {
+    rereadScopes(scope, revision, image.id, ['symbol', 'import', 'export', 'function']);
+  } else {
     // Materialized once per image; every operation pays its recorded cost once.
     indexed = buildOnce(scope.context, (quiet) => {
       const read = { store: scope.store, context: quiet };
@@ -147,12 +160,14 @@ export function loadFunctionIndex(
       references: records(scope, revision, image.id, 'reference').items,
     };
   useBuilt(scope.context, indexed);
-  indexed.references = indexed.references
-    ? useBuilt(scope.context, indexed.references)
-    : buildOnce(
-        scope.context,
-        (quiet) =>
-          records({ store: scope.store, context: quiet }, revision, image.id, 'reference').items,
-      );
+  if (indexed.references) {
+    useBuilt(scope.context, indexed.references);
+    rereadScopes(scope, revision, image.id, ['reference']);
+  } else
+    indexed.references = buildOnce(
+      scope.context,
+      (quiet) =>
+        records({ store: scope.store, context: quiet }, revision, image.id, 'reference').items,
+    );
   return { functions: indexed.functions, references: indexed.references };
 }
