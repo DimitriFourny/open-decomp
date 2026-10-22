@@ -47,10 +47,12 @@ import {
 import type { DebugRecovery } from '../../metadata/debug/index.js';
 import type { LibraryContracts } from '../../metadata/library-contracts/index.js';
 import type {
+  CallerResultDemand,
   InferredCallee,
   SourceAddress,
   SourceEvidence,
 } from '../../reconstruction/source-model.js';
+import { callerResultDemands } from './caller-result-use.js';
 import {
   createNativeUnitPersistence,
   preparedSize,
@@ -87,7 +89,11 @@ import {
   type NativeInterfaceIndex,
 } from './native-entry.js';
 import { pipelineVersions } from './versions.js';
-import { nativeArgumentValues } from './native-arguments.js';
+import {
+  nativeArgumentIndex,
+  nativeArgumentValues,
+  type NativeArgumentIndex,
+} from './native-arguments.js';
 import { parameterRegisters } from './native-abi.js';
 import { fpEnvironmentGuard } from '../../lifters/arm64/semantics.js';
 import { x86FpEnvironmentGuard } from '../../lifters/x86_64/semantics.js';
@@ -652,7 +658,7 @@ function wholeValue(value: Value, expressions: ReadonlyMap<string, Expression>):
 
 /** Most bytes of an indexed read-only table the source facts carry: enough for
  * the complete small tables and the printed prefix of larger ones. */
-const TABLE_BYTES_READ = 512n;
+const TABLE_BYTES_READ = 64n;
 
 function sourceAddresses(
   input: SourceFactsInput,
@@ -1098,16 +1104,23 @@ function sourceAddresses(
  * component/target/native-type identity — not by budget, capacity or root.
  * Dependency observations are still solved afresh per request.
  *
- * Only preparations that hit no limit are kept. Every work limit inside preparation
- * (`prepareNativeUnit`) is derived from the worklist allowance remaining when it is set:
- * at least a quarter of it (SSA takes 3/4, optional type/stack work 1/4), with nested
- * analyses bounded by what their enclosing limit has left. Limits only stop work. So a
- * preparation that charged W without hitting one returns the same unit under any
- * allowance of at least 4W + 3 (each limit then exceeds all work charged after it was
- * set), or at least the allowance it actually ran with, and under any capacity it fits.
- * Reuse then leaves exactly what preparing it would: the same work charge and the same
- * dependency reads in the same order, so a request's result and later budgets never
- * depend on what earlier requests in this process prepared. */
+ * Charge-exact reuse. Every work limit inside preparation (`prepareNativeUnit`) is set
+ * from the worklist allowance remaining when it is set: SSA takes 3/4 of it, optional
+ * type/stack work 1/4, nested analyses are bounded by what their enclosing limit has
+ * left, and the variadic footprint sees no remaining-work figure at all (so its
+ * structuring and validation allowance are fixed). Limits only stop work, and every
+ * stop marks the unit `limited`, also where a nested pass turned it into a partial
+ * result. A preparation that charged W under allowance A and is not `limited`
+ * therefore returns the same unit, charges the same W and makes the same reads in the
+ * same order under every allowance of at least min(A, 4W + 3) (each limit then
+ * exceeds all work charged after it was set) and under every capacity it fits.
+ *
+ * Only such units are retained (`reusablePreparation`), with `allowance` =
+ * min(A, 4W + 3). A reuse happens only when the load's allowance is at least that and
+ * the replayed charge (W on the load's context, then the recorded reads with their
+ * capture charges) fits every enclosing allowance; it returns the recorded unit. So a
+ * load leaves exactly what preparing it would, and a request's result and work never
+ * depend on what earlier requests in this process (or a persisted row) prepared. */
 type PreparedUnitCache = {
   readonly identity: string;
   readonly functions: readonly FunctionRecord[];
@@ -1123,7 +1136,10 @@ const preparedUnits = new WeakMap<LoadedImage, PreparedUnitCache>();
  * image. Measured on SQLite at roughly 1 KiB of heap per unit, so ~256 MiB. */
 const MAX_PREPARED_UNIT_SIZE = 1 << 18;
 const reusablePreparation = (unit: PreparedNativeUnit): boolean =>
-  !unit.budget_truncated && !unit.reasons.length && unit.analysis?.state === 'complete';
+  !unit.budget_truncated &&
+  !unit.limited &&
+  !unit.reasons.length &&
+  unit.analysis?.state === 'complete';
 
 function nativeSelectedNodes(ir: SSAForm): number {
   return ir.blocks.reduce(
@@ -1302,16 +1318,20 @@ export function nativeUnitLoader(
   return (fn, boundedContext) => reuse(fn, boundedContext) ?? prepare(fn, boundedContext);
 }
 
+/** `indexed`: the unit IR's argument index when the caller already built it;
+ * otherwise it is built at the first call with parameter shapes. */
 function nativeShapeTransfers(
   unit: PreparedNativeUnit,
   interfaces: ReadonlyMap<string, NativeInterface>,
   context: OperationContext,
+  indexed?: NativeArgumentIndex,
 ): readonly MemoryShapeTransfer[] {
   if (!unit.ir) return [];
   const transfers: MemoryShapeTransfer[] = [];
   for (const [call_id, observed] of interfaces) {
     if (!observed.parameter_shapes?.length) continue;
-    const arguments_ = nativeArgumentValues(unit.ir, unit.analysis, call_id, observed, context);
+    indexed ??= nativeArgumentIndex(unit.ir, context);
+    const arguments_ = nativeArgumentValues(indexed, unit.analysis, call_id, observed, context);
     for (const shape of observed.parameter_shapes) {
       context.checkpoint(1);
       const argument = arguments_.get(shape.parameter_index);
@@ -1546,7 +1566,8 @@ function observeNativeUnit(
     };
   }
   if (!unit.types) return observed;
-  const transfers = nativeShapeTransfers(unit, interfaces, context);
+  const indexed = nativeArgumentIndex(unit.ir, context);
+  const transfers = nativeShapeTransfers(unit, interfaces, context, indexed);
   const types = transfers.length
     ? refineMemoryShapes(unit.ir, unit.types, context, {
         slice_id: input.image.selected_slice_id,
@@ -1556,7 +1577,7 @@ function observeNativeUnit(
       })
     : unit.types;
   const parameters = [
-    ...nativeArgumentValues(unit.ir, unit.analysis, unit.ir.id, observed, context),
+    ...nativeArgumentValues(indexed, unit.analysis, unit.ir.id, observed, context),
   ].map(([parameter_index, value]) => ({ parameter_index, value }));
   return {
     ...observed,
@@ -1696,6 +1717,7 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
         evidence_ids: selected.evidence_ids,
         reasons: input.coverage_reasons,
         budget_truncated: false,
+        limited: false,
         arity_complete:
           input.coverage_reasons.length === 0 &&
           input.types.calls?.state === 'complete' &&
@@ -2048,12 +2070,13 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
     }
   }
   // Positive result-use evidence only. Reuse units already prepared by native
-  // analysis; do not turn a presentation request into an incoming-caller scan.
+  // analysis; the incoming-caller scan below runs only on the planner's demand.
   // A self-call result that reaches only this function's own return exit is
   // circular: under the result-storage premise the self-call is one of the
   // callers, so this function's own unit contributes only semantic demand.
   const functionReturnDemands = new Map<string, RegisterDescriptor>();
-  for (const unit of new Set([...partialUnits.values(), ...requestUnits.values()])) {
+  const preparedUnits = new Set([...partialUnits.values(), ...requestUnits.values()]);
+  for (const unit of preparedUnits) {
     context.checkpoint(1);
     const own = unit.function.id === input.ir.id;
     for (const dependency of unit.dependencies) {
@@ -2070,6 +2093,10 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
         scope.dependencies.replay(unit.dependency_readset);
     }
   }
+  // Incoming caller sites are scanned only when the planner asks for them.
+  let callerDemand: CallerResultDemand | null | undefined;
+  const callerDemands = (scanContext: OperationContext): CallerResultDemand | undefined =>
+    (callerDemand ??= callerResultDemands(input, preparedUnits, scanContext) ?? null) ?? undefined;
   const ruleCalls = variadicRuleCalls(input.ir, input.types.calls, input.library, context);
   const objc = objcSourceFacts({
     ir: input.ir,
@@ -2102,6 +2129,7 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
     ...(objc.facts ? { objc: objc.facts } : {}),
     memory_transfers,
     function_return_demands: [...functionReturnDemands.values()],
+    caller_result_demands: callerDemands,
     ...(function_returns === undefined ? {} : { function_returns }),
     ...(likely_arity === undefined ? {} : { likely_arity }),
     ...(likely_types === undefined ? {} : { likely_types }),

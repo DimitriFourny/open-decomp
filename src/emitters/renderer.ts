@@ -36,7 +36,9 @@ import type {
   LoopForm,
   ParallelTransfer,
   Region,
+  StructuredFunction,
   StructuringConditions,
+  StructuringResult,
 } from '../presentation/index.js';
 import { structureControlFlow, structuredGraph } from '../presentation/index.js';
 import type { SuppliedTypeRecord } from '../analysis/types/index.js';
@@ -46,6 +48,7 @@ import { validateReconstruction, validateRenderedTransfers } from '../reconstruc
 import { foldSourceCondition } from '../reconstruction/source-conditions.js';
 import { constantRotationOperands } from '../reconstruction/source-shifts.js';
 import {
+  registerOutputs,
   stackEntry,
   variadicArea,
   type SourceVariadic,
@@ -179,11 +182,14 @@ type HeaderStatement = Extract<Instruction, { kind: 'assign' | 'load' }>;
 /** Source view: one stack object kept as memory (the frame object, or the
  * incoming object of S4) in entry-SP coordinates, with its member naming. */
 interface StackObjectView {
-  readonly name: string;
+  /** The object's identifier (named on first use: a frame whose every member
+   * is independent, A3, declares no object). */
+  readonly name: () => string;
   readonly minimum_offset: bigint;
   readonly members: readonly FrameMember[];
-  /** Field name of the member starting at entry-SP `offset`. */
-  readonly field: (offset: bigint) => string;
+  /** Spelling of a member: `frame.local_38`, `stack_args.arg_8`, or an
+   * independent local's own name (A3). */
+  readonly member: (member: FrameMember) => string;
 }
 /** SysV AMD64 `va_list` (`__va_list_tag[1]`) fields by byte offset (S7). */
 const VA_LIST_FIELDS: ReadonlyMap<
@@ -210,12 +216,10 @@ interface Displacement {
   readonly offset: bigint;
   readonly terms: number;
 }
-/** A table's contents print in full up to this many bytes; larger tables show
- * a prefix of TABLE_PREFIX_BYTES, and an unsized one with unbounded indices
- * its first TABLE_UNKNOWN_ELEMENTS elements. */
-const TABLE_FULL_BYTES = 512n;
-const TABLE_PREFIX_BYTES = 256;
-const TABLE_UNKNOWN_ELEMENTS = 16;
+/** A table's contents print in full up to this many bytes; larger tables, and
+ * those of unestablished extent, show one row of TABLE_PREFIX_BYTES. */
+const TABLE_FULL_BYTES = 64n;
+const TABLE_PREFIX_BYTES = 16;
 const STRING_LITERAL_SCOPE =
   'pointer-width constants addressing an immutable NUL-terminated string with established encoding (an interior address denotes its suffix bytes), printed as that string literal where the constant is a value: argument, store, return, copy, select arm or identity comparison';
 const CALL_EFFECTS_SCOPE =
@@ -243,13 +247,37 @@ export class CallInliningRetry extends Error {
   }
 }
 
-/** Plans of one reconstruction that no attempt's state (rejected calls, metadata
- * mode, validation session) can change: the first attempt computes them and
- * every retry reuses them. */
+/** One structuring condition (see StructuringConditions) asked and its answer. */
+type StructuringQuery =
+  | { readonly kind: 'operand'; readonly block: string; readonly answer: boolean }
+  | {
+      readonly kind: 'copies';
+      readonly block: string;
+      readonly slot: number;
+      readonly answer: number;
+    }
+  | {
+      readonly kind: 'returnsConstants';
+      readonly block: string;
+      readonly slot: number;
+      readonly answer: boolean;
+    };
+
+/** Plans of one reconstruction shared by its attempts. No attempt's state
+ * (rejected calls, metadata mode, validation session) changes the names,
+ * characters or indexed data: the first attempt computes them and every retry
+ * reuses them. A restructuring is reused only under the same conditions. */
 interface AttemptPlans {
   names?: SourceNamePlan;
   characters?: ReadonlySet<string>;
   indexedData?: ReadonlyMap<string, IndexedDataAccess>;
+  /** Source-view restructurings (see Renderer.restructure): the structured
+   * graph, the conditions asked in order with their answers, and the layout. */
+  structures?: {
+    readonly graph: StructuredFunction;
+    readonly queries: readonly StructuringQuery[];
+    readonly result: StructuringResult;
+  }[];
 }
 
 /** Only syntax lives here: both dialects consume the same reconstructed program. */
@@ -297,6 +325,9 @@ export class Renderer {
   private readonly consumed = new Set<ParallelTransfer>();
   private readonly fallthrough = new Set<ParallelTransfer>();
   private readonly loopTests = new Map<string, LoopForm>();
+  /** Source view: the one statement a while/for head test holds (LoopFacts.comma
+   * and carrier), by test control id; it prints inside the loop test. */
+  private readonly loopCommaTests = new Map<string, Instruction>();
   private clones: ReadonlySet<BlockRegion> = new Set();
   private cloneIds: ReadonlySet<string> = new Set();
   /** Source view: a block that prints nothing but its jump (see planSourceControl). */
@@ -673,7 +704,11 @@ export class Renderer {
         if (node.kind === 'call')
           for (const value of node.results) this.origins.set(value.id, node);
         if (node.kind === 'call' || node.kind === 'unknown_effect')
-          for (const binding of node.register_outputs) this.origins.set(binding.value.id, node);
+          for (const binding of [
+            ...node.register_outputs,
+            ...registerOutputs(this.program.source, node),
+          ])
+            this.origins.set(binding.value.id, node);
       }
       if (this.controls.has(block.control.id))
         this.invalid('Duplicate structured control identity');
@@ -1943,6 +1978,22 @@ export class Renderer {
         closed.add(this.addressKey(tail.target));
     this.closedCallees = closed;
     return closed;
+  }
+
+  /** An open indirect call prints only its proven arguments in a function-pointer cast of
+   * exactly those positions: the one `open arity` comment states that it may take more. */
+  private openIndirectCall(origin: Origin): void {
+    // The instruction's virtual address; provenance ranges are file offsets, which
+    // print as such only where no address mapping is supplied.
+    const address = this.input.instruction_address?.(origin.provenance.instruction_ids[0] ?? '');
+    const start = origin.provenance.ranges[0]?.start;
+    const where =
+      address?.space === 'va'
+        ? ` at 0x${address.value.toString(16)}`
+        : start
+          ? ` at ${start.space === 'va' ? '' : start.space === 'file' ? 'file offset ' : `${start.space} `}0x${start.value.toString(16)}`
+          : '';
+    this.openCallees.add(`indirect call${where}`);
   }
 
   /** Source view: whether a direct call to `key` prints only its proven arguments, the
@@ -3866,7 +3917,9 @@ export class Renderer {
         object = table.data.object,
         node = this.statements.get(group.first)!;
       const start = this.writer.offset;
-      const contents = this.tableContents(group.name, table, group.reach);
+      const contents = this.tableContents(group.name, table, group.reach, group.first, [
+        group.address,
+      ]);
       if (contents) {
         for (const line of contents.lines) this.writer.line(0, line);
         this.writer.helper(
@@ -3897,15 +3950,18 @@ export class Renderer {
   }
 
   /** Declaration lines of a read-only table with its contents, or undefined when
-   * its bytes or extent are not established. The element count is the smaller of
-   * the accessed range (`reach`: the greatest index every access can take, plus
-   * one) and the object's extent (symbol size, else the distance to the next
-   * symbol, data record, relocation or section end); an unbounded index over an
-   * unsized object shows only the first elements, never an invented extent. */
+   * its bytes are not established. The element count is an established extent
+   * only when it comes from a symbol size (capped by the accessed range,
+   * `reach`: the greatest index every access can take, plus one) or from the
+   * accessed range itself, which must lie within the distance to the next
+   * symbol, data record, relocation or section end (`span_bound`, a bound and
+   * never a size). Otherwise the declaration is `name[]` with the first row. */
   private tableContents(
     name: string,
     table: IndexedDataAccess,
     reach: bigint,
+    subject: string,
+    subjectIds: readonly string[],
   ): { readonly lines: readonly string[] } | undefined {
     const object = table.data.object,
       bytes = table.data.object_bytes,
@@ -3917,24 +3973,37 @@ export class Renderer {
     )
       return undefined;
     const size = BigInt(width);
-    const extent = object.byte_length ?? object.span_bound;
-    const bySize = extent === undefined || extent === null ? undefined : extent / size;
-    const proven = bySize === undefined ? (reach <= 4096n ? reach : undefined) : undefined;
-    const total = bySize !== undefined ? (reach < bySize ? reach : bySize) : proven;
+    const { byte_length: symbolSize, span_bound: spanBound } = object;
+    const total =
+      symbolSize != null
+        ? reach < symbolSize / size
+          ? reach
+          : symbolSize / size
+        : spanBound != null
+          ? reach <= spanBound / size
+            ? reach
+            : undefined
+          : reach <= 4096n
+            ? reach
+            : undefined;
     const full = total !== undefined && total * size <= TABLE_FULL_BYTES;
-    let shown = full
-      ? total
-      : BigInt(
-          Math.min(
-            total === undefined ? TABLE_UNKNOWN_ELEMENTS : Number(total),
-            TABLE_PREFIX_BYTES / width,
-          ),
-        );
+    let shown = full ? total : BigInt(TABLE_PREFIX_BYTES / width);
+    if (total !== undefined && total < shown!) shown = total;
     shown =
       shown! < BigInt(Math.floor(bytes.length / width))
         ? shown!
         : BigInt(Math.floor(bytes.length / width));
     if (shown <= 0n || Number(shown) * width > this.tableBudget) return undefined;
+    if (
+      total !== undefined &&
+      !this.localValidation.presentation(
+        'table_extent',
+        subject,
+        'the declared element count is a symbol size or an accessed range inside the next-symbol bound; a neighbour distance is never an extent',
+        subjectIds,
+      )
+    )
+      return undefined;
     this.tableBudget -= Number(shown) * width;
     const values: string[] = [];
     for (let index = 0; index < Number(shown); index++) {
@@ -3944,19 +4013,11 @@ export class Renderer {
       values.push(value < 1n << 32n ? String(value) : `0x${value.toString(16)}`);
     }
     const hex = object.address.value.toString(16);
-    const basis =
-      object.byte_length != null && bySize !== undefined && total === bySize
-        ? 'symbol size'
-        : total === undefined
-          ? 'extent not established'
-          : bySize !== undefined && total === bySize
-            ? 'next symbol bound'
-            : 'accessed range';
     const rest = total === undefined ? undefined : total - shown;
     const more =
       rest === undefined ? 'further elements not shown' : rest > 0n ? `${rest} more` : undefined;
     const elements = `${total === undefined ? `first ${shown}` : `${total}`} ${this.language === 'c-like' ? '' : `uint${table.bits}_t `}elements`;
-    const note = `VA 0x${hex}, read-only; ${elements} (${basis})`;
+    const note = `VA 0x${hex}, read-only; ${elements}`;
     const per = Math.max(1, Math.floor(16 / width));
     const rows: string[] = [];
     for (let at = 0; at < values.length; at += per)
@@ -4000,25 +4061,42 @@ export class Renderer {
   /** Source view: the stack object that prints entry-SP `offset`. The incoming
    * object (S4) holds offsets from its start up; the frame object holds
    * offsets below the entry SP, and every offset when no entry SP is live
-   * beside it. Members are named by entry-SP offset. */
+   * beside it. Members are named by entry-SP offset; an independent member
+   * (A3) is a local of its own. */
   private stackObject(offset: bigint): StackObjectView | undefined {
     const incoming = this.program.source?.incoming_object,
       stack = this.program.source?.stack;
-    if (incoming && offset >= incoming.minimum_offset)
+    if (incoming && offset >= incoming.minimum_offset) {
+      const name = () => this.sourceIdentifier(incoming.formal.id, 'stack_args');
       return {
-        name: this.sourceIdentifier(incoming.formal.id, 'stack_args'),
+        name,
         minimum_offset: incoming.minimum_offset,
         members: incoming.members,
-        field: (start) => `arg_${start.toString(16)}`,
+        member: (member) => `${name()}.arg_${member.offset.toString(16)}`,
       };
-    if (stack?.kind === 'object' && (offset < 0n || !stack.entry))
+    }
+    if (stack?.kind === 'object' && (offset < 0n || !stack.entry)) {
+      const name = () => {
+        if (stack.members.every((member) => member.independent))
+          this.invalid('A frame address lies outside every independent frame local');
+        return this.sourceIdentifier(stack.id, 'frame');
+      };
       return {
-        name: this.sourceIdentifier(stack.id, 'frame'),
+        name,
         minimum_offset: stack.minimum_offset,
         members: stack.members,
-        field: (start) => `local_${(-start).toString(16)}`,
+        member: (member) =>
+          member.independent
+            ? this.frameLocal(member, member.independent)
+            : `${name()}.local_${(-member.offset).toString(16)}`,
       };
+    }
     return undefined;
+  }
+
+  /** Source view (A3): the name of an independent frame local. */
+  private frameLocal(member: FrameMember, local: { readonly id: string }): string {
+    return this.sourceIdentifier(local.id, `local_${(-member.offset).toString(16)}`);
   }
 
   /** The member of a stack object holding entry-SP byte `offset` and the offset within it. */
@@ -4069,12 +4147,11 @@ export class Renderer {
    * `&stack_args.arg_8`, an element of a byte-array member, else a byte offset
    * from the object. */
   private frameAddress(object: StackObjectView, offset: bigint): Printed {
-    const name = object.name,
-      found = this.frameMemberAt(object, offset),
+    const found = this.frameMemberAt(object, offset),
       address = { bits: 64, signed: false } as const;
     // SysV `va_list` (S7): `frame.va`, or one of its fields.
     if (found?.member.va) {
-      const va = `${name}.va`,
+      const va = `${object.name()}.va`,
         field = VA_LIST_FIELDS.get(found.delta);
       if (this.language === 'python-like') {
         const base = this.printer.primary(
@@ -4099,8 +4176,11 @@ export class Renderer {
     }
     const member =
       found && (found.delta === 0n || !found.member.scalar)
-        ? `${name}.${object.field(found.member.offset)}`
+        ? object.member(found.member)
         : undefined;
+    if (!member && found?.member.independent)
+      this.invalid('An address lies inside an independent scalar frame local');
+    const name = member ? '' : object.name();
     if (this.language === 'python-like') {
       const base = this.printer.primary(`address_of(${member ?? name})`, address),
         delta = member ? found!.delta : offset - object.minimum_offset;
@@ -4143,16 +4223,17 @@ export class Renderer {
       node.access.alignment !== 1
     )
       return undefined;
-    const name = object.name,
-      found = this.frameMemberAt(object, offset),
+    const found = this.frameMemberAt(object, offset),
       spelled = this.plainAccessSpelling(node);
-    const member = found && `${name}.${object.field(found.member.offset)}`;
+    const member = found && object.member(found.member);
+    if (found?.member.scalar && found.delta !== 0n && found.member.independent)
+      this.invalid('An access lies inside an independent scalar frame local');
     if (found?.member.va) {
       // SysV `va_list` (S7): exactly one field; its pointers read as address
       // bits and are written from `void *` (`vaPointerStores`).
       const field = VA_LIST_FIELDS.get(found.delta);
       if (field?.bytes !== bits / 8n || !this.permitUnaligned(node)) return undefined;
-      const text = `${name}.va[0].${field.name}`;
+      const text = `${object.name()}.va[0].${field.name}`;
       if (!field.pointer || this.language !== 'c-like') return text;
       if (node.kind === 'load') return `(uintptr_t)${text}`;
       this.vaPointerStores.add(node.id);
@@ -4174,7 +4255,8 @@ export class Renderer {
           ? `*(${spelled} *)${member}`
           : `*(${spelled} *)&${member}[${this.printer.literal(found.delta, 64).text}]`;
     else {
-      const delta = offset - object.minimum_offset;
+      const delta = offset - object.minimum_offset,
+        name = object.name();
       text =
         delta === 0n
           ? `*(${spelled} *)&${name}`
@@ -4556,124 +4638,14 @@ export class Renderer {
     operand = false,
   ): string {
     const projection = this.program.calls.get(node.id)!;
-    const literals: string[] = [],
-      objcLiterals: string[] = [];
     const objcCandidate = this.objcSend(node);
-    const args = projection.arguments.map((value, index) => {
-      this.context.checkpoint(1);
-      const parameter = projection.signature?.signature.parameters[index];
-      const parameterType = parameter && this.typeRecords.get(parameter.type_id)?.definition;
-      const pointer = parameterType?.kind === 'pointer';
-      const pointee = pointer ? this.typeRecords.get(parameterType.to)?.definition : undefined;
-      const bytePointer =
-        pointee?.kind === 'void' || (pointee?.kind === 'integer' && pointee.bits === 8);
-      const code =
-        !pointer && this.characterParameter(projection, index) ? this.constantOf(value) : undefined;
-      const character = code === undefined ? undefined : this.printer.character(code, true);
-      if (character && this.printer.simplify('character_literal', [value.id]))
-        return character.text;
-      const objcLiteral = literalsAllowed ? this.objcLiteral(value) : undefined;
-      const literal =
-        objcLiteral ??
-        (!literalsAllowed || (pointer && !bytePointer)
-          ? undefined
-          : this.sourceLiteral(value, pointer && bytePointer));
-      if (objcLiteral !== undefined) objcLiterals.push(value.id);
-      else if (literal !== undefined) literals.push(value.id);
-      // A declared pointer local (or held call result), possibly through inline
-      // same-width bitcasts of its bits, already has the parameter's pointer
-      // spelling, or is a message operand: no conversion is printed.
-      let operandValue = value;
-      for (let step = 0; step < 4 && this.inline.has(operandValue.id); step++) {
-        if (this.pendingCalls.has(operandValue.id)) break;
-        const alias = this.program.expressions.get(operandValue.id);
-        if (
-          alias?.kind !== 'cast' ||
-          alias.op !== 'bitcast' ||
-          bitWidth(alias.value.type) !== bitWidth(operandValue.type)
-        )
-          break;
-        operandValue = alias.value;
-      }
-      const declared =
-        this.sourceView &&
-        this.language === 'c-like' &&
-        literal === undefined &&
-        (this.pendingCalls.has(operandValue.id) || !this.inline.has(operandValue.id))
-          ? this.declaredSpelling(operandValue)
-          : '';
-      if (
-        declared.endsWith('*') &&
-        (pointer
-          ? this.callParameterType(projection, index) === declared
-          : objcCandidate !== undefined)
-      )
-        return this.local(operandValue);
-      // A message operand read from a declared pointer member or typed global is
-      // that lvalue itself: message syntax needs no integer conversion.
-      const loaded =
-        objcCandidate && literal === undefined && this.sourceView
-          ? this.inlined.get(operandValue.id)?.node
-          : undefined;
-      if (loaded?.kind === 'load' && this.inline.has(operandValue.id)) {
-        const storage = this.storage(loaded);
-        if (this.memberPointers.has(loaded.id) || this.typedPointerGlobal(loaded.id))
-          return storage;
-      }
-      const printed = pointer
-        ? literal === undefined
-          ? this.sourceAddressPrinted(value, !this.sourceView)
-          : undefined
-        : literal === undefined
-          ? this.printed(value)
-          : undefined;
-      const text = literal ?? printed!.text;
-      // A message operand needs no C parameter conversion: message syntax has none.
-      if (pointer && objcCandidate && literal === undefined) return this.value(value);
-      if (pointer && this.language === 'c-like') {
-        const spelling = this.callParameterType(projection, index);
-        if (literal !== undefined)
-          return /^(?:const )?(?:char|void)\s*\*$/.test(spelling)
-            ? literal
-            : `(${spelling})${literal}`;
-        const loaded = this.inlined.get(value.id)?.node;
-        if (loaded?.kind === 'load' && this.typedPointerGlobal(loaded.id)?.c === spelling)
-          return this.storage(loaded);
-        return this.pointerValue(printed!, spelling);
-      }
-      const type = parameter && this.typeRecords.get(parameter.type_id)?.definition;
-      if (type?.kind === 'integer' && type.signed && this.language === 'python-like')
-        return this.call(
-          `int${type.bits}`,
-          'Interpret source integer argument with its established signed ABI type.',
-          [text],
-        );
-      // A declared prototype converts an argument to its parameter type: the
-      // value's own signed variable passes unchanged to a signed parameter.
-      if (printed && type?.kind === 'integer' && type.signed && this.language === 'c-like')
-        return this.signedContext(printed, type.bits);
-      // An undeclared parameter reads the callee's observed interface: an
-      // argument that is a declared pointer variable passes as that pointer.
-      if (printed?.pointer && !parameter && this.language === 'c-like') return printed.pointer.text;
-      return text;
-    });
-    if (
-      (literals.length &&
-        !this.localValidation.presentation(
-          'string_literal',
-          node.id,
-          STRING_LITERAL_SCOPE,
-          literals,
-        )) ||
-      (objcLiterals.length &&
-        !this.localValidation.presentation(
-          'objc_string_literal',
-          node.id,
-          'pointer-width constant call arguments addressing an exact __cfstring constant object (isa bound to ___CFConstantStringClassReference, explicit length), printed as that NSString literal',
-          objcLiterals,
-        ))
-    )
-      return this.sourceCall(node, depth, false, operand);
+    const args = this.callArguments(
+      projection,
+      node.id,
+      objcCandidate !== undefined,
+      literalsAllowed,
+    );
+    if (!args) return this.sourceCall(node, depth, false, operand);
     if (this.sourceView && !this.callEffectsAdmitted(node))
       this.writer.statement(depth, this.clobbers(node.clobbers));
     const guessed = this.likelyArgumentList(projection);
@@ -4704,7 +4676,8 @@ export class Renderer {
         target,
         `${projection.kind === 'source' ? 'Established' : 'Inferred or incomplete'} source call. Original target: ${node.target.kind === 'direct' ? this.writer.quote(this.addressKey(node.target.address)) : 'indirect'}. Original memory effect: ${node.clobbers.memory}. Calls remain ordered; unused machine clobbers are not source results.`,
       );
-    // A function-pointer cast spells the open arity (`T (*)(A, ...)`) at the call itself.
+    // A function-pointer cast names exactly the printed argument positions; its open arity is
+    // stated in the header note, as for a direct call.
     const pointerCast =
       !send &&
       this.sourceView &&
@@ -4712,7 +4685,7 @@ export class Renderer {
       this.localValidation.presentation(
         'function_pointer_call',
         node.id,
-        'indirect call target presented through a function-pointer type spelled from the projected argument and result types; an open arity keeps a trailing ellipsis and the remainder marker',
+        'indirect call target presented through a function-pointer type spelled from the projected argument and result types; the cast names exactly the printed argument positions and keeps a trailing ellipsis only for a declared variadic prototype; an open arity is stated in the file header note',
         [node.target.value.id],
       );
     if (pointerCast) target = this.functionPointer(projection, target, open);
@@ -4723,7 +4696,8 @@ export class Renderer {
           node.target.kind === 'direct' &&
           this.statesOpenArity(projection, this.addressKey(node.target.address));
       if (!stated) args.push(this.inlineEllipsis());
-      else if (!pointerCast) this.openCallees.add(target);
+      else if (pointerCast) this.openIndirectCall(node);
+      else this.openCallees.add(target);
     }
     let operation: string;
     if (send) {
@@ -4753,6 +4727,162 @@ export class Renderer {
     return results.length
       ? `${results.length === 1 ? this.local(results[0]!) : `(${this.writer.join(results.map((value) => this.local(value)))})`} = ${operation}`
       : operation;
+  }
+
+  /** The printed arguments of a source call or tail transfer, one routine for both:
+   * string and Objective-C literals, character constants, declared pointer locals,
+   * signed parameter contexts and pointer conversions follow the callee's parameter.
+   * `objc` marks a call printed as a message (no C conversions). Undefined when a literal
+   * record is refused (the caller retries without literals). */
+  private callArguments(
+    projection: BoundaryProjection,
+    subject: string,
+    objcCandidate: boolean,
+    literalsAllowed: boolean,
+  ): string[] | undefined {
+    const literals: string[] = [],
+      objcLiterals: string[] = [];
+    const args = projection.arguments.map((value, index) =>
+      this.callArgument(
+        projection,
+        objcCandidate,
+        index,
+        value,
+        literalsAllowed,
+        literals,
+        objcLiterals,
+      ),
+    );
+    if (
+      (literals.length &&
+        !this.localValidation.presentation(
+          'string_literal',
+          subject,
+          STRING_LITERAL_SCOPE,
+          literals,
+        )) ||
+      (objcLiterals.length &&
+        !this.localValidation.presentation(
+          'objc_string_literal',
+          subject,
+          'pointer-width constant call arguments addressing an exact __cfstring constant object (isa bound to ___CFConstantStringClassReference, explicit length), printed as that NSString literal',
+          objcLiterals,
+        ))
+    )
+      return undefined;
+    return args;
+  }
+
+  private callArgument(
+    projection: BoundaryProjection,
+    objcCandidate: boolean,
+    index: number,
+    value: Value,
+    literalsAllowed: boolean,
+    literals: string[],
+    objcLiterals: string[],
+  ): string {
+    this.context.checkpoint(1);
+    const parameter = projection.signature?.signature.parameters[index];
+    const parameterType = parameter && this.typeRecords.get(parameter.type_id)?.definition;
+    const pointer = parameterType?.kind === 'pointer';
+    const pointee = pointer ? this.typeRecords.get(parameterType.to)?.definition : undefined;
+    const bytePointer =
+      pointee?.kind === 'void' || (pointee?.kind === 'integer' && pointee.bits === 8);
+    const code =
+      !pointer && this.characterParameter(projection, index) ? this.constantOf(value) : undefined;
+    const character = code === undefined ? undefined : this.printer.character(code, true);
+    if (character && this.printer.simplify('character_literal', [value.id])) return character.text;
+    const objcLiteral = literalsAllowed ? this.objcLiteral(value) : undefined;
+    const literal =
+      objcLiteral ??
+      (!literalsAllowed || (pointer && !bytePointer)
+        ? undefined
+        : this.sourceLiteral(value, pointer && bytePointer));
+    if (objcLiteral !== undefined) objcLiterals.push(value.id);
+    else if (literal !== undefined) literals.push(value.id);
+    // A declared pointer local (or held call result), possibly through inline
+    // same-width bitcasts of its bits, already has the parameter's pointer
+    // spelling, or is a message operand: no conversion is printed.
+    let operandValue = value;
+    for (let step = 0; step < 4 && this.inline.has(operandValue.id); step++) {
+      if (this.pendingCalls.has(operandValue.id)) break;
+      const alias = this.program.expressions.get(operandValue.id);
+      if (
+        alias?.kind !== 'cast' ||
+        alias.op !== 'bitcast' ||
+        bitWidth(alias.value.type) !== bitWidth(operandValue.type)
+      )
+        break;
+      operandValue = alias.value;
+    }
+    const declared =
+      this.sourceView &&
+      this.language === 'c-like' &&
+      literal === undefined &&
+      (this.pendingCalls.has(operandValue.id) || !this.inline.has(operandValue.id))
+        ? this.declaredSpelling(operandValue)
+        : '';
+    if (
+      declared.endsWith('*') &&
+      (pointer ? this.callParameterType(projection, index) === declared : objcCandidate)
+    )
+      return this.local(operandValue);
+    // A message operand read from a declared pointer member or typed global is
+    // that lvalue itself: message syntax needs no integer conversion.
+    const loaded =
+      objcCandidate && literal === undefined && this.sourceView
+        ? this.inlined.get(operandValue.id)?.node
+        : undefined;
+    if (loaded?.kind === 'load' && this.inline.has(operandValue.id)) {
+      const storage = this.storage(loaded);
+      if (this.memberPointers.has(loaded.id) || this.typedPointerGlobal(loaded.id)) return storage;
+    }
+    const printed = pointer
+      ? literal === undefined
+        ? this.sourceAddressPrinted(value, !this.sourceView)
+        : undefined
+      : literal === undefined
+        ? this.printed(value)
+        : undefined;
+    const text = literal ?? printed!.text;
+    // A message operand needs no C parameter conversion: message syntax has none.
+    if (pointer && objcCandidate && literal === undefined) return this.value(value);
+    if (pointer && this.language === 'c-like') {
+      const spelling = this.callParameterType(projection, index);
+      if (literal !== undefined)
+        return /^(?:const )?(?:char|void)\s*\*$/.test(spelling)
+          ? literal
+          : `(${spelling})${literal}`;
+      const loaded = this.inlined.get(value.id)?.node;
+      if (loaded?.kind === 'load' && this.typedPointerGlobal(loaded.id)?.c === spelling)
+        return this.storage(loaded);
+      return this.pointerValue(printed!, spelling);
+    }
+    const type = parameter && this.typeRecords.get(parameter.type_id)?.definition;
+    if (type?.kind === 'integer' && type.signed && this.language === 'python-like')
+      return this.call(
+        `int${type.bits}`,
+        'Interpret source integer argument with its established signed ABI type.',
+        [text],
+      );
+    // A declared prototype converts an argument to its parameter type: the
+    // value's own signed variable passes unchanged to a signed parameter.
+    if (printed && type?.kind === 'integer' && type.signed && this.language === 'c-like')
+      return this.signedContext(printed, type.bits);
+    // An undeclared parameter reads the callee's observed interface: an
+    // argument that is a declared pointer variable passes as that pointer.
+    if (printed?.pointer && !parameter && this.language === 'c-like') return printed.pointer.text;
+    return text;
+  }
+
+  /** The printed arguments of a tail transfer: the routine of an ordinary call. */
+  private tailArguments(subject: string, boundary: BoundaryProjection, ids: string[]): string[] {
+    for (const value of boundary.arguments) ids.push(value.id);
+    return (
+      this.callArguments(boundary, subject, false, true) ??
+      this.callArguments(boundary, subject, false, false)!
+    );
   }
 
   /** A tail transfer returns its callee's result; a proven-void callee is a
@@ -4828,7 +4958,8 @@ export class Renderer {
     }
   }
 
-  /** C: `((R (*)(T0, T1, ...))target)`; Python-like: `function_pointer(target, "R (*)(...)")`.
+  /** C: `((R (*)(T0, T1))target)` (`...` ends the list only for a declared variadic
+   * signature); Python-like: `function_pointer(target, "R (*)(...)")`.
    * The result type is `result` when given, else the single projected result,
    * void only for a projected source/inferred interface without results, and
    * unknown_result otherwise. */
@@ -4851,7 +4982,9 @@ export class Renderer {
           this.context.checkpoint(1);
           return this.valueType(value);
         });
-    if (declared ? declared.variadic : open)
+    // `...` declares a variadic prototype: only a declared variadic signature has one. An open
+    // interface names its proven positions; with none, a lone `uintptr_t` stands for them.
+    if (declared ? declared.variadic : open && !parameters.length)
       parameters.push(parameters.length ? '...' : 'uintptr_t');
     const signature = `${result} (*)(${parameters.length ? this.writer.join(parameters) : 'void'})`;
     if (this.language === 'python-like')
@@ -5100,7 +5233,7 @@ export class Renderer {
         const projection = this.program.calls.get(node.id);
         const results = node.kind === 'call' ? (projection?.results ?? node.results) : [];
         const resultIds = new Set(results.map((value) => value.id));
-        const outputs = (projection?.outputs ?? node.register_outputs).filter(
+        const outputs = (projection?.outputs ?? registerOutputs(this.program.source, node)).filter(
           (binding) => this.program.live.has(binding.value.id) && !resultIds.has(binding.value.id),
         );
         const inputs =
@@ -5654,8 +5787,9 @@ export class Renderer {
   }
 
   /** Side conditions of a `for` header (see LoopFacts.induction). Records the
-   * hoisted copies when they hold. */
-  private acceptFor(loop: Parameters<LoopFacts['induction']>[0]): boolean {
+   * hoisted copies when they hold. `held`: the one statement a top test holds
+   * (it prints inside the test, so its operands count as test reads). */
+  private acceptFor(loop: Parameters<LoopFacts['induction']>[0], held?: Instruction): boolean {
     const liveness = this.liveness;
     if (!liveness) return false;
     const key = (value: Value): string => this.variableKey(value);
@@ -5672,7 +5806,7 @@ export class Renderer {
           .leaves(copy.source)
           .every((index) => !others.has(key(liveness.values[index]!)));
       });
-    if (!steps.length) return this.acceptStatementFor(loop);
+    if (!steps.length) return this.acceptStatementFor(loop, held);
     if (!independent(steps) || !independent(inits)) return false;
     const induction = new Set<string>();
     for (const copy of steps) {
@@ -5692,7 +5826,7 @@ export class Renderer {
       ? restated
         ? [key(restated.left)]
         : []
-      : liveness.leaves(loop.test.condition).map((index) => key(liveness.values[index]!));
+      : this.testLeaves(loop.test, held).map((index) => key(liveness.values[index]!));
     if (!reads.some((variable) => induction.has(variable))) return false;
     // Nothing inside the loop writes an induction variable except the step.
     for (const id of loop.inside) {
@@ -5719,12 +5853,24 @@ export class Renderer {
     return true;
   }
 
+  /** Variable leaves a loop's top test reads: its condition and, when it holds
+   * one (see loopCommaTests), the operands of the statement printed inside it. */
+  private testLeaves(test: Extract<Control, { kind: 'if' }>, held?: Instruction): number[] {
+    const liveness = this.liveness!;
+    const leaves = [...liveness.leaves(test.condition)];
+    if (held) for (const value of liveness.operands(held)) leaves.push(...liveness.leaves(value));
+    return leaves;
+  }
+
   /** A top-tested `for` whose step is the loop body's last statement and assigns
    * a variable the test reads; its init, when the loop's entry block ends with
    * one, is the statement assigning that variable just before the loop. The
    * step still runs last in every iteration: the sole repeat edge prints
    * nothing and follows it, and nothing else in the loop writes the variable. */
-  private acceptStatementFor(loop: Parameters<LoopFacts['induction']>[0]): boolean {
+  private acceptStatementFor(
+    loop: Parameters<LoopFacts['induction']>[0],
+    held?: Instruction,
+  ): boolean {
     const liveness = this.liveness;
     if (!liveness || loop.bottom) return false;
     const step = this.trailingStatement(loop.step);
@@ -5732,7 +5878,7 @@ export class Renderer {
     const variable = this.variableKey(step.result);
     const writes = (ids: readonly number[]): boolean =>
       ids.some((index) => this.variableKey(liveness.values[index]!) === variable);
-    if (!writes(liveness.leaves(loop.test.condition))) return false;
+    if (!writes(this.testLeaves(loop.test, held))) return false;
     let definitions = 0;
     for (const id of loop.inside) {
       const block = this.program.blocks.get(id);
@@ -6155,31 +6301,29 @@ export class Renderer {
       const stage = form.chain.find((item) => item.test === control.id)!;
       if (control.id === form.test) {
         const start = this.writer.offset;
+        // The header's one statement prints inside the first test (operandTerm).
+        const held = this.loopCommaTests.get(form.test);
         const operands = form.chain.map((item) => {
           const flag = this.flagTests.get(item.test);
           if (flag) {
             const merged = this.flagCondition(flag);
             return `(${(item.enter ? merged.positive : merged.negative).text})`;
           }
-          const block = this.program.blocks.get(item.block)!;
-          const test = block.control;
-          if (test.kind !== 'if') this.invalid('A loop condition lost its branch');
-          const predicate = this.printed(test.condition);
-          const condition = item.enter
-            ? predicate.text
-            : c
-              ? `!(${predicate.text})`
-              : `not (${predicate.text})`;
-          return `(${condition})`;
+          const test = this.controls.get(item.test);
+          if (test?.kind !== 'if') this.invalid('A loop condition lost its branch');
+          if (held && item.test === form.test)
+            return this.printer.group(this.operandTerm(test, item.enter, held).printed, PRIMARY);
+          return `(${this.testPrinted(test, item.enter).text})`;
         });
         this.writer.line(
           depth - 1,
           c ? `while (${operands.join(' && ')}) {` : `while ${operands.join(' and ')}:`,
         );
+        this.mapHeaded(start);
         for (const item of form.chain) {
           const block = this.program.blocks.get(item.block)!;
           for (const node of block.statements)
-            if (this.program.retained.has(node.id)) this.map(node, start);
+            if (this.program.retained.has(node.id) && node !== held) this.map(node, start);
           this.map(block.control, start, [block.control.effect.id]);
         }
       }
@@ -6194,17 +6338,22 @@ export class Renderer {
         exit = form.enter ? control.when_false : control.when_true,
         header = this.forLoops.get(control.id),
         statements = form.kind === 'for' ? this.forStatements.get(control.id) : undefined;
+      // The header's one statement prints inside the test (see operandTerm).
+      const held = this.loopCommaTests.get(control.id);
+      const head = (): string =>
+        held ? this.operandTerm(control, form.enter, held).printed.text : test(form.enter);
       const start = this.writer.offset;
       this.writer.line(
         depth - 1,
         statements
-          ? `for (${statements.init ? this.headerStatement(statements.init) : statements.copies ? this.hoistedText(statements.copies) : ''}; ${test(form.enter)}; ${this.headerStatement(statements.step)}) {`
+          ? `for (${statements.init ? this.headerStatement(statements.init) : statements.copies ? this.hoistedText(statements.copies) : ''}; ${head()}; ${this.headerStatement(statements.step)}) {`
           : form.kind === 'for' && header
-            ? `for (${this.hoistedText(header.init)}; ${test(form.enter)}; ${this.hoistedText(header.step)}) {`
+            ? `for (${this.hoistedText(header.init)}; ${head()}; ${this.hoistedText(header.step)}) {`
             : c
-              ? `while (${test(form.enter)}) {`
-              : `while ${test(form.enter)}:`,
+              ? `while (${head()}) {`
+              : `while ${head()}:`,
       );
+      this.mapHeaded(start);
       for (const node of statements ? [statements.init, statements.step] : [])
         if (node) {
           this.map(node, start);
@@ -7100,7 +7249,12 @@ export class Renderer {
         ? `${chained ? '} else ' : ''}if (${text}) {`
         : `${chained ? 'el' : ''}if ${text}:`,
     );
-    // Operand statements printed inside this test map to its line.
+    this.mapHeaded(start);
+  }
+
+  /** Operand statements printed inside the head line starting at `start` (an
+   * `if` or loop test) map to that line. */
+  private mapHeaded(start: number): void {
     for (const origin of this.headed.splice(0)) {
       const node = this.statements.get(origin.id);
       this.inferenceSites.set(origin.id, { start, end: this.writer.offset });
@@ -7395,7 +7549,7 @@ export class Renderer {
    * ownership are those of the first structuring. The facts never depend on
    * the first layout (reconstruction reads only its blocks, transfers and loop
    * membership, see docs/internals/structuring-emission.md). */
-  private restructure(silent: (block: BlockRegion) => boolean): void {
+  private restructure(silent: (block: BlockRegion) => boolean, plans: AttemptPlans): void {
     const program = this.program,
       edges = new Map<string, ParallelTransfer>();
     const slots = (control: Control): [number, ParallelTransfer][] =>
@@ -7431,16 +7585,51 @@ export class Renderer {
       copies: (block, slot) => this.printedCopies(edges.get(`${block}:${slot}`)!).length,
       returnsConstants: (block, slot) => this.returnsConstants(edges.get(`${block}:${slot}`)!),
     };
-    const structure = (facts: StructuringConditions) =>
-      structureControlFlow(
+    // An earlier attempt's structuring is reused when every condition it
+    // evaluated, asked again in the same order, answers the same: structuring
+    // is deterministic in its graph (the shared reconstruction's) and these
+    // answers, so it would ask the same questions and lay out the same body.
+    const structure = (facts: StructuringConditions): StructuringResult => {
+      const asked = (query: StructuringQuery): boolean | number =>
+        query.kind === 'operand'
+          ? facts.operand(query.block)
+          : facts[query.kind](query.block, query.slot);
+      for (const memo of (plans.structures ??= []))
+        if (
+          memo.graph === program.function &&
+          memo.queries.every((query) => asked(query) === query.answer)
+        )
+          return memo.result;
+      const queries: StructuringQuery[] = [];
+      const result = structureControlFlow(
         structuredGraph(program.function, program.blocks, (work) => this.context.checkpoint(work)),
         this.context,
         {
           max_work: this.context.budget.work,
           transfers: (block, slot) => edges.get(`${block}:${slot}`),
-          conditions: facts,
+          conditions: {
+            operand: (block) => {
+              const answer = facts.operand(block);
+              queries.push({ kind: 'operand', block, answer });
+              return answer;
+            },
+            copies: (block, slot) => {
+              const answer = facts.copies(block, slot);
+              queries.push({ kind: 'copies', block, slot, answer });
+              return answer;
+            },
+            returnsConstants: (block, slot) => {
+              const answer = facts.returnsConstants(block, slot);
+              queries.push({ kind: 'returnsConstants', block, slot, answer });
+              return answer;
+            },
+          },
         },
       );
+      // A partial result (exhausted work) is not a layout: it is never reused.
+      if (result.value) plans.structures.push({ graph: program.function, queries, result });
+      return result;
+    };
     let result = structure(conditions);
     if (
       result.value &&
@@ -7882,7 +8071,7 @@ export class Renderer {
       for (const [id] of held) this.commaOperands.delete(id);
       this.commaCarriers.clear();
     }
-    this.restructure(silent);
+    this.restructure(silent, plans);
     program = this.program;
     // A proven jump table's exact range guard and its switch print as one switch.
     const quietAnchor = (id: string): boolean =>
@@ -7993,6 +8182,13 @@ export class Renderer {
         for (const control of flag.controls) this.flagStages.add(control);
         for (const access of flag.accesses) this.flagAccesses.add(access);
       }
+    // The one statement a non-silent loop header prints, when its test (or the
+    // test of the block its carrier jump enters) holds it (commaOperands).
+    const headStatement = (header: string): Instruction | undefined => {
+      const block = program.blocks.get(header);
+      if (!block || silent(block)) return undefined;
+      return this.commaOperands.get(this.commaCarriers.get(header) ?? header) ?? undefined;
+    };
     const shaped = planLoopForms(
       body,
       this.language,
@@ -8003,6 +8199,11 @@ export class Renderer {
             liveness.leaves(copy.source).map((index) => key(liveness.values[index]!)),
           ),
         silent,
+        comma: (block) => {
+          const node = this.commaOperands.get(block.id);
+          return !!node && block.statements.includes(node);
+        },
+        carrier: (block) => this.commaCarriers.get(block.id),
         plain: (control) => !this.requirementPredicates.has(control.id),
         reads: (control) => {
           const flag = this.flagTests.get(control.id);
@@ -8025,14 +8226,16 @@ export class Renderer {
           );
         },
         rebase: (control, repeat) => this.restateTest(control, repeat),
-        induction: (loop) => this.acceptFor(loop),
+        induction: (loop) =>
+          this.acceptFor(loop, loop.bottom ? undefined : headStatement(loop.header)),
       },
       this.context,
     );
     const tests: string[] = [],
       fors: string[] = [],
       exits: string[] = [],
-      exitCopyLoops = new Set<string>();
+      exitCopyLoops = new Set<string>(),
+      commas = new Map<string, Instruction>();
     const forms = (region: Region): void => {
       if (region.kind === 'sequence') region.regions.forEach(forms);
       else if (region.kind === 'loop') {
@@ -8043,6 +8246,13 @@ export class Renderer {
               : [region.form.test]),
           );
         if (region.form?.kind === 'for') fors.push(region.form.test);
+        // A top test of a header printing one statement holds it.
+        const held =
+          region.form &&
+          (region.form.kind === 'while' || (region.form.kind === 'for' && !region.form.bottom))
+            ? headStatement(region.header)
+            : undefined;
+        if (region.form && held) commas.set(region.form.test, held);
         const control = region.form && this.controls.get(region.form.test);
         const leave =
           region.form &&
@@ -8077,6 +8287,13 @@ export class Renderer {
           subject,
           "a single-test loop's exit edge prints its copies right after the loop: it is the only edge from inside the loop to the continuation, and outer-loop exit flags are tested before them; a do-while's repeat copies (moved before its test) are not read by them",
           exits,
+        )) &&
+      (!commas.size ||
+        this.localValidation.presentation(
+          'loop_comma_condition',
+          subject,
+          'a while or for loop whose header prints exactly one statement before its first test (an assignment, load or single-result call defining a value that test reads; a jump block alone entering the test may hold it) prints that statement inside the test: C `(x = f(), test)`, or `test` with its one direct read of x replaced by `(x = f())`; Python-like only the direct `(x := f())`. The comma operator is a sequence point, so the statement runs once per header entry, immediately before the test, as in the header block; a header that also has a valid bottom test stays do-while',
+          [...commas.values()].map((node) => node.id),
         ))
         ? shaped
         : body;
@@ -8086,7 +8303,7 @@ export class Renderer {
       this.forLoops.clear();
       this.forStatements.clear();
       this.headerStatements.clear();
-    }
+    } else for (const [test, node] of commas) this.loopCommaTests.set(test, node);
     // Short-circuit tests sharing one arm print as if/else.
     const loopTests = new Set(this.body === body ? [] : tests);
     const sharedArms = planSharedArms(
@@ -8580,15 +8797,12 @@ export class Renderer {
           this.localValidation.presentation(
             'function_pointer_call',
             control.id,
-            "indirect tail-call target presented through a function-pointer type spelled from the observed argument types and this function's own result type (void when it returns nothing); an open arity keeps a trailing ellipsis",
+            "indirect tail-call target presented through a function-pointer type spelled from the observed argument types and this function's own result type (void when it returns nothing); the cast names exactly the printed argument positions and an open arity is stated in the file header note",
             [control.target.id],
           )
         ) {
           const voidResult = this.returnSpelling === 'void';
-          const arguments_ = tail.boundary.arguments.map((value) => {
-            ids.push(value.id);
-            return this.valueLiteral(value)?.text ?? this.value(value);
-          });
+          const arguments_ = this.tailArguments(control.id, tail.boundary, ids);
           const open = this.openList(tail.boundary);
           if (open) {
             this.openRemainder(
@@ -8596,6 +8810,7 @@ export class Renderer {
               'Unresolved remainder of a call interface; not zero arguments or a purity claim.',
             );
             if (!arguments_.length) arguments_.push(this.inlineEllipsis());
+            else if (!tail.boundary.signature) this.openIndirectCall(control);
           }
           ids.push(control.target.id);
           const target = this.functionPointer(
@@ -8679,10 +8894,7 @@ export class Renderer {
                 `sub_${tail.target.value.toString(16)}`,
             );
           this.sourceNames.set(key, name);
-          const arguments_ = tail.boundary.arguments.map((value) => {
-            ids.push(value.id);
-            return this.valueLiteral(value)?.text ?? this.value(value);
-          });
+          const arguments_ = this.tailArguments(control.id, tail.boundary, ids);
           const guessedTail = this.likelyArgumentList(tail.boundary);
           if (tail.boundary.argument_list_complete === false && !guessedTail) {
             const remainder = this.openRemainder(
@@ -8857,8 +9069,11 @@ export class Renderer {
       const carried = this.sourceView ? this.commaCarriers.get(region.id) : undefined;
       const test = carried ? this.program.blocks.get(carried)!.control : region.control;
       const comma = this.sourceView ? this.commaOperands.get(carried ?? region.id) : undefined;
+      // A loop header's one statement prints inside its while/for test.
+      const looped = this.loopCommaTests.get(test.id);
       const merged =
         comma &&
+        !looped &&
         (this.joinedPlan !== undefined ||
           this.conjunct !== undefined ||
           (this.sharedPlan !== undefined && controlArms(test).some((arm) => arm.joins)))
@@ -8866,7 +9081,7 @@ export class Renderer {
           : undefined;
       if (merged) this.commaHeld = { control: test.id, node: merged };
       for (const node of region.statements) {
-        if (node === merged) continue;
+        if (node === merged || node === looped) continue;
         this.context.checkpoint(1);
         if (this.headerStatements.has(node.id)) {
           this.sourceDefinitions(node.id, depth);
@@ -9304,13 +9519,18 @@ export class Renderer {
       );
     }
     if (stack?.kind === 'object') {
-      const name = this.sourceIdentifier(stack.id, 'frame');
-      if (this.language === 'c-like') {
+      // Independent members (A3) are locals of their own; the struct holds the
+      // others and is omitted when none is left. Its end is the entry SP or
+      // (A3) the hidden save area below it.
+      const kept = stack.members.filter((member) => !member.independent),
+        top = stack.minimum_offset + stack.size;
+      if (kept.length && this.language === 'c-like') {
+        const name = this.sourceIdentifier(stack.id, 'frame');
         // Members sit at their packed frame offsets; padding fills the gaps.
         let end = stack.minimum_offset,
           packed = false;
         w.line(1, `_Alignas(${stack.alignment}) struct {`);
-        for (const member of stack.members) {
+        for (const member of kept) {
           this.context.checkpoint(1);
           const field = `local_${(-member.offset).toString(16)}`;
           if (member.offset > end)
@@ -9326,14 +9546,15 @@ export class Renderer {
           packed ||= member.scalar && (member.offset - stack.minimum_offset) % member.size !== 0n;
           end = member.offset + member.size;
         }
-        if (end < 0n) w.statement(2, `uint8_t pad_${(-end).toString(16)}[${-end}]`);
+        if (end < top) w.statement(2, `uint8_t pad_${(-end).toString(16)}[${top - end}]`);
         w.statement(1, `}${packed ? ' __attribute__((packed))' : ''} ${name}`);
-      } else {
+      } else if (kept.length) {
+        const name = this.sourceIdentifier(stack.id, 'frame');
         w.statement(
           1,
-          `${name} = ${this.call('stack_frame', "This activation's stack frame kept as memory: SIZE bytes ending at the entry stack pointer, starting at an ALIGNMENT-aligned address, original contents unknown. Each annotated member local_N names the bytes at entry-SP offset -N with its type; members and all other frame bytes are ordinary aliasable memory.", [String(stack.size), String(stack.alignment)])}`,
+          `${name} = ${this.call('stack_frame', "This activation's stack frame kept as memory: SIZE bytes ending at the entry stack pointer (or, given END, at entry-SP offset END: the bytes from there to the entry SP are hidden register saves, locals of their own or untouched), starting at an ALIGNMENT-aligned address, original contents unknown. Each annotated member local_N names the bytes at entry-SP offset -N with its type; members and all other frame bytes are ordinary aliasable memory.", [String(stack.size), String(stack.alignment), ...(top < 0n ? [`-0x${(-top).toString(16)}`] : [])])}`,
         );
-        for (const member of stack.members) {
+        for (const member of kept) {
           this.context.checkpoint(1);
           // The SysV `va_list` (S7) states its offset beside its name.
           w.statement(
@@ -9343,6 +9564,19 @@ export class Renderer {
               : `${name}.local_${(-member.offset).toString(16)}: ${member.scalar ? this.frameMemberType(member) : `array<uint8_t, ${member.size}>`}`,
           );
         }
+      }
+      for (const member of stack.members) {
+        if (!member.independent) continue;
+        this.context.checkpoint(1);
+        const name = this.frameLocal(member, member.independent);
+        w.statement(
+          1,
+          member.scalar
+            ? w.declaration(this.frameMemberType(member), name)
+            : this.language === 'c-like'
+              ? `uint8_t ${name}[${member.size}]`
+              : `${name}: array<uint8_t, ${member.size}>`,
+        );
       }
     }
     const declaredLocals = new Set<string>();

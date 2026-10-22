@@ -10,33 +10,69 @@ import {
 import { sourceStackArgumentParts } from '../../reconstruction/source-stack-arguments.js';
 import type { NativeInterface } from './native-worklist.js';
 
+/** What `nativeArgumentValues` reads of one IR, built once per caller loop:
+ * assignments, stores and loads by id, register inputs of each call, the exit
+ * row of each terminator's block, and concatenations by operand tuple. */
+export interface NativeArgumentIndex {
+  readonly ir: SSAForm;
+  readonly expressions: ReadonlyMap<string, Expression>;
+  readonly stores: ReadonlyMap<string, Value>;
+  readonly loads: ReadonlyMap<string, Value>;
+  readonly calls: ReadonlyMap<string, readonly RegisterBinding[]>;
+  readonly exits: ReadonlyMap<string, readonly RegisterBinding[]>;
+  /** Concatenation results by `operandKey` of their operands, in IR order. */
+  readonly concats: ReadonlyMap<string, readonly Value[]>;
+}
+
+const operandKey = (values: readonly Value[]): string =>
+  values.map((value) => value.id).join('\u0000');
+
+/** One scan of `ir` (identities are unique, so every map holds one entry per node). */
+export function nativeArgumentIndex(ir: SSAForm, context: OperationContext): NativeArgumentIndex {
+  const expressions = new Map<string, Expression>();
+  const stores = new Map<string, Value>();
+  const loads = new Map<string, Value>();
+  const calls = new Map<string, readonly RegisterBinding[]>();
+  const exits = new Map<string, readonly RegisterBinding[]>();
+  const concats = new Map<string, Value[]>();
+  const rows = new Map<string, readonly RegisterBinding[]>();
+  for (const state of ir.register_states)
+    if (!rows.has(state.block)) rows.set(state.block, state.exit);
+  for (const block of ir.blocks) {
+    for (const node of block.instructions) {
+      context.checkpoint(1);
+      if (node.kind === 'assign') {
+        expressions.set(node.result.id, node.expression);
+        if (node.expression.kind !== 'concat') continue;
+        const key = operandKey(node.expression.values),
+          list = concats.get(key);
+        if (list) list.push(node.result);
+        else concats.set(key, [node.result]);
+      } else if (node.kind === 'store') stores.set(node.id, node.value);
+      else if (node.kind === 'load') loads.set(node.id, node.result);
+      else if (node.kind === 'call') calls.set(node.id, node.register_inputs);
+    }
+    exits.set(block.terminator.id, rows.get(block.id) ?? []);
+  }
+  return { ir, expressions, stores, loads, calls, exits, concats };
+}
+
 /** Associate observed physical parameters with existing whole SSA actuals.
  * Split roots are joined only through an existing exact extract/concat owner;
- * a synthetic value must never become a catalogued caller memory-shape base. */
+ * a synthetic value must never become a catalogued caller memory-shape base.
+ * `boundary` is the IR id (entry arguments), a call id or a tail terminator id. */
 export function nativeArgumentValues(
-  ir: SSAForm,
+  indexed: NativeArgumentIndex,
   analysis: CallAnalysisResult | null,
   boundary: string,
   observed: NativeInterface,
   context: OperationContext,
 ): ReadonlyMap<number, Value> {
-  const expressions = new Map<string, { readonly value: Value; readonly expression: Expression }>();
-  const stores = new Map<string, Value>();
-  let bindings: readonly RegisterBinding[] =
+  const { ir, expressions } = indexed;
+  const bindings: readonly RegisterBinding[] =
     boundary === ir.id
       ? (ir.register_states.find((state) => state.block === ir.entry)?.entry ?? [])
-      : [];
-  for (const block of ir.blocks) {
-    for (const node of block.instructions) {
-      context.checkpoint(1);
-      if (node.kind === 'assign')
-        expressions.set(node.result.id, { value: node.result, expression: node.expression });
-      else if (node.kind === 'store') stores.set(node.id, node.value);
-      else if (node.kind === 'call' && node.id === boundary) bindings = node.register_inputs;
-    }
-    if (block.terminator.id === boundary)
-      bindings = ir.register_states.find((state) => state.block === block.id)?.exit ?? [];
-  }
+      : (indexed.calls.get(boundary) ?? indexed.exits.get(boundary) ?? []);
   const result = new Map<number, Value>();
   for (const [index, register] of observed.parameters.entries()) {
     const cells = bindings
@@ -60,7 +96,7 @@ export function nativeArgumentValues(
       exact = true;
     for (const cell of cells) {
       context.checkpoint(1);
-      const expression = expressions.get(cell.value.id)?.expression;
+      const expression = expressions.get(cell.value.id);
       if (
         cell.register.offset_bits !== cursor ||
         expression?.kind !== 'extract' ||
@@ -82,19 +118,11 @@ export function nativeArgumentValues(
       result.set(index, whole);
       continue;
     }
-    for (const candidate of expressions.values()) {
-      context.checkpoint(1);
-      if (
-        candidate.expression.kind !== 'concat' ||
-        bitWidth(candidate.value.type) !== register.width_bits ||
-        candidate.expression.values.length !== cells.length
-      )
-        continue;
-      if (candidate.expression.values.every((value, i) => value.id === cells[i]!.value.id)) {
-        result.set(index, candidate.value);
-        break;
-      }
-    }
+    context.checkpoint(1);
+    const concat = indexed.concats
+      .get(operandKey(cells.map((cell) => cell.value)))
+      ?.find((value) => bitWidth(value.type) === register.width_bits);
+    if (concat) result.set(index, concat);
   }
   if (analysis)
     for (const [index, parameter] of (observed.stack_parameters ?? []).entries()) {
@@ -108,16 +136,14 @@ export function nativeArgumentValues(
             access.size * 8n !== BigInt(parameter.width_bits)
           )
             continue;
-          for (const block of ir.blocks)
-            for (const node of block.instructions)
-              if (node.kind === 'load' && node.id === access.node_id)
-                result.set(observed.parameters.length + index, node.result);
+          const load = indexed.loads.get(access.node_id);
+          if (load) result.set(observed.parameters.length + index, load);
         }
         continue;
       }
       const parts = sourceStackArgumentParts(
         analysis.stack,
-        stores,
+        indexed.stores,
         boundary,
         parameter.offset,
         parameter.width_bits,

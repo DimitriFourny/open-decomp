@@ -17,6 +17,7 @@ import {
   sameType,
   type DataType,
   type Expression,
+  type Instruction,
   type RegisterBinding,
   type Value,
 } from '../ir/index.js';
@@ -635,6 +636,75 @@ export function planSource(
           }
         }
       }
+      // An established variadic library contract that no rule closed: the fixed
+      // parameters are exactly the ABI classification of the established
+      // signature, so they bind at their register locations; the anonymous
+      // tail is never claimed and the list stays open. The declared result is
+      // left unbound: nothing here reads it, and binding it would make a void
+      // caller's exit register an established integer result.
+      const fixedContract =
+        view === 'source' &&
+        !projection &&
+        fact?.status === 'established' &&
+        (contracts.length === 1 || repeatedContract)
+          ? contracts[0]!.contract.signature
+          : undefined;
+      if (fixedContract?.variadic && node.results.length === 0) {
+        const layout = abi.classifyCall({ ...fixedContract, argument_list_complete: false });
+        if (
+          layout.state !== 'unsupported' &&
+          !layout.hidden_result &&
+          fixedContract.parameters &&
+          fixedContract.fixed_parameter_count === fixedContract.parameters.length &&
+          layout.parameters.length === fixedContract.parameters.length
+        ) {
+          const args: Value[] = [];
+          let valid = true;
+          for (const parameter of layout.parameters) {
+            const type = machineType(fixedContract.parameters[parameter.index]!);
+            const value =
+              type &&
+              bind(
+                `${node.id}:arg:${parameter.index}`,
+                node.register_inputs,
+                parameter.locations,
+                type,
+                block.id,
+              );
+            if (!value) {
+              valid = false;
+              break;
+            }
+            args.push(value);
+          }
+          if (node.arguments.some((value) => !args.some((argument) => argument.id === value.id)))
+            valid = false;
+          if (
+            valid &&
+            validation.presentation(
+              'library_fixed_prefix',
+              node.id,
+              `library_variadic_prefix: the established, non-conflicting variadic library contract fixes its ${args.length} leading parameter(s) at their ${abi.id} register locations, each bound to the caller's value there; the anonymous arguments are not claimed and the argument list stays open`,
+              [node.id],
+            )
+          ) {
+            validation.requireAbi(
+              'library_fixed_prefix',
+              [node.id],
+              'Printing the fixed prefix of a variadic library call assumes the established contract and the ABI classification of its fixed parameters; the anonymous arguments stay unresolved.',
+            );
+            projection = {
+              kind: 'inferred',
+              signature: null,
+              arguments: args,
+              argument_list_complete: false,
+              results: [],
+              inputs: [],
+              outputs: node.register_outputs,
+            };
+          }
+        }
+      }
       const callee = inferred.get(node.id);
       if (!projection && callee && node.arguments.length === 0 && node.results.length === 0) {
         const variadic = variadicArguments(callee, node.register_inputs, node.id, block.id);
@@ -1117,6 +1187,51 @@ export function planSource(
   }
   const integerReturn = layout.returns[0],
     floatingReturn = floatLayout.returns[0];
+  // Source view: positive caller result use, fetched at most once and only where
+  // a void-like premise would otherwise apply or a tail result is unresolved.
+  let callerDemand: readonly RegisterDescriptor[] | undefined;
+  let callerSites = '';
+  const callerDemands = (): readonly RegisterDescriptor[] => {
+    if (callerDemand === undefined) {
+      const found =
+        view === 'source' && !functionSignature
+          ? evidence.caller_result_demands?.(context)
+          : undefined;
+      callerDemand = found?.registers ?? [];
+      callerSites = (found?.sites ?? [])
+        .map(
+          (site) =>
+            `call at 0x${site.value.toString(16)} reads ${found!.registers.map((register) => `${register.root}:${register.offset_bits}:${register.width_bits}`).join(', ')}`,
+        )
+        .join('; ');
+    }
+    return callerDemand;
+  };
+  const selectPrimary = (demands: readonly RegisterDescriptor[]): SourcePrimaryResult | null =>
+    view === 'source' &&
+    !functionSignature &&
+    integerReturn?.kind === 'register' &&
+    floatingReturn?.kind === 'register' &&
+    [...blocks.values()].every(
+      (block) => block.control.kind !== 'return' || block.control.values.length === 0,
+    )
+      ? selectSourcePrimaryResult({
+          blocks,
+          entry,
+          expressions,
+          sources: storageSources,
+          typed: typedSlices,
+          parameters: parameterRegisters,
+          callResults,
+          stack: input.types?.calls?.stack,
+          integer: integerReturn,
+          floating: floatingReturn,
+          argumentRoots: new Set(candidates.map((register) => register.root)),
+          demands,
+          observed: evidence.function_returns?.registers ?? [],
+          context,
+        })
+      : null;
   let primaryResult: SourcePrimaryResult | null =
     indirectResult && !functionSignature
       ? {
@@ -1125,33 +1240,28 @@ export function planSource(
           reason: 'returns through the incoming indirect result location',
           void_like: 'indirect_result',
         }
-      : view === 'source' &&
-          !functionSignature &&
-          integerReturn?.kind === 'register' &&
-          floatingReturn?.kind === 'register' &&
-          [...blocks.values()].every(
-            (block) => block.control.kind !== 'return' || block.control.values.length === 0,
-          )
-        ? selectSourcePrimaryResult({
-            blocks,
-            entry,
-            expressions,
-            sources: storageSources,
-            typed: typedSlices,
-            parameters: parameterRegisters,
-            callResults,
-            stack: input.types?.calls?.stack,
-            integer: integerReturn,
-            floating: floatingReturn,
-            argumentRoots: new Set(candidates.map((register) => register.root)),
-            demands: evidence.function_return_demands ?? [],
-            observed: evidence.function_returns?.registers ?? [],
-            context,
-          })
-        : null;
+      : selectPrimary(evidence.function_return_demands ?? []);
   const exitIds = [...blocks.values()].flatMap((block) =>
     block.control.kind === 'return' ? [block.control.id] : [],
   );
+  // The void-like premise assumes callers read no result register: a caller
+  // that provably reads one refutes it, and the selection reruns with that demand.
+  if (primaryResult?.kind === 'none' && primaryResult.void_like === 'incidental_result') {
+    const demanded = callerDemands();
+    if (demanded.length) {
+      primaryResult = selectPrimary([...(evidence.function_return_demands ?? []), ...demanded]);
+      if (
+        !validation.presentation(
+          'caller_result_use',
+          input.function.id,
+          'positive caller result use: a direct call site of this function whose caller reads a result register after the call returns and before writing it (in a bounded lifted window after the return address, or as semantic demand of the prepared caller body) refutes the void-like premise; the primary result is selected again with that register demanded',
+          exitIds,
+          callerSites,
+        )
+      )
+        primaryResult = { kind: 'explicit', written: true, reason: 'presentation record bound' };
+    }
+  }
   const primaryScope =
     'primary result register defined on every exit path: unknown entry values, unprojected call clobbers and returning-frame addresses disqualify; FP needs typed IEEE writes (literal bits or a typed argument may join), or an untyped scalar FP value consumed only by exits (literal-zero upper cells, one 32/64-bit width, literal exits neutral) written after the integer register on every exit path; when both qualify: caller demand, then the register written last on every exit path, then a native written-result interface naming exactly one';
   // The untyped FP carrier holds only a vector copy or fill temporary: the
@@ -1559,14 +1669,52 @@ export function planSource(
   if (!functionSignature && tails.size && [...tails.values()].every((tail) => tail.result_void))
     returnType = null;
   else if (!functionSignature && tails.size) {
+    // Caller demand on the integer result root types a tail whose callee has no
+    // result types: it forwards exactly the callee's whole result register, so
+    // the function result is that register at the demanded width (or at the
+    // returned paths' wider integer type).
+    const unresolved = [...tails].filter(
+      ([, tail]) => !tail.result_void && tail.result_types.length === 0,
+    );
+    const integerRoot =
+      integerReturn?.kind === 'register' ? integerReturn.register.root : undefined;
+    const demandBits = (demands: readonly RegisterDescriptor[]): number =>
+      Math.max(
+        0,
+        ...demands
+          .filter((register) => register.root === integerRoot)
+          .map((register) => register.offset_bits + register.width_bits),
+      );
+    let demanded = 0;
+    if (view === 'source' && unresolved.length && integerRoot) {
+      demanded = demandBits(evidence.function_return_demands ?? []);
+      if (!demanded) demanded = demandBits(callerDemands());
+    }
+    const demandedType = !demanded
+      ? undefined
+      : returnType?.kind === 'integer' && bitWidth(returnType) >= demanded
+        ? returnType
+        : integer(demanded <= 8 ? 8 : demanded <= 16 ? 16 : demanded <= 32 ? 32 : 64);
     const types = [...tails.values()].map((tail) =>
-      tail.result_types.length === 1 ? tail.result_types[0]! : null,
+      tail.result_types.length === 1
+        ? tail.result_types[0]!
+        : demandedType && !tail.result_void && tail.result_types.length === 0
+          ? demandedType
+          : null,
     );
     const first = types[0];
     if (
       first &&
       types.every((type) => type !== null && sameType(type, first)) &&
-      (!returnType || sameType(returnType, first))
+      (!returnType || sameType(returnType, first)) &&
+      (!demandedType ||
+        validation.presentation(
+          'tail_result_width',
+          input.function.id,
+          'a tail transfer whose callee has no result types forwards the whole integer result register of the callee; with caller demand on that register the function result is the register at the demanded width, or at the integer type every other exit already returns when that is wider',
+          unresolved.map(([id]) => id),
+          `${bitWidth(demandedType)}-bit result; ${callerSites || 'demand from prepared callers'}`,
+        ))
     )
       returnType = first;
     else returnType = null;
@@ -1603,6 +1751,7 @@ export function planSource(
       : undefined;
   const incomingParameters = new Map<bigint, Value>(),
     formalStackOffsets = new Map<string, bigint>();
+  const registerOutputs = new Map<string, readonly RegisterBinding[]>();
   const presentation: SourcePresentation = {
     inferred: !functionSignature,
     parameter_names: parameterNames,
@@ -1610,6 +1759,7 @@ export function planSource(
     ...(returnTypes ? { return_types: returnTypes } : {}),
     ...(returnPointer === undefined ? {} : { return_pointer: returnPointer }),
     ...(observedRejected ? { observed_result_rejected: true as const } : {}),
+    ...(callerDemand?.length ? { caller_result_demands: callerDemand } : {}),
     ...(voidLike ? { void_like_result: voidLike } : {}),
     requirements: planSourceRequirements(
       input,
@@ -1627,6 +1777,7 @@ export function planSource(
     call_results: callResults,
     value_origins: valueOrigins,
     definitions,
+    register_outputs: registerOutputs,
     formal_stack_offsets: formalStackOffsets,
     ...(declaredExtension?.hidden ? { hidden_result: declaredExtension.hidden } : {}),
   };
@@ -1650,6 +1801,32 @@ export function planSource(
     forcedInline,
     alias,
     make,
+    /** Source view (E3): one whole output replaces the cells of a root that a
+     * call or unknown effect writes; a call's projection lists it too. */
+    outputs(
+      node: Extract<Instruction, { kind: 'call' | 'unknown_effect' }>,
+      bindings: readonly RegisterBinding[],
+    ): void {
+      registerOutputs.set(node.id, bindings);
+      const projection = node.kind === 'call' ? calls.get(node.id) : undefined;
+      if (!projection) return;
+      const replaced = new Set(
+        node.register_outputs
+          .filter((binding) => !bindings.includes(binding))
+          .map(({ value }) => value.id),
+      );
+      const added = bindings.filter((binding) => !node.register_outputs.includes(binding));
+      calls.set(node.id, {
+        ...projection,
+        outputs: projection.outputs.flatMap((binding) =>
+          !replaced.has(binding.value.id)
+            ? [binding]
+            : binding.register.offset_bits === 0
+              ? added.filter(({ register }) => register.root === binding.register.root)
+              : [],
+        ),
+      });
+    },
     entryStack(): Value {
       if (!entryParameter) {
         entryParameter = make(
