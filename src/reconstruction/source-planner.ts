@@ -937,6 +937,29 @@ export function planSource(
   );
   const primaryScope =
     'primary result register defined on every exit path: unknown entry values, unprojected call clobbers and returning-frame addresses disqualify; FP needs typed IEEE writes (literal bits or a typed argument may join); when both qualify: caller demand, then the register written last on every exit path, then a native written-result interface naming exactly one';
+  // The untyped FP carrier holds only a vector copy or fill temporary: the
+  // integer register decides alone (an exact result, or void-like below).
+  const incidentalFloating =
+    primaryResult?.kind === 'integer' || primaryResult?.kind === 'none'
+      ? primaryResult.incidental_floating
+      : undefined;
+  if (incidentalFloating) {
+    if (
+      validation.presentation(
+        'incidental_result',
+        input.function.id,
+        'incidental FP carrier: no caller demands the FP result register and, on every exit, each slice leaf of every FP-root cell is the datum of a >=128-bit store (through lossless transport), a constant defined by an instruction that also defines such a datum, or a call result left in place before later effects; unchanged and undefined cells are neutral, typed FP cells disqualify; the integer result register decides as if the FP register were undefined',
+        exitIds,
+        incidentalFloating,
+      )
+    )
+      validation.requireAbi(
+        'incidental_result',
+        exitIds,
+        'Presenting the integer result register alone assumes callers read no floating-point result register; the FP register holds a vector copy or fill temporary, no caller was scanned and no result-use evidence exists. It keeps its exact exit value in the exit metadata and checked view.',
+      );
+    else primaryResult = { kind: 'explicit', written: true, reason: 'presentation record bound' };
+  }
   if (
     primaryResult?.kind === 'float' ||
     (primaryResult?.kind === 'integer' && primaryResult.reason)
@@ -964,7 +987,7 @@ export function planSource(
       validation.presentation(
         'incidental_result',
         input.function.id,
-        'void-like source interface: the integer result register qualifies on every exit, but no caller demands it, the FP result register is unchanged or undefined on every exit, no tail transfer exists, and no exit path establishes it deliberately (moved back after a call/unknown-effect clobber on some path, another argument copied in, a projected call result that is the final action, or a constant/load/computation consumed by nothing but function exits and stores); call results left in place before later effects, untouched arguments and values that also address memory or feed calls or branches stay in exit metadata',
+        `void-like source interface: the integer result register qualifies on every exit, but no caller demands it, the FP result register is ${incidentalFloating ? 'an incidental vector copy or fill temporary (its own record)' : 'unchanged or undefined on every exit'}, no tail transfer exists, and no exit path establishes it deliberately (moved back after a call/unknown-effect clobber on some path, another argument copied in, a projected call result that is the final action, or a constant/load/computation consumed by nothing but function exits and stores); call results left in place before later effects, untouched arguments and values that also address memory or feed calls or branches stay in exit metadata`,
         exitIds,
         primaryResult.reason,
       )
@@ -974,7 +997,11 @@ export function planSource(
         exitIds,
         'Presenting a void-like interface assumes callers read no result register; no caller was scanned and no result-use evidence exists. The integer result register keeps its exact exit value in the exit metadata and checked view.',
       );
-    else primaryResult = { kind: 'integer' };
+    else
+      primaryResult = {
+        kind: 'integer',
+        ...(incidentalFloating ? { incidental_floating: incidentalFloating } : {}),
+      };
   } else if (
     (primaryResult?.kind === 'explicit' || primaryResult?.kind === 'none') &&
     primaryResult.written &&
@@ -999,7 +1026,7 @@ export function planSource(
       primaryResult?.kind === 'float'
         ? register.root !== floatingRoot
         : primaryResult?.kind === 'integer' &&
-          primaryResult.reason !== undefined &&
+          (primaryResult.reason !== undefined || primaryResult.incidental_floating !== undefined) &&
           register.root === floatingRoot,
     );
   let returnType: DataType | null = null;
