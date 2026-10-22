@@ -9,7 +9,8 @@ import {
 } from '../../ir/index.js';
 import type { CallPreparationIndex } from './result-demands.js';
 
-type CallNode = Extract<Instruction, { kind: 'call' }>;
+/** A call, or an indirect exit seen as a call of its target. */
+type CallNode = Pick<Extract<Instruction, { kind: 'call' }>, 'id' | 'target'>;
 export type PreparedCallArgument = (call: CallNode, binding: RegisterBinding) => boolean;
 
 /** Evidence for an authored physical ABI-slot value, not a recovered prototype.

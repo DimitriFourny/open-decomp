@@ -203,6 +203,13 @@ export function reconstruct(
         sourcePlan.presentation.requirements,
       )
     : null;
+  // Source view: indirect exits proven to be tail calls become target-value tails.
+  if (sourcePlan && sourceStack?.indirectTails.size)
+    for (const block of blocks.values()) {
+      if (!sourceStack.indirectTails.has(block.control.id)) continue;
+      const tail = sourcePlan.indirectTail(block);
+      if (tail) sourcePlan.tails.set(block.control.id, tail);
+    }
   const cellTransfers =
     sourcePlan && view === 'source'
       ? recombineSourceCells(
@@ -668,8 +675,15 @@ export function reconstruct(
     // on no exit path and found the FP carrier unchanged or undefined on every
     // exit; under `indirect_result` the aggregate returns through memory.
     const voidLike = sourcePlan.presentation.void_like_result;
+    // A tail into a known callee may forward its result; the runtime target of
+    // an indirect tail is no result evidence, like the unresolved exit it was.
     const voidPrimary =
-      permitsVoidSourceSignature(input, sourcePlan.presentation, returns, tails.size > 0) &&
+      permitsVoidSourceSignature(
+        input,
+        sourcePlan.presentation,
+        returns,
+        [...tails.values()].some((tail) => tail.target !== null),
+      ) &&
       [...returns.values()].every((projection) =>
         projection.outputs.every(
           (binding) =>
@@ -1206,7 +1220,9 @@ export function reconstruct(
           ? tails.has(block.control.id)
             ? 'The observed native tail-call prefix and result storage are retained; trailing source arity and unknown effects remain explicit.'
             : 'The tail-call target is preserved, but its source arguments, calling convention and result interface are unresolved.'
-          : 'A control boundary remains unresolved; no target or trap is invented.',
+          : tails.get(block.control.id)?.target === null
+            ? 'The indirect branch is a tail call of its runtime target; the observed argument prefix is retained, and the target, its trailing source arity, results and effects remain unresolved.'
+            : 'A control boundary remains unresolved; no target or trap is invented.',
       );
   }
   const source =

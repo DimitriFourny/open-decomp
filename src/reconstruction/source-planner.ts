@@ -1457,6 +1457,31 @@ export function planSource(
       }
       return value;
     },
+    /** Source view: the projection of an indirect exit that `classifyIndirectTails`
+     * accepted. The observed argument-register prefix at the exit, as for an
+     * indirect call, with the list open; no target identity and no result
+     * interface, which stay the runtime target's. */
+    indirectTail(block: BlockRegion): TailProjection | null {
+      const control = block.control;
+      if (control.kind !== 'indirect') return null;
+      const callee = inferred.get(control.id);
+      return {
+        target: null,
+        target_value: control.target,
+        result_types: [],
+        boundary: {
+          kind: 'inferred',
+          signature: null,
+          arguments: callee
+            ? observedArguments(callee, block.register_exit, control.id, block.id).arguments
+            : [],
+          argument_list_complete: false,
+          results: [],
+          inputs: [],
+          outputs: [],
+        },
+      };
+    },
     materialize(live: ReadonlySet<string>, inline: Set<string>): void {
       for (const [id, anchor] of anchors) {
         context.checkpoint(1);
