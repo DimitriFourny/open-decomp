@@ -53,7 +53,7 @@ flowchart TD
    - Edges into small tails go first. A small tail is a chain of at most 4 blocks, with at most 4 stores or calls each, that ends in a return, trap or indirect jump.
    - Any other group is ranked by whether labeling it orphans its target, then by the collapses it enables one step ahead, then by size and RPO.
    - The top 8 groups are simulated on a copy of the graph.
-   - Selection work is capped at 64·(blocks+edges)+20,000. Past the cap, the remaining nodes are placed in dependency order.
+   - Selection work is capped at 64·(blocks+edges)+20,000. Past the cap, the remaining nodes are placed in dependency order; ranking returns before its edge scan (the cap only falls, so the scan could no longer rank anything), and a layout without the search (`search: false`) charges no scan at all.
 5. Each transfer's mode follows from its loop scope chain. An arm that owns its body is `next`.
 
 ### 2. Emission
@@ -107,7 +107,7 @@ Printing:
 | optional searches                        | at most 1/16 of the remaining work each; keep the best found so far                                                |
 | text over `output_bytes`                 | `resource_limit`, never truncated text                                                                             |
 
-Attempts share one reconstruction, validated once; each forks the validation session.
+Attempts share one reconstruction, validated once; each forks the validation session. A retry reuses an earlier attempt's `restructure` when every structuring condition that attempt asked (operand, copies, constant-return edge), asked again in the same order, answers the same: structuring is deterministic in the shared graph and those answers (`AttemptPlans.structures`). At a 40M measurement budget, `sqlite3Select` and `sqlite3Pragma` reuse the first attempt's in attempts 2–4 (0.89M and 7.8M of work each; the fifth attempt prints every call as a statement and structures again), and `sqlite3WhereCodeOneLoopStart` in all four of its attempts (full and metadata-omitted).
 
 ## Design decisions
 
