@@ -30,14 +30,16 @@ for (const fixture of [
       assert.ok('data' in response.result);
       const full = p.payload(response.result).result;
       const emission = full.data.emission;
-      // The open arity is spelled by the function-pointer type; the call prints its one
-      // proven argument only.
+      // The function-pointer type names exactly the one printed argument (a `...` would
+      // declare a variadic prototype); the header states the open arity.
       assert.match(
         emission.text,
         emitter === 'c-like'
-          ? /\(\*\)\([^)]*, \.\.\.\)\)\w+\)\([^.\n]*\)/
-          : /function_pointer\(\w+, "[^"]*\(\*\)\([^"]*, \.\.\.\)"\)\([^.\n]*\)/,
+          ? /\(\*\)\([^).]*\)\)\w+\)\([^.\n]*\)/
+          : /function_pointer\(\w+, "[^".]*\(\*\)\([^".]*\)"\)\([^.\n]*\)/,
       );
+      assert.doesNotMatch(emission.text, /\.\.\./);
+      assert.match(emission.text, /open arity \([^)]*\): indirect call at /);
       const declared = emittedFormals(emission);
       const formals = declared.filter((formal) => formal.name !== 'entry_sp');
       assert.equal(
