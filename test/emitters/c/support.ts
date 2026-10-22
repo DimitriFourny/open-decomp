@@ -285,7 +285,7 @@ function integerFloatBits(value: bigint, width: number): bigint {
  * semantics below are independent arithmetic/byte-array observations, not imports
  * from the production IR interpreter. Separate C and indentation-sensitive Python
  * statement parsers share only this expression grammar and independent oracle. */
-class Parser {
+export class Parser {
   readonly tokens: string[] = [];
   readonly ops: Op[] = [];
   readonly labels = new Map<string, number>();

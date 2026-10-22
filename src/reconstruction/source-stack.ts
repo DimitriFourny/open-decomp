@@ -1871,6 +1871,51 @@ export function planSourceStack(
       forward(access.node.result, read);
     }
   }
+  // Source view: the presentation map, a subset of the analysis map
+  // `addresses` (which keeps every offset for taint, escape, floors and slot
+  // decisions). An address read back from memory by a load that stays in the
+  // program, and every value computed from such a reload, prints through the
+  // load's declared variable: spelling it as an address constant instead
+  // would leave the retained load assigning an undeclared name. Hidden loads
+  // print nowhere, so their results keep the constant spelling. The checked
+  // view presents the analysis map unchanged.
+  let presented: ReadonlyMap<string, bigint> = addresses;
+  if (view === 'source') {
+    const reloaded = new Set<string>();
+    for (const node of memory)
+      if (node.kind === 'load' && !hidden.has(node.id) && addresses.has(node.result.id))
+        reloaded.add(node.result.id);
+    for (let changed = reloaded.size > 0; changed;) {
+      changed = false;
+      for (const [id, expression] of expressions) {
+        context.checkpoint(1);
+        if (
+          !reloaded.has(id) &&
+          addresses.has(id) &&
+          expressionOperands(expression).some((operand) => reloaded.has(operand.id))
+        ) {
+          reloaded.add(id);
+          changed = true;
+        }
+      }
+      for (const [id, sources] of incoming) {
+        context.checkpoint(1);
+        if (
+          !reloaded.has(id) &&
+          addresses.has(id) &&
+          sources.some((value) => reloaded.has(value.id))
+        ) {
+          reloaded.add(id);
+          changed = true;
+        }
+      }
+    }
+    if (reloaded.size) {
+      const map = new Map(addresses);
+      for (const id of reloaded) map.delete(id);
+      presented = map;
+    }
+  }
   const dynamicStorage = memory.some(
     (node) => tainted.has(node.address.id) && !addresses.has(node.address.id),
   );
@@ -1889,14 +1934,18 @@ export function planSourceStack(
   // object ending at the entry SP instead of `entry_sp` arithmetic. Only an
   // address at or above the entry SP (incoming stack arguments, the return
   // address, the caller's frame) still needs the entry SP as an input; such an
-  // address, when live, keeps the whole frame in entry-SP form.
+  // address, when live, keeps the whole frame in entry-SP form. A load through
+  // a reloaded address prints through the reload, so the stored address at or
+  // above the entry SP is what designates those bytes.
   const frameObject =
     view === 'source' &&
     sharedEntry &&
     validation.presentation('frame_object', input.function.id, FRAME_OBJECT_SCOPE);
   const entryStorage = sharedEntry || entryAddresses.size ? entryStack() : null;
   const requiresEntry = (id: string): boolean =>
-    entryAddresses.has(id) || (frameObject ? addresses.get(id)! >= 0n : sharedEntry);
+    entryAddresses.has(id) ||
+    (view === 'source' && presented.get(id)! >= 0n) ||
+    (!frameObject && sharedEntry);
   if (entryStorage)
     for (const binding of entry.register_entry)
       if (
@@ -1932,7 +1981,7 @@ export function planSourceStack(
     }
     // A pointer remains representable even after its private memory traffic dies.
     let addressLive = false;
-    for (const [id, offset] of addresses)
+    for (const [id, offset] of presented)
       if (live.has(id)) {
         addressLive = true;
         if (offset < minimum) minimum = offset;
@@ -1958,7 +2007,7 @@ export function planSourceStack(
     )
       return { kind: 'private', minimum_offset: minimum, size: maximum - minimum, alignment };
     const taken: bigint[] = [];
-    for (const [id, offset] of addresses) if (live.has(id)) taken.push(offset);
+    for (const [id, offset] of presented) if (live.has(id)) taken.push(offset);
     context.checkpoint(remaining.length + taken.length);
     const layout = frameLayout(
       remaining.map((access) => ({ offset: access.offset, end: access.end, id: access.node.id })),
@@ -1984,7 +2033,7 @@ export function planSourceStack(
     hidden,
     privateLoads,
     locals,
-    addresses,
+    addresses: presented,
     returnAddressLoads,
     frame,
     entryStorage,
