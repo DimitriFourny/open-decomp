@@ -35,14 +35,14 @@ export function renderImageTypeDeclarations(
       scalars.set(item.id, type);
   }
   const declared = classes.filter((item) => item.fields.length > 0 && !scalars.has(item.id));
-  const classNames = new Map(classes.map((item) => [item.id, item.name]));
+  const classNames = new Map(classes.map((item) => [item.id, item.label]));
   const names = new Map<string, string>(scalars);
-  for (const item of declared) names.set(item.id, item.name);
+  for (const item of declared) names.set(item.id, item.label);
   const lines = [
     '/* Open Decomp recovered image types: observed members only; sizes and complete layouts are unknown. */',
     '#include <stdint.h>',
   ];
-  for (const item of declared) lines.push(`typedef struct ${item.name} ${item.name};`);
+  for (const item of declared) lines.push(`typedef struct ${item.label} ${item.label};`);
   for (const item of declared) {
     const parts: string[] = [];
     let end = 0n,
@@ -87,6 +87,7 @@ export function renderImageTypeDeclarations(
       end = field.offset + BigInt(field.width_bits / 8);
     }
     const notes = [
+      `first seen: ${item.name}`,
       `${item.functions.length === 1 ? 'seen in' : `merged from ${item.functions.length} functions:`} ${item.functions
         .slice(0, 6)
         .map(functionName)
@@ -107,7 +108,7 @@ export function renderImageTypeDeclarations(
     ];
     lines.push(`/* ${notes.join('; ')} */`);
     lines.push(
-      `struct ${item.name} { ${parts.join(' ')} }${packed ? ' __attribute__((packed))' : ''};`,
+      `struct ${item.label} { ${parts.join(' ')} }${packed ? ' __attribute__((packed))' : ''};`,
     );
   }
   return `${lines.join('\n')}\n`;
