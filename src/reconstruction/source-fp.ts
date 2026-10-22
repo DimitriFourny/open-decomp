@@ -131,7 +131,7 @@ export function sourceFpPresentation(
     for (const [index, node] of block.statements.entries()) {
       if (node.kind === 'write_register' && fpEnvironmentRegister(node.register)) return unchanged;
       // Opaque instructions can write control state. Recognized guard failures
-      if (node.kind === 'call' && writers?.has(node.id)) return unchanged;
+      // are the only opaque effects removed by the conditional presentation.
       if (
         node.kind === 'unknown_effect' &&
         node.register_outputs.some((binding) => fpEnvironmentRegister(binding.register)) &&
@@ -142,7 +142,7 @@ export function sourceFpPresentation(
         terminalEffects.add(node.id);
         terminalBlocks.add(block.id);
       }
-      if (node.kind === 'call' && writers.has(node.id)) return unchanged;
+      if (node.kind === 'call' && writers?.has(node.id)) return unchanged;
     }
     for (const transfer of block.control.kind === 'jump'
       ? [block.control.transfer]
