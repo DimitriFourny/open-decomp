@@ -115,10 +115,11 @@ export const DEFAULT_NATIVE_SUMMARY_BYTES = 64 * 1024 * 1024;
 const MAX_TRANSIENT_ARTIFACT_BYTES = 64 * 1024 * 1024;
 /** Queued summaries are encoded and written later (idle slices, close, or this pressure bound),
  * never inside a request's commit. They keep their value graphs alive until then, so the queue
- * is bounded by the caller-reported retained size (`NativeSummaryRow.weight`), the same bound
- * as the analysis tier that holds the same graphs (`MAX_PREPARED_UNIT_SIZE`). A row without a
- * weight counts as 1. */
-const MAX_PENDING_SUMMARY_WEIGHT = 1 << 18;
+ * is bounded by the caller-reported retained size (`NativeSummaryRow.weight`), a quarter of the
+ * analysis tier that holds the same graphs (`MAX_PREPARED_UNIT_SIZE`): with the full tier bound a
+ * SQLite decompile run kept about 0.5 GB more resident, and back-to-back requests (no idle time)
+ * flush on this bound anyway. A row without a weight counts as 1. */
+const MAX_PENDING_SUMMARY_WEIGHT = 1 << 16;
 /** One persisted summary larger than this is not stored; loading it would cost about what preparing does. */
 const MAX_NATIVE_SUMMARY_ROW_BYTES = 16 * 1024 * 1024;
 const NATIVE_SUMMARIES_TABLE = `CREATE TABLE native_summaries(scope TEXT NOT NULL, function_id TEXT NOT NULL, revision INTEGER NOT NULL, seq INTEGER NOT NULL, allowance INTEGER NOT NULL, work INTEGER NOT NULL, bytes INTEGER NOT NULL, digest TEXT NOT NULL, payload BLOB NOT NULL, PRIMARY KEY(scope,function_id)) STRICT;
