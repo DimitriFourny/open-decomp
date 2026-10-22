@@ -10,7 +10,7 @@ import { darwinArm64Abi } from '../../src/abi/darwin-arm64/index.js';
 import { sysvAMD64Abi } from '../../src/abi/sysv-amd64/index.js';
 import { constructSSA } from '../../src/analysis/ssa/index.js';
 import { recoverTypes } from '../../src/analysis/types/index.js';
-import { integer, type SSAForm, type Value } from '../../src/ir/index.js';
+import { floating, integer, type SSAForm, type Value } from '../../src/ir/index.js';
 import { structureControlFlow } from '../../src/presentation/index.js';
 import { reconstruct } from '../../src/reconstruction/index.js';
 import type { StoredDecompilation } from '../../src/project/cache/index.js';
@@ -301,3 +301,274 @@ for (const [abi, count] of [
     }
   });
 }
+
+// S4: SysV `aggregate f(aggregate input, u64 delta, double scale)` with
+// `struct aggregate { u64 total; u32 count; double weight; }` (24 bytes, MEMORY
+// class: the caller's copy at entry SP + 8..32), sret in rdi, delta in rsi,
+// scale in xmm0. The body updates the copy in place and copies it to [rdi]:
+// `input.total += delta; input.count++; input.weight *= scale; *out = input`.
+const u32 = integer(32),
+  f64 = floating(64),
+  RESULT = 0xa000n,
+  // At entry the SysV SP is 8 modulo 16: the copy (entry SP + 8) is 16-byte aligned.
+  ENTRY = 0x8008n;
+
+/** `o2`: accesses at entry-SP offsets, one 16-byte and one 8-byte copy;
+ * `o0`: through a `lea`-computed base with a delta spill/reload and three
+ * 8-byte copies; `escaped`: as `o2`, but the copy's address is handed to an
+ * open call between the updates and the copy. */
+function aggregateFixture(variant: 'o2' | 'o0' | 'escaped') {
+  const abi = sysvAMD64Abi;
+  const layout = abi.classifyCall({
+    returns: word,
+    parameters: [word, word, { kind: 'float', bits: 64 }],
+    variadic: false,
+    fixed_parameter_count: 3,
+  });
+  const register = (index: number) => {
+    const location = layout.parameters[index]!.locations[0]!;
+    if (location.kind !== 'register') throw new Error('Expected a register parameter');
+    return location.register;
+  };
+  const b = builder(`incoming-object-${variant}`),
+    block = b.block('entry');
+  const result = block.readRegister(register(0)),
+    delta = block.readRegister(register(1)),
+    // The low 64 bits of xmm0.
+    scale = block.readRegister(
+      { ...register(2), id: `${register(2).root}:0:64`, width_bits: 64 },
+      f64,
+    );
+  const entry = block.readRegister(abi.stack_pointer);
+  let at = (offset: bigint) => block.int('add', entry, block.constant(u64, 8n + offset));
+  let addend = delta;
+  if (variant === 'o0') {
+    const frame = block.int('sub', entry, block.constant(u64, 32n));
+    block.writeRegister(abi.stack_pointer, frame);
+    const spill = block.int('add', frame, block.constant(u64, 8n));
+    block.store(spill, delta);
+    // `lea rax, [rbp + 16]`: the copy's base, addressed from the allocated frame.
+    const base = block.int('add', frame, block.constant(u64, 40n));
+    at = (offset: bigint) => (offset ? block.int('add', base, block.constant(u64, offset)) : base);
+    addend = block.load(u64, spill);
+  }
+  block.store(at(0n), block.int('add', block.load(u64, at(0n)), addend));
+  block.store(at(8n), block.int('add', block.load(u32, at(8n)), block.constant(u32, 1n)));
+  block.store(at(16n), block.fp('mul', block.load(f64, at(16n)), scale));
+  if (variant === 'escaped') {
+    block.writeRegister(register(0), at(0n));
+    block.call(
+      { kind: 'direct', address: { image_id: image, space: 'va', value: 0x2000n } },
+      [],
+      [],
+      abi.unknown_call_clobbers,
+      [newIdentity('evidence')],
+    );
+  }
+  if (variant === 'o0')
+    for (const offset of [0n, 8n, 16n])
+      block.store(
+        offset ? block.int('add', result, block.constant(u64, offset)) : result,
+        block.load(u64, at(offset)),
+      );
+  else {
+    block.store(result, block.load(integer(128), at(0n)));
+    block.store(block.int('add', result, block.constant(u64, 16n)), block.load(u64, at(16n)));
+  }
+  block.return([result]);
+  const ir = constructSSA(b.finish(block, [u64])).value as SSAForm;
+  const types = recoverTypes(ir, abi, createOperationContext(), {
+    image_id: image,
+    slice_id: slice,
+    revision: 0,
+  });
+  const callees = ir.blocks.flatMap((node) =>
+    node.instructions.flatMap((instruction) =>
+      instruction.kind === 'call'
+        ? [
+            {
+              call_id: instruction.id,
+              parameters: [register(0)],
+              returns: [],
+              argument_list_complete: false,
+              argument_list_closure: 'callee_reads' as const,
+              evidence_ids: [],
+            },
+          ]
+        : [],
+    ),
+  );
+  return { ir, extra: { types, source: { abi, callees, addresses: [] } } };
+}
+
+const bytesOf = (address: bigint, value: bigint, count: number): [bigint, number][] =>
+  Array.from({ length: count }, (_, index) => [
+    address + BigInt(index),
+    Number((value >> BigInt(8 * index)) & 0xffn),
+  ]);
+const wordAt = (memory: ReadonlyMap<bigint, number>, address: bigint, count: number): bigint =>
+  Array.from({ length: count }, (_, index) => BigInt(memory.get(address + BigInt(index))!)).reduce(
+    (value, byte, index) => value | (byte << BigInt(8 * index)),
+    0n,
+  );
+const doubleBits = (value: number): bigint => {
+  const view = new DataView(new ArrayBuffer(8));
+  view.setFloat64(0, value, true);
+  return view.getBigUint64(0, true);
+};
+const bitsDouble = (bits: bigint): number => {
+  const view = new DataView(new ArrayBuffer(8));
+  view.setBigUint64(0, bits, true);
+  return view.getFloat64(0, true);
+};
+/** Independent oracle: IEEE binary64 product, NaNs canonical (the emitted
+ * arithmetic's documented NaN model). */
+const product = (weight: bigint, scale: bigint): bigint => {
+  const value = bitsDouble(weight) * bitsDouble(scale);
+  return Number.isNaN(value) ? 0x7ff8000000000000n : doubleBits(value);
+};
+
+const PADDING = 0xa5a5a5a5n;
+const aggregateCases = [
+  // Wrapping total, count = 0xffffffff, a plain product.
+  { total: 0xffffffffffffffffn, count: 0xffffffffn, weight: doubleBits(1.5), delta: 2n },
+  { total: 0x8000000000000000n, count: 0n, weight: 0x7ff0123456789abcn, delta: 1n << 63n },
+  { total: 0n, count: 41n, weight: 1n << 63n, delta: 0xffffffffffffffffn },
+];
+
+/** Runs `emission` with the copy at ENTRY + 8 (padding bytes 0xa5) and the
+ * sret buffer at RESULT; the open call, when present, writes `written` through
+ * its first argument. Returns the 24 result bytes as three words. */
+function runAggregate(
+  emission: Parameters<typeof execute>[0],
+  input: (typeof aggregateCases)[number],
+  scale: bigint,
+  written?: bigint,
+) {
+  const memory = new Map<bigint, number>([
+    ...bytesOf(ENTRY - 64n, 0n, 72),
+    ...bytesOf(ENTRY + 8n, input.total, 8),
+    ...bytesOf(ENTRY + 16n, input.count | (PADDING << 32n), 8),
+    ...bytesOf(ENTRY + 24n, input.weight, 8),
+    ...bytesOf(RESULT, 0n, 24),
+  ]);
+  const formals = emittedFormals(emission);
+  const values = [RESULT, input.delta, scale];
+  const received: bigint[][] = [];
+  const observation = execute(
+    emission,
+    new Map(
+      formals.map((formal, index) => [
+        formal.statement_id,
+        formal.name === 'entry_sp'
+          ? ENTRY
+          : formal.name === 'stack_args'
+            ? ENTRY + 8n
+            : values[index]!,
+      ]),
+    ),
+    memory,
+    0n,
+    new Map(),
+    clobbers,
+    new Map([
+      [
+        'sub_2000',
+        (args: readonly bigint[]) => {
+          received.push([...args]);
+          for (const [address, byte] of bytesOf(args[0]!, written!, 8)) memory.set(address, byte);
+          return [];
+        },
+      ],
+    ]),
+  );
+  return {
+    values: observation.values,
+    received,
+    events: observation.events.filter((event) => event === 'load' || event === 'store'),
+    words: [0n, 8n, 16n].map((offset) => wordAt(observation.memory, RESULT + offset, 8)),
+  };
+}
+
+/** The checked view names each register the call clobbers; none reaches the
+ * explicit result, so any value serves. */
+const clobbers = new (class extends Map<string, bigint> {
+  override get(): bigint {
+    return 0n;
+  }
+})();
+
+for (const variant of ['o2', 'o0'] as const)
+  test(`sysv-amd64 ${variant}: a by-value aggregate updated in place prints as one stack_args struct formal`, () => {
+    const fixture = aggregateFixture(variant);
+    const checked = emit(fixture.ir, fixture.extra, 'c-like', 'checked').emission;
+    assert.match(checked.text, /\bentry_sp\b/);
+    assert.doesNotMatch(checked.text, /\bstack_args\b/);
+    for (const language of ['c-like', 'python-like'] as const) {
+      const output = emit(fixture.ir, fixture.extra, language).emission;
+      const text = output.text;
+      assert.doesNotMatch(text, /\bentry_sp\b/, text);
+      assert.match(
+        text,
+        language === 'c-like' ? /, struct (stack_args_\w+) stack_args\)/ : /stack_args: struct\{/,
+        text,
+      );
+      if (language === 'c-like')
+        assert.match(text, /^struct stack_args_\w+ \{ [^}]*arg_8[^}]*arg_18; \};$/m, text);
+      assert.ok(output.local_validation?.some((record) => record.rule === 'incoming_object'));
+      assert.ok(
+        output.requirements?.some((requirement) =>
+          requirement.explanation.includes('incoming stack-argument bytes'),
+        ),
+      );
+      const formals = emittedFormals(output);
+      assert.deepEqual(formals.map((formal) => formal.name).at(-1), 'stack_args', text);
+      for (const input of aggregateCases)
+        for (const scale of [doubleBits(2), doubleBits(-0.5)]) {
+          const source = runAggregate(output, input, scale),
+            machine = runAggregate(checked, input, scale);
+          const expected = [
+            BigInt.asUintN(64, input.total + input.delta),
+            ((input.count + 1n) & 0xffffffffn) | (PADDING << 32n),
+            product(input.weight, scale),
+          ];
+          assert.deepEqual(source.words, expected, `${language} ${variant}\n${text}`);
+          assert.deepEqual(machine.words, expected, checked.text);
+          assert.deepEqual(source.values, [RESULT]);
+          // Every update and copy stays an ordered memory access: nothing is forwarded.
+          assert.deepEqual(
+            source.events,
+            [
+              ...['load', 'store', 'load', 'store', 'load', 'store'],
+              ...(variant === 'o0' ? ['load', 'store'] : []),
+              'load',
+              'store',
+              'load',
+              'store',
+            ],
+            text,
+          );
+        }
+    }
+  });
+
+test('sysv-amd64: an aggregate copy whose address escapes to a call keeps the entry-SP form', () => {
+  const fixture = aggregateFixture('escaped');
+  const written = 0x0123456789abcdefn;
+  for (const language of ['c-like', 'python-like'] as const) {
+    const output = emit(fixture.ir, fixture.extra, language).emission;
+    assert.doesNotMatch(output.text, /\bstack_args\b/, output.text);
+    assert.ok(!output.local_validation?.some((record) => record.rule === 'incoming_object'));
+    assert.equal(emittedFormals(output).at(-1)!.name, 'entry_sp', output.text);
+    for (const input of aggregateCases) {
+      const observed = runAggregate(output, input, doubleBits(2), written);
+      assert.deepEqual(observed.received, [[ENTRY + 8n]], output.text);
+      // The call's write through the escaped address is what the copy reads.
+      assert.deepEqual(observed.words, [
+        written,
+        ((input.count + 1n) & 0xffffffffn) | (PADDING << 32n),
+        product(input.weight, doubleBits(2)),
+      ]);
+    }
+  }
+});

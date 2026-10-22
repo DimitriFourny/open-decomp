@@ -53,7 +53,6 @@ import {
   type SourceAddress,
   type SourceFormalType,
   type SourceLocal,
-  type SourceStackStorage,
 } from '../reconstruction/source-model.js';
 import { selectorArity } from '../metadata/runtime/objc-types.js';
 import { objcMessageText, objcStringLiteral } from './objc.js';
@@ -4111,8 +4110,7 @@ export class Renderer {
             ? `uint8_t ${field}[${member.size}]`
             : declare(field, `array<uint8_t, ${member.size}>`),
       );
-      packed ||=
-        member.scalar && (member.offset - incoming.minimum_offset) % member.size !== 0n;
+      packed ||= member.scalar && (member.offset - incoming.minimum_offset) % member.size !== 0n;
       end = member.offset + member.size;
     }
     return {

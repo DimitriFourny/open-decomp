@@ -376,12 +376,10 @@ export class Parser {
         for (const part of match[2]!.split(/, (?=\w+: )/)) {
           const member = /^(\w+): (?:array<uint8_t, (\d+)>|(\w+))$/.exec(part);
           assert.ok(member, `Unsupported struct formal member ${part}`);
-          const scalar = member[3] ? this.cType({ scalar: member[3], pointers: 0 }) : null;
-          assert.ok(scalar === null || scalar.kind === 'int' || scalar.kind === 'float');
-          this.frameMembers.set(`${name}.${member[1]}`, {
-            offset,
-            type: scalar?.kind === 'int' || scalar?.kind === 'float' ? scalar : null,
-          });
+          const parsed = member[3] ? this.cType({ scalar: member[3], pointers: 0 }) : null;
+          assert.ok(parsed === null || parsed.kind === 'int' || parsed.kind === 'float');
+          const scalar = parsed?.kind === 'int' || parsed?.kind === 'float' ? parsed : null;
+          this.frameMembers.set(`${name}.${member[1]}`, { offset, type: scalar });
           offset += scalar ? BigInt(scalar.bits / 8) : BigInt(member[2]!);
         }
         this.objects.add(name);
@@ -616,7 +614,7 @@ export class Parser {
 
   private cType(type: { readonly scalar: string; readonly pointers: number }): CType {
     const name = type.scalar,
-      integer = /^(u?)int(\d+)_t$/.exec(name),
+      integer = /^(?:__)?(u?)int(\d+)_t$/.exec(name),
       bits = /^bits(\d+)_t$/.exec(name);
     const floating = /^(?:float|double|ieee(?:32|64)_t)$/.test(name)
       ? ({ kind: 'float', bits: name === 'float' || name === 'ieee32_t' ? 32 : 64 } as const)
@@ -699,7 +697,7 @@ export class Parser {
     if (this.peek() === 'const') this.take('const');
     const token = this.take();
     const scalar =
-      /^(?:bits\d+_t|u?int\d+_t|uintptr_t|bool|char|void|float|double|ieee\d+_t|vector_[if]\d+x\d+_t|effect_t|type_\d+)$/;
+      /^(?:bits\d+_t|(?:__)?u?int\d+_t|uintptr_t|bool|char|void|float|double|ieee\d+_t|vector_[if]\d+x\d+_t|effect_t|type_\d+)$/;
     let pointers = 0;
     if (python && token === 'pointer' && this.peek() === '[') {
       this.take('[');
