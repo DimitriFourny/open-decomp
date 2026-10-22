@@ -39,7 +39,7 @@ function fixture(
   abi: AbiProfile,
   bits: 32 | 64,
   operation: 'add' | 'mul' | 'div' | 'convert' | 'integer',
-  payload = false,
+  payload: false | 'store' | 'integer' = false,
   guard: boolean | number = false,
   write = false,
   callBetween = false,
@@ -134,7 +134,14 @@ function fixture(
   if (payload)
     supported.store(
       supported.constant(integer(64), 0x2000n),
-      supported.cast('bitcast', integer(bits), value),
+      payload === 'integer'
+        ? // An integer consumer of the bits observes the NaN payload.
+          supported.int(
+            'add',
+            supported.cast('bitcast', integer(bits), value),
+            supported.constant(integer(bits), 1n),
+          )
+        : supported.cast('bitcast', integer(bits), value),
     );
   supported.return([value]);
   const ir = constructSSA(b.finish(entry, [value.type])).value as SSAForm;
@@ -239,13 +246,15 @@ for (const bits of [32, 64] as const)
   for (const language of ['c-like', 'python-like'] as const)
     test(`${language}: native FP${bits} arithmetic and payload gates`, () => {
       for (const operation of ['add', 'mul', 'div', 'convert', 'integer'] as const) {
-        for (const payload of [false, true]) {
+        for (const payload of [false, 'store', 'integer'] as const) {
           if (payload && operation === 'integer') continue;
           const f = fixture(sysvAMD64Abi, bits, operation, payload);
           const { emission } = emit(f.ir, { source: f.source }, language);
-          // An integer-to-float conversion never produces a NaN: no payload gate.
+          // A stored float is consumed as a value (fp_nan_payload_unobserved); an
+          // integer consumer of the bits is a payload gate, except of an
+          // integer-to-float conversion, which never produces a NaN.
           const native =
-            (!payload || operation === 'convert') &&
+            (payload !== 'integer' || operation === 'convert') &&
             (operation === 'integer'
               ? language === 'c-like'
               : language === 'c-like' || (bits === 64 && operation !== 'div'));
