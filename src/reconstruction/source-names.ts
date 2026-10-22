@@ -955,6 +955,10 @@ export function planSourceNames(
   for (const value of program.values.values()) {
     if (!program.live.has(value.id) && !parameters.has(value.id)) continue;
     context.checkpoint(1);
+    if (program.source.variadic?.area.id === value.id) {
+      preferred.set(value.id, 'va');
+      continue;
+    }
     if (
       stackEntry(program.source.stack)?.id === value.id ||
       program.parameter_registers.get(value.id)?.role === 'stack_pointer'

@@ -731,7 +731,12 @@ export class Renderer {
     const entryStack =
       stackEntry(this.program.source?.stack)?.id === id ||
       this.program.parameter_registers.get(id)?.role === 'stack_pointer';
-    const stem = entryStack ? 'entry_sp' : sourceIdentifierStem(preferred, linkage);
+    const stem =
+      this.program.source?.variadic?.area.id === id
+        ? 'va'
+        : entryStack
+          ? 'entry_sp'
+          : sourceIdentifierStem(preferred, linkage);
     let name = stem,
       suffix = 1;
     while (this.usedSourceNames.has(name)) {
@@ -1654,8 +1659,16 @@ export class Renderer {
     if (replacement) value = replacement;
     const source = this.sourceView,
       python = this.language === 'python-like';
-    const stack = this.program.source?.stack,
-      offset = this.program.source?.stack_addresses.get(value.id);
+    const variadic = this.program.source?.variadic;
+    // `va_list` is `char *` on every supported ABI: its address bits.
+    if (variadic?.area.id === value.id) {
+      const name = this.local(value);
+      return python
+        ? this.printer.primary(name, { bits: 64, signed: false })
+        : { text: `(uintptr_t)${name}`, precedence: UNARY, ctype: { bits: 64, signed: false } };
+    }
+    const stack = this.program.source?.stack;
+    let offset = this.program.source?.stack_addresses.get(value.id);
     if (stack && offset !== undefined) {
       // Beside a frame object only addresses at or above the entry SP keep it.
       if (stack.kind === 'object' && (offset < 0n || !stack.entry))
@@ -1663,6 +1676,8 @@ export class Renderer {
       const entry = stackEntry(stack);
       if (entry) {
         if (source) {
+          // The variadic area is entry-SP offset `variadic.offset`.
+          if (variadic?.area.id === entry.id) offset -= variadic.offset;
           const base = this.printed(entry);
           if (offset === 0n) return base;
           const amount = this.printer.literal(offset < 0n ? -offset : offset, 64);
@@ -8833,6 +8848,8 @@ export class Renderer {
       w.line(0, `${text}${separator}${comment}`);
       noteSpan = { start, end: start + comment.length };
     };
+    // Source view: a callee-side variadic interface ends its formals with `...`.
+    const ellipsis = this.sourceView && this.program.source?.variadic !== undefined;
     if (this.program.source && parameters.length <= 4) {
       const declarations = parameters.map((parameter) =>
         w.declaration(parameter.type, parameter.name),
@@ -8840,7 +8857,7 @@ export class Renderer {
       const prefix =
         this.language === 'c-like' ? `${returnShown} ${headerName}(` : `def ${headerName}(`;
       closing(
-        `${prefix}${this.writer.join(declarations)}${this.language === 'c-like' ? ') {' : `) -> ${returnShown}:`}`,
+        `${prefix}${this.writer.join(ellipsis ? [...declarations, '...'] : declarations)}${this.language === 'c-like' ? ') {' : `) -> ${returnShown}:`}`,
       );
       let offset = this.headerStart + prefix.length;
       for (let index = 0; index < parameters.length; index++) {
@@ -8866,7 +8883,7 @@ export class Renderer {
         const start = w.offset;
         w.line(
           1,
-          `${w.declaration(parameter.type, parameter.name)}${i + 1 < parameters.length ? ',' : ''}`,
+          `${w.declaration(parameter.type, parameter.name)}${i + 1 < parameters.length || ellipsis ? ',' : ''}`,
         );
         const source = signature?.signature.parameters[i];
         this.mapped(
@@ -8877,6 +8894,7 @@ export class Renderer {
         );
         this.inferenceSites.set(parameter.value.id, { start, end: w.offset });
       }
+      if (ellipsis) w.line(1, '...');
       closing(this.language === 'c-like' ? ') {' : `) -> ${returnShown}:`);
     } else
       closing(
@@ -8986,6 +9004,7 @@ export class Renderer {
         this.inlinedCalls.has(value.id) ||
         formals.has(value.id) ||
         this.program.source?.stack_addresses.has(value.id) ||
+        this.program.source?.variadic?.area.id === value.id ||
         this.vanishedVariable(value)
       )
         continue;
@@ -8998,6 +9017,18 @@ export class Renderer {
       w.statement(1, w.declaration(spelling, this.local(value)));
       this.mapped(this.dataOrigin(value.id), start, [value.id]);
       this.emitNotes(value.id, 1);
+    }
+    const variadic = ellipsis ? this.program.source!.variadic!.area : undefined;
+    if (variadic) {
+      // `va_start` names the last named formal; with none (C23) only `va`.
+      const name = this.local(variadic),
+        last = parameters.at(-1)?.name,
+        start = w.offset;
+      if (this.language === 'c-like') {
+        w.statement(1, `va_list ${name}`);
+        w.statement(1, `va_start(${name}${last ? `, ${last}` : ''})`);
+      } else w.statement(1, `${name} = va_start(${last ?? ''})`);
+      this.mapped(this.dataOrigin(variadic.id), start, [variadic.id]);
     }
     this.fallOffBlock = this.sourceView ? this.fallOffReturn(this.body) : null;
     const bodyLines = this.writer.codeLines;
