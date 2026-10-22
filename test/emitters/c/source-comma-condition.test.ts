@@ -226,3 +226,127 @@ for (const language of ['c-like', 'python-like'] as const)
         }
       });
   });
+
+/** `last = 0; for each of COUNTED bytes p[8 + i]: if (p[8 + i] != 0) last = tick(p);`
+ * unrolled, then shape(false)'s `if ((*p & 0xfd) == 0) { rc = save(p); if (rc != 0)
+ * { fail(rc); return rc; } } release(p); return last;`. Every unrolled join receives
+ * `last` by two whole-variable edge copies (cheap to validate), so printing
+ * publishes more phi-copy records than the 256-record bound holds before the
+ * comma operand's call prints. */
+const COUNTED = 140;
+function copiesBeforeComma(): { input: SSAForm; pointer: Value } {
+  const b = new IRBuilder(
+    slice,
+    entityIdentity(slice, 'function', 'copies-before-comma'),
+    provenance,
+    'ssa',
+  );
+  const entry = b.block('entry', [i64]);
+  const tests = Array.from({ length: COUNTED + 1 }, (_, index) => b.block(`test_${index}`, [i32]));
+  const save = b.block('save', [i32]),
+    fail = b.block('fail'),
+    done = b.block('done', [i32]);
+  const [pointer] = entry.parameters as [Value];
+  entry.jump(tests[0]!, [entry.constant(i32, 0n)]);
+  for (let index = 0; index < COUNTED; index++) {
+    const test = tests[index]!,
+      next = tests[index + 1]!,
+      tick = b.block(`tick_${index}`);
+    const [acc] = test.parameters as [Value];
+    test.branch(
+      test.compare(
+        'ne',
+        test.load(i8, test.int('add', pointer, test.constant(i64, BigInt(8 + index)))),
+        test.constant(i8, 0n),
+      ),
+      test.edge(tick),
+      test.edge(next, [acc]),
+    );
+    const [latest] = tick.call(target(0x7000n), [pointer], [i32], writing);
+    tick.jump(next, [latest!]);
+  }
+  const last = tests[COUNTED]!;
+  const [counted] = last.parameters as [Value];
+  last.branch(
+    last.compare(
+      'eq',
+      last.int('and', last.load(i8, pointer), last.constant(i8, 0xfdn)),
+      last.constant(i8, 0n),
+    ),
+    last.edge(save, [counted]),
+    last.edge(done, [counted]),
+  );
+  const [acc] = save.parameters as [Value];
+  const [rc] = save.call(target(0x4000n), [pointer], [i32], writing);
+  save.branch(
+    save.compare('ne', rc!, save.constant(i32, 0n)),
+    save.edge(fail),
+    save.edge(done, [acc]),
+  );
+  fail.call(target(0x5000n), [rc!], [], writing);
+  fail.return([rc!]);
+  const [result] = done.parameters as [Value];
+  done.call(target(0x6000n), [pointer], [], writing);
+  done.return([result]);
+  return { input: b.finish(entry, [i32]), pointer };
+}
+
+for (const language of ['c-like', 'python-like'] as const)
+  test(`${language}: a comma operand call's call_effects is admitted when planned, so records filled while printing never print its boundary in the test`, () => {
+    const { input, pointer } = copiesBeforeComma();
+    const output = emit(input, { source }, language).emission;
+    const text = output.text;
+    const records = output.local_validation ?? [];
+    // The record bound is reached while the copies print, after planning: later
+    // calls print their clobber contract as a boundary statement before them.
+    assert.ok(records.length >= 256, `${records.length} records`);
+    assert.ok(rules(records).includes('comma_condition'), text);
+    assert.match(text, /\(\w+ :?= sub_4000\(\w+\)\) != 0/, text);
+    const lines = text.split('\n');
+    assert.ok(
+      lines.some((line) => line.includes('boundary(')),
+      text,
+    );
+    lines.forEach((line, index) => {
+      if (line.includes('boundary('))
+        assert.match(lines[index + 1]!, /^\s+(\w+ = )?sub_[567]000\(\w+\);?$/, text);
+    });
+    for (const [flags, result] of [
+      [0, 0n],
+      [0, 7n],
+      [2, 9n],
+      [1, 7n],
+    ] as const)
+      for (const ticks of [0, 3, COUNTED]) {
+        const memory = new Map<bigint, number>([[0x1000n, flags]]);
+        for (let index = 0; index < COUNTED; index++)
+          memory.set(0x1008n + BigInt(index), index < ticks ? (index % 2) + 1 : 0);
+        let tick = 0;
+        const observed = execute(
+          output,
+          new Map([[pointer.id, 0x1000n]]),
+          memory,
+          0n,
+          new Map(),
+          new Map(),
+          new Map<string, SourceCallOracle>([
+            ['sub_4000', () => result],
+            ['sub_5000', () => []],
+            ['sub_6000', () => []],
+            ['sub_7000', () => BigInt(++tick * 3)],
+          ]),
+        );
+        const saved = (flags & 0xfd) === 0,
+          failed = saved && result !== 0n;
+        assert.deepEqual(
+          observed.source_calls?.map((call) => call.name),
+          [
+            ...Array<string>(ticks).fill('sub_7000'),
+            ...(saved ? ['sub_4000'] : []),
+            failed ? 'sub_5000' : 'sub_6000',
+          ],
+          text,
+        );
+        assert.deepEqual(observed.values, [failed ? result : BigInt(ticks * 3)], text);
+      }
+  });

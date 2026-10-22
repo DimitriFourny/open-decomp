@@ -185,7 +185,7 @@ Files that several items touch:
 
 ### C2: Exhausted validation never degrades the text
 
-- [ ] **Problem:**
+- [x] **Problem:** _(Done: lane `od-rm4-c2` at 10M: brotli `main` 55,953 → 46,419 B, `isDate` 112,543 → 81,332 B, `Incrmerge` 80,331 → 56,081 B, `boundary(` 9/27/23 → 0; every other text byte-identical to `od-rm3-final`; checked view identical; `sqlite3Select` at 40M renders in one attempt per metadata mode, then stops at the evidence catalog bound (C3).)_
   - 59 `boundary("unknown_read_write", {"arm64:x0:0:64", … 60 registers})` statements (67.7 KB) in brotli `main` (9), `isDate` (27) and `sqlite3Fts3Incrmerge` (23);
   - up to 5 full render attempts (5.3M work on `sqlite3Select` at 40M);
   - a latent "A comma statement printed a line" failure behind `sqlite3Select`/`sqlite3Pragma`.

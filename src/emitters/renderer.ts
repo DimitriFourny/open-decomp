@@ -211,6 +211,8 @@ const TABLE_PREFIX_BYTES = 256;
 const TABLE_UNKNOWN_ELEMENTS = 16;
 const STRING_LITERAL_SCOPE =
   'pointer-width constants addressing an immutable NUL-terminated string with established encoding (an interior address denotes its suffix bytes), printed as that string literal where the constant is a value: argument, store, return, copy, select arm or identity comparison';
+const CALL_EFFECTS_SCOPE =
+  'the visible call carries its own ordered memory/fault effects; its unchanged physical clobber contract is retained in this record, not a second effect statement';
 
 /** Exact complement of each integer predicate (no NaN case for integers). */
 const NEGATED_PREDICATE: Readonly<Record<IntegerPredicate, IntegerPredicate>> = {
@@ -2746,6 +2748,24 @@ export class Renderer {
     return contract.length <= 8192 ? contract : null;
   }
 
+  /** Source view: whether the call's clobber contract is retained in its
+   * `call_effects` record instead of printing as a boundary statement before
+   * the call. Planning (commaValue) and printing ask with the same scope and
+   * contract, so an answer given at planning time holds when the call prints. */
+  private callEffectsAdmitted(node: Extract<Instruction, { kind: 'call' }>): boolean {
+    const contract = this.effectContract(node.clobbers);
+    return (
+      contract !== null &&
+      this.localValidation.presentation(
+        'call_effects',
+        node.id,
+        CALL_EFFECTS_SCOPE,
+        [node.effect_in.id, node.effect_out.id],
+        contract,
+      )
+    );
+  }
+
   private values(values: readonly Value[]): string {
     return this.call(
       'explicit_values',
@@ -4517,20 +4537,8 @@ export class Renderer {
         ))
     )
       return this.sourceCall(node, depth, false, operand);
-    if (this.sourceView) {
-      const contract = this.effectContract(node.clobbers);
-      if (
-        contract === null ||
-        !this.localValidation.presentation(
-          'call_effects',
-          node.id,
-          'the visible call carries its own ordered memory/fault effects; its unchanged physical clobber contract is retained in this record, not a second effect statement',
-          [node.effect_in.id, node.effect_out.id],
-          contract,
-        )
-      )
-        this.writer.statement(depth, this.clobbers(node.clobbers));
-    }
+    if (this.sourceView && !this.callEffectsAdmitted(node))
+      this.writer.statement(depth, this.clobbers(node.clobbers));
     const guessed = this.likelyArgumentList(projection);
     const open = this.openList(projection);
     // Source view: the marker is printed after the callee's declaration is known.
@@ -6620,21 +6628,25 @@ export class Renderer {
         !(node.kind === 'load' && this.globals.import_loads.has(node.id))
         ? node.result
         : undefined;
-    if (node.kind !== 'call' || this.effectContract(node.clobbers) === null) return undefined;
+    if (node.kind !== 'call') return undefined;
     const projection = this.program.calls.get(node.id);
     const results = projection?.results.filter((value) => this.program.live.has(value.id)) ?? [];
     if (results.length !== 1 || this.inlinedCalls.has(results[0]!.id)) return undefined;
     const returned = new Set(projection!.results.map((value) => value.id));
     // Live non-result clobbers print their own statements after the call.
-    return projection!.outputs.some(
-      (binding) =>
-        this.program.live.has(binding.value.id) &&
-        !this.fpPresentation.unobserved.has(binding.value.id) &&
-        !returned.has(binding.value.id) &&
-        !this.program.expressions.has(binding.value.id),
+    if (
+      projection!.outputs.some(
+        (binding) =>
+          this.program.live.has(binding.value.id) &&
+          !this.fpPresentation.unobserved.has(binding.value.id) &&
+          !returned.has(binding.value.id) &&
+          !this.program.expressions.has(binding.value.id),
+      )
     )
-      ? undefined
-      : results[0];
+      return undefined;
+    // A refused call_effects prints a boundary statement before the call: it is
+    // admitted here, at planning time, exactly as sourceCall asks for it later.
+    return this.callEffectsAdmitted(node) ? results[0] : undefined;
   }
 
   /** How often the printed test reads `value`, and whether it reads it exactly
