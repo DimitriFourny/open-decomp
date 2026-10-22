@@ -344,24 +344,31 @@ export function classifyVariadicArea(
     floats = registers('float');
   if (integers.length !== 4 || floats.length !== 4) return null;
   const named = Number((area - 8n) / 8n);
-  // The whole 64-bit entry value of `root`: its one full cell, or its cells
-  // concatenated low to high.
-  const entryValue = (value: Value, root: string): boolean => {
-    const parts = facts.expressions.get(value.id);
-    const pieces = parts?.kind === 'concat' ? parts.values : [value];
-    let low = 0;
-    for (const piece of pieces) {
-      const binding = entry.register_entry.find(
-        (candidate) => candidate.value.id === piece.id && candidate.register.root === root,
-      );
-      if (
-        binding?.register.offset_bits !== low ||
-        bitWidth(piece.type) !== binding.register.width_bits
-      )
-        return false;
-      low += binding.register.width_bits;
+  // The whole 64-bit entry value of `root`: its one full cell or its cells
+  // concatenated low to high, possibly through same-width bitcasts.
+  const entryValue = (start: Value, root: string): boolean => {
+    let value = start;
+    for (let depth = 0; depth < 8 && bitWidth(value.type) === 64; depth++) {
+      const expression = facts.expressions.get(value.id);
+      let low = 0;
+      for (const piece of expression?.kind === 'concat' ? expression.values : [value]) {
+        const binding = entry.register_entry.find(
+          (candidate) => candidate.value.id === piece.id && candidate.register.root === root,
+        );
+        if (
+          binding?.register.offset_bits !== low ||
+          bitWidth(piece.type) !== binding.register.width_bits
+        ) {
+          low = -1;
+          break;
+        }
+        low += binding.register.width_bits;
+      }
+      if (low === 64) return true;
+      if (expression?.kind !== 'cast' || expression.op !== 'bitcast') return false;
+      value = expression.value;
     }
-    return low === 64 && bitWidth(value.type) === 64;
+    return false;
   };
   const stores: string[] = [];
   for (let index = named; index < 4; index++) {

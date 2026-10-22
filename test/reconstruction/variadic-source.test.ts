@@ -14,12 +14,7 @@ import { reconstruct } from '../../src/reconstruction/index.js';
 import type { StoredDecompilation } from '../../src/project/cache/index.js';
 import { builder, image, slice } from '../ir/support.js';
 import { project } from '../service/analysis/support.js';
-import {
-  acknowledgeRequirements,
-  emit,
-  emittedFormals,
-  execute,
-} from '../emitters/c/support.js';
+import { acknowledgeRequirements, emit, emittedFormals, execute } from '../emitters/c/support.js';
 
 const storage = new DataView(new ArrayBuffer(8));
 const doubleBits = (value: number): bigint => {
@@ -69,7 +64,9 @@ for (const [fixture, entry] of [
         for (let byte = -64n; byte < 0n; byte++) memory.set(area + byte, 0xa5);
         doubles
           .slice(0, count)
-          .forEach((value, index) => writeWord(memory, area + 8n * BigInt(index), doubleBits(value)));
+          .forEach((value, index) =>
+            writeWord(memory, area + 8n * BigInt(index), doubleBits(value)),
+          );
         const observation = execute(
           emission,
           new Map([
@@ -146,10 +143,7 @@ function win64Fixture(variant: 'complete' | 'missing_store' | 'direct_use') {
       entry.store(entry.int('add', sp, entry.constant(u64, 16n + 8n * BigInt(index))), value);
   });
   entry.writeRegister(cursor, entry.int('add', sp, entry.constant(u64, 16n)));
-  entry.writeRegister(
-    rax.register,
-    variant === 'direct_use' ? homes[0]! : entry.constant(u64, 0n),
-  );
+  entry.writeRegister(rax.register, variant === 'direct_use' ? homes[0]! : entry.constant(u64, 0n));
   entry.branch(
     entry.compare('eq', count, entry.constant(u64, 0n)),
     entry.edge(done),
@@ -206,7 +200,9 @@ test('windows-x64: the home stores of a va_start area are hidden and va walks re
       (site) => site.rule === 'variadic_convention',
     ),
   );
-  assert.ok(!fixture.view('checked').local_validation?.some((record) => record.rule === 'va_start'));
+  assert.ok(
+    !fixture.view('checked').local_validation?.some((record) => record.rule === 'va_start'),
+  );
   for (const language of ['c-like', 'python-like'] as const) {
     const output = emit(fixture.ir, fixture.extra, language).emission;
     assert.doesNotMatch(output.text, /\bentry_sp\b/, output.text);

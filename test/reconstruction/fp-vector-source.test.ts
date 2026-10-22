@@ -126,7 +126,9 @@ test(
       const variadic = await session.decompile({ name: '_fixture_variadic' }, { emitter });
       assert.ok('data' in variadic && variadic.data.delivery === 'inline');
       const variadicEmission = variadic.data.emission;
-      assert.match(variadicEmission.text, /entry_sp/);
+      // The va_start area prints as `va` after `...`, not as an entry-SP formal.
+      assert.doesNotMatch(variadicEmission.text, /entry_sp/);
+      assert.match(variadicEmission.text, /, \.\.\.\)/);
       assert.match(variadicEmission.text, /nearest-even/);
       for (const [index, args] of variadicCases.entries())
         for (const poison of [0xa5, 0x5a]) {
@@ -139,7 +141,10 @@ test(
           );
           const observed = execute(
             variadicEmission,
-            formals(variadicEmission, [BigInt(args.length)], entrySp),
+            new Map([
+              ...formals(variadicEmission, [BigInt(args.length)], entrySp),
+              ['...', entrySp],
+            ]),
             memory,
             0n,
             new Map(),
