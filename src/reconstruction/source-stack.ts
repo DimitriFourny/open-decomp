@@ -2253,26 +2253,42 @@ export function planSourceStack(
     )
       returnAddressLoads.set(access.node.result.id, { node: access.node, block: access.block });
   // Source view: whether an access only moves bytes. A store is transport when
-  // its datum is a constant or a load result; a load, when every use of its
-  // result is the datum of a store. Uses are counted on the plan's own facts:
-  // expression operands, statement operands (the store datum aside), call
-  // arguments, control operands, return results and transfer copies.
-  let flow: { loads: Set<string>; used: Set<string> } | undefined;
+  // its datum is a constant or a load result, possibly rewrapped by bitcasts,
+  // extracts and concatenations; a load, when every use of its result is the
+  // datum of a store, directly or through such rewrapping. Uses are counted on
+  // the plan's own facts: expression operands, statement operands (the store
+  // datum and the register bindings of loads and stores aside), call arguments, control operands, return results and
+  // transfer copies.
+  let flow: { loads: Set<string>; other: Set<string>; wrapped: Map<string, string[]> } | undefined;
+  const rewrap = (expression: Expression): boolean =>
+    expression.kind === 'extract' ||
+    expression.kind === 'concat' ||
+    (expression.kind === 'cast' && expression.op === 'bitcast');
   const transport = (node: MemoryNode): boolean => {
     if (!flow) {
       const loads = new Set<string>(),
-        used = new Set<string>();
+        other = new Set<string>(),
+        wrapped = new Map<string, string[]>();
       const use = (values: readonly Value[]) => {
-        for (const value of values) used.add(value.id);
+        for (const value of values) other.add(value.id);
       };
-      for (const expression of expressions.values()) use(expressionOperands(expression));
+      const flowing = (id: string, expression: Expression) => {
+        if (rewrap(expression))
+          for (const operand of expressionOperands(expression))
+            wrapped.set(operand.id, [...(wrapped.get(operand.id) ?? []), id]);
+        else use(expressionOperands(expression));
+      };
+      for (const [id, expression] of expressions) flowing(id, expression);
       for (const { transfer } of transfers) use(transfer.copies.map((copy) => copy.source));
       for (const block of blocks.values()) {
         context.checkpoint(block.statements.length + 1);
         for (const statement of block.statements) {
           if (statement.kind === 'load') loads.add(statement.result.id);
-          if (statement.kind === 'store')
-            use([statement.address, ...statement.register_inputs.map((binding) => binding.value)]);
+          // The register bindings of a load or store only record the register
+          // cells its operands came from; their values are the address and datum.
+          if (statement.kind === 'store') use([statement.address]);
+          else if (statement.kind === 'load') use([statement.address]);
+          else if (statement.kind === 'assign') flowing(statement.result.id, statement.expression);
           else use(instructionOperands(statement));
           if (statement.kind === 'call') use(calls.get(statement.id)?.arguments ?? []);
         }
@@ -2283,10 +2299,31 @@ export function planSourceStack(
           use(terminatorOperands(control));
         if (control.kind === 'return') use(returns.get(control.id)?.results ?? []);
       }
-      flow = { loads, used };
+      flow = { loads, other, wrapped };
     }
-    if (node.kind === 'load') return !flow.used.has(node.result.id);
-    return expressions.get(node.value.id)?.kind === 'constant' || flow.loads.has(node.value.id);
+    const { loads, other, wrapped } = flow;
+    // Every use of `id` is a store datum or a rewrapping whose result is.
+    const moved = (id: string, depth = 0): boolean => {
+      context.checkpoint(1);
+      return (
+        !other.has(id) &&
+        (wrapped.get(id) ?? []).every((result) => depth < 16 && moved(result, depth + 1))
+      );
+    };
+    // `id` is a constant or a load result, possibly rewrapped.
+    const source = (id: string, depth = 0): boolean => {
+      context.checkpoint(1);
+      if (loads.has(id)) return true;
+      const expression = expressions.get(id);
+      return (
+        expression !== undefined &&
+        (expression.kind === 'constant' ||
+          (rewrap(expression) &&
+            depth < 16 &&
+            expressionOperands(expression).every((operand) => source(operand.id, depth + 1))))
+      );
+    };
+    return node.kind === 'load' ? moved(node.result.id) : source(node.value.id);
   };
   const frame = (
     retained: ReadonlySet<string>,

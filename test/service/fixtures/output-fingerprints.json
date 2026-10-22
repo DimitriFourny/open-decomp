@@ -6,8 +6,8 @@
       "functions": {
         "fixture_arithmetic": "complete:d9bf396db3e433f66a089adbfaba02ca4100056a6013c9695495992ef5998f4d",
         "fixture_loop": "complete:d63a341c1ca6d20a06e5427e25b37356e65faa94c44bd9105b51f9800a48f534",
-        "fixture_direct": "partial:02b0aa4cb7d6e24ac936a32385706f0cccddb32f2356ea389c5186de72ec76ef",
-        "fixture_float": "partial:7d30310979222063d24313848438ae2bb7d295fe624ceb30c5fedfd60e433bab"
+        "fixture_direct": "partial:9b8c5bee9872f2adc176cbfd224e513a7c27ea564be38e414b924a8579d36362",
+        "fixture_float": "partial:1eb6f1f6ef64f8dfee9046b391047b2feb03fa267ecd0808b1bd8ae7ea0cdfb3"
       }
     },
     "macho-arm64-symbols|python-like": {
@@ -15,8 +15,8 @@
       "functions": {
         "fixture_arithmetic": "complete:6e4976cafab0ca430a3d07203e7f5efe298a4cc2697f901f5dc17b490c688acc",
         "fixture_loop": "complete:5213029548466f303965bc460f6e7f5e3e78ed546d54235f8f8ad9e57522586d",
-        "fixture_direct": "partial:77f9fc9c617695624aba1f2b3aa1d036e73f22884246fdaf09c715cd34ec0788",
-        "fixture_float": "partial:8946f30cd7af052b4fd943e19df11c9d1be1158dbddf1878963976ff759df4ac"
+        "fixture_direct": "partial:39b96dea867df150d0e1c440e13a794debd242b02a845a555953b8721be1ac9f",
+        "fixture_float": "partial:2e47027ce2ee4b4fe2bba33fb764a1ab0b292deddfbe84a5d8bfe9d45aa0cbd2"
       }
     },
     "corpus-symbols.dll|c-like": {
@@ -24,7 +24,7 @@
       "functions": {
         "fixture_arithmetic": "complete:be37c6862e1e6bafa266728a7be29b53c59e467c4dde3f023857acc5c466923f",
         "fixture_loop": "complete:0ef0f8c379a1595e954311de90b7c4142896ae278cf29c211d69df534899f555",
-        "fixture_direct": "partial:9d9ae782e580aa9df31efa137d01b97de44685f44f386dc39c9bf3d5c426d44d",
+        "fixture_direct": "partial:5982450142ededc1fa6e8daf40cc70a28aaceb80f5f25ee5afb217c6bf888b3a",
         "fixture_float": "partial:d0a883be92575d2a6e0a81797cebad22f3371d80876d88e738eb67a30a0d0585"
       }
     },
@@ -33,7 +33,7 @@
       "functions": {
         "fixture_arithmetic": "complete:4a815bc740202127f7d1c7292f9b1d05b487efa14d2dee22134ddc72f0141d58",
         "fixture_loop": "complete:6f48932d6c950750b0302b5eb1da0fd2baa08229dedf720cb5016d719704442c",
-        "fixture_direct": "partial:16bb578f91cf5b7565baeafbc55b7a4901ce0aca346d8b432d441e112ef7f8a8",
+        "fixture_direct": "partial:5fb5aa6c803c3359f95d7f7ee30a356db89839a6210d0e7470ed7d07641d9bed",
         "fixture_float": "partial:158154b7f7288c1fc5daacbf843b1e24802993359f4677a7b7e9aee39624adb9"
       }
     },
@@ -42,7 +42,7 @@
       "functions": {
         "fixture_arithmetic": "partial:bf61ce329f8b02552dd24a28fbd4081f6e1ad1cac71ab256ab4bd616e7c80a4f",
         "fixture_loop": "partial:52b6f21fee618c5b7cc57106379e66182313a3bd42bfad775c345fdaecad21d5",
-        "fixture_direct": "partial:ee2b79f69c5e134943c7c91c3ebf4aef21f6694f16d99dc46b81f3d7d044b3bf",
+        "fixture_direct": "partial:31ea19ea87c130227677e17fe7c0a1315762032b12a86c1809e613782cbdbff2",
         "fixture_float": "partial:4d74f9f040fa6de150a5f7b9d890ff2cf7492277b0405d4cffd2a3d4da1d55ce"
       }
     },
@@ -51,7 +51,7 @@
       "functions": {
         "fixture_arithmetic": "partial:41f50ce030d120a5c315a3b3afc2edab3627206fe6bf21a3ad989ca2d1d78399",
         "fixture_loop": "partial:5b1a5cf4b7c65bee5a4dcb07063ceabdc25c7cefc5b1c3ec3d5cc67fc7253d4f",
-        "fixture_direct": "partial:79c2be331e4d86c005afea956265125b21dde401aced5f6f797688191bf504c9",
+        "fixture_direct": "partial:f559de826bb4ece79c67d3a50c83dea8142816fcd9e11aa73dbcc7ff89f31b4b",
         "fixture_float": "partial:5b5235bad01a0bd205831951aaea2c0986467d539824f2d51e4df8c52201c228"
       }
     }
