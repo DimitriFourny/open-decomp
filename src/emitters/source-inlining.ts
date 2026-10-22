@@ -702,7 +702,7 @@ export function planSourceInlining(
         (use.address || (use.offset === true && displaced.has(use.anchor))),
     );
   };
-  for (const pending = [...displaced.keys()]; pending.length; ) {
+  for (const pending = [...displaced.keys()]; pending.length;) {
     context.checkpoint(1);
     const id = pending.pop()!;
     if (!displaced.has(id) || addressOnly(id)) continue;
