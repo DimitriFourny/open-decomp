@@ -283,7 +283,13 @@ export interface AbiProfile extends ComponentIdentity {
   readonly stack_return_address_bytes: bigint;
   /** ABI capability only: not evidence that any local occupies the red zone. */
   readonly red_zone_bytes: bigint;
+  /** Clobbers of a call to any target. FP control state (FPCR, MXCSR[6:16], the
+   * x87 control word) is not among them: ordinary calls preserve it. */
   readonly unknown_call_clobbers: CallClobbers;
+  /** FP control state that a call to a known environment writer also clobbers:
+   * applied before SSA construction to calls of a writer import (`fesetround`,
+   * `_controlfp`, `fpsetmask`, ...). */
+  readonly environment_writer_clobbers: readonly RegisterDescriptor[];
   classifyCall(signature: AbiSignature): AbiCallLayout;
 }
 export interface Emitter<Presentation> extends ComponentIdentity {

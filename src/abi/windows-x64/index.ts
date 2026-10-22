@@ -61,9 +61,9 @@ const rax = gpr('rax');
 const xmm0 = floatingArguments[0]!;
 const rsp = gpr('rsp');
 const mxcsr = stateRegister('mxcsr', 'control', 32);
-const preserved: readonly RegisterDescriptor[] = Object.freeze([
-  ...['rbx', 'rbp', 'rdi', 'rsi', 'rsp', 'r12', 'r13', 'r14', 'r15'].map(gpr),
-  ...Array.from({ length: 10 }, (_, index) => simd(index + 6, 0, 128)),
+/** FP control state: the x87 control word and MXCSR[6:16] are nonvolatile
+ * (Microsoft x64 floating-point state). */
+const fpControl: readonly RegisterDescriptor[] = Object.freeze([
   stateRegister('fpcsr', 'control', 16),
   Object.freeze({
     ...mxcsr,
@@ -72,6 +72,11 @@ const preserved: readonly RegisterDescriptor[] = Object.freeze([
     width_bits: 10,
     write_rule: 'preserve_other_bits' as const,
   }),
+]);
+const preserved: readonly RegisterDescriptor[] = Object.freeze([
+  ...['rbx', 'rbp', 'rdi', 'rsi', 'rsp', 'r12', 'r13', 'r14', 'r15'].map(gpr),
+  ...Array.from({ length: 10 }, (_, index) => simd(index + 6, 0, 128)),
+  ...fpControl,
 ]);
 const clobbers: CallClobbers = Object.freeze({
   registers: Object.freeze([
@@ -212,6 +217,8 @@ export class WindowsX64Abi implements AbiProfile {
   readonly red_zone_bytes = 0n;
   readonly preserved = preserved;
   readonly unknown_call_clobbers = clobbers;
+  /** `_controlfp`/fenv writers change the nonvolatile control state. */
+  readonly environment_writer_clobbers = fpControl;
 
   classifyCall(signature: Parameters<AbiProfile['classifyCall']>[0]): AbiCallLayout {
     const diagnostics: Diagnostic[] = [];

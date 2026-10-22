@@ -56,6 +56,18 @@ const al: RegisterDescriptor = Object.freeze({
   write_rule: 'preserve_other_bits',
 });
 const mxcsr = state('mxcsr', 'control', 32);
+/** FP control state: the x87 control word and MXCSR[6:16] (DAZ, exception
+ * masks, rounding control, FTZ) are callee-saved (SysV psABI 3.2.1). */
+const fpControl: readonly RegisterDescriptor[] = Object.freeze([
+  state('fpcsr', 'control', 16),
+  Object.freeze({
+    ...mxcsr,
+    id: 'x86_64:mxcsr[6:16]',
+    offset_bits: 6,
+    width_bits: 10,
+    write_rule: 'preserve_other_bits' as const,
+  }),
+]);
 const clobbers: CallClobbers = Object.freeze({
   registers: Object.freeze([
     ...['rax', 'rdi', 'rsi', 'rdx', 'rcx', 'r8', 'r9', 'r10', 'r11'].map(gpr),
@@ -292,16 +304,11 @@ export class SysVAMD64Abi implements AbiProfile {
   readonly red_zone_bytes = 128n;
   readonly preserved = Object.freeze([
     ...['rbx', 'rbp', 'rsp', 'r12', 'r13', 'r14', 'r15'].map(gpr),
-    state('fpcsr', 'control', 16),
-    Object.freeze({
-      ...mxcsr,
-      id: 'x86_64:mxcsr[6:16]',
-      offset_bits: 6,
-      width_bits: 10,
-      write_rule: 'preserve_other_bits' as const,
-    }),
+    ...fpControl,
   ]);
   readonly unknown_call_clobbers = clobbers;
+  /** fenv/`fpset*` writers change the callee-saved control state. */
+  readonly environment_writer_clobbers = fpControl;
 
   classifyCall(signature: Parameters<AbiProfile['classifyCall']>[0]): AbiCallLayout {
     const parameters: { index: number; locations: AbiLocation[] }[] = [],

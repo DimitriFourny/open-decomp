@@ -66,6 +66,8 @@ export class DarwinArm64Abi implements AbiProfile {
   readonly link_register: RegisterDescriptor = X[30]!;
   /** Includes upper halves of v8-v15, never their preserved low 64 bits. */
   readonly unknown_call_clobbers = CLOBBERS;
+  /** FPCR: only support functions change its control fields (AAPCS64 6.1.2). */
+  readonly environment_writer_clobbers: readonly RegisterDescriptor[] = ENVIRONMENT_WRITER;
 
   classifyCall(signature: Parameters<AbiProfile['classifyCall']>[0]): AbiCallLayout {
     const diagnostics: Diagnostic[] = [];
@@ -309,8 +311,8 @@ const SP: RegisterDescriptor = Object.freeze({
 const PRESERVED = Object.freeze([...X.slice(19, 30), SP, ...D.slice(8, 16)]);
 const CLOBBERS: CallClobbers = Object.freeze({
   // x18 is reserved by Apple; no application value is assumed preserved in it.
-  // FPCR may change through support functions (AAPCS64 6.1.2): unknown targets
-  // get conservative control-state effects as well as FPSR/NZCV and memory.
+  // FPCR is absent: its control fields change only through specific support
+  // functions (AAPCS64 6.1.2), whose calls get `environment_writer_clobbers`.
   registers: Object.freeze([
     ...X.slice(0, 19),
     X[30]!,
@@ -325,16 +327,6 @@ const CLOBBERS: CallClobbers = Object.freeze({
         write_rule: 'preserve_other_bits',
       }),
     ),
-    Object.freeze({
-      id: 'arm64:fpcr',
-      bank: 'control' as const,
-      root: 'arm64:fpcr',
-      offset_bits: 0,
-      width_bits: 32,
-      root_width_bits: 32,
-      role: 'general' as const,
-      write_rule: 'replace_root' as const,
-    }),
   ]),
   flags: Object.freeze(
     ['nzcv', 'fpsr'].map((name): RegisterDescriptor =>
@@ -352,6 +344,18 @@ const CLOBBERS: CallClobbers = Object.freeze({
   ),
   memory: 'unknown_read_write',
 });
+const ENVIRONMENT_WRITER: readonly RegisterDescriptor[] = Object.freeze([
+  Object.freeze({
+    id: 'arm64:fpcr',
+    bank: 'control' as const,
+    root: 'arm64:fpcr',
+    offset_bits: 0,
+    width_bits: 32,
+    root_width_bits: 32,
+    role: 'general' as const,
+    write_rule: 'replace_root' as const,
+  }),
+]);
 
 interface SimdMember {
   readonly bits: number;

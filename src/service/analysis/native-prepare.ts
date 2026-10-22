@@ -32,7 +32,12 @@ import type { InferredCallee } from '../../reconstruction/source-model.js';
 import { sourceConstantValues } from '../../reconstruction/source-data.js';
 import { loadFunctionGraph } from '../queries/scope.js';
 import type { AnalysisScope } from './index.js';
-import { callDeclarations, nativeCallIndex, resolveCalls } from './calls.js';
+import {
+  applyEnvironmentWriters,
+  callDeclarations,
+  nativeCallIndex,
+  resolveCalls,
+} from './calls.js';
 import { boundIR, requirePass } from './passes.js';
 import type { NativeDependency, NativeInterface, NativeSummaryUnit } from './native-worklist.js';
 import { nativeRegisterPrefix } from './native-register-prefix.js';
@@ -227,8 +232,16 @@ export function prepareNativeUnit(
       reasons: graph.coverage.reasons,
     };
   const lifted = components.lifter.lift(graph, abi, context);
-  const liftedNodes = boundIR(lifted.ir, context);
-  const entry_prefix = nativeRegisterPrefix(lifted.ir, parameterRegisters(abi), context);
+  const liftedIR = applyEnvironmentWriters(
+    lifted.ir,
+    image,
+    input.functions,
+    input.references,
+    abi,
+    context,
+  );
+  const liftedNodes = boundIR(liftedIR, context);
+  const entry_prefix = nativeRegisterPrefix(liftedIR, parameterRegisters(abi), context);
   let requiredNodes = liftedNodes,
     ir: SSAForm,
     nodes: number;
@@ -262,7 +275,7 @@ export function prepareNativeUnit(
     checkpoint: (work: number) => ssaContext.checkpoint(work),
   };
   try {
-    const constructed = constructSSA(lifted.ir, {
+    const constructed = constructSSA(liftedIR, {
       ...passOptions,
       observable_register_masks:
         input.observable_register_masks ?? abiObservableRegisterMasks(abi, ssaContext),
@@ -294,7 +307,7 @@ export function prepareNativeUnit(
     context.checkpoint(0);
     return {
       ...base,
-      blocks: Math.max(base.blocks, lifted.ir.blocks.length),
+      blocks: Math.max(base.blocks, liftedIR.blocks.length),
       nodes: liftedNodes,
       required_nodes: requiredNodes,
       ir: null,
@@ -302,7 +315,7 @@ export function prepareNativeUnit(
       analysis: null,
       observed_calls: [],
       entry_prefix,
-      dependencies: nativeDependencies(input, lifted.ir, context),
+      dependencies: nativeDependencies(input, liftedIR, context),
       reasons: [...graph.coverage.reasons, `native SSA preparation work limit (${details.limit})`],
     };
   }
@@ -448,7 +461,7 @@ export function prepareNativeUnit(
   const dependencies = nativeDependencies(input, ir, context, undefined, true, demand_index);
   return {
     ...base,
-    blocks: Math.max(base.blocks, lifted.ir.blocks.length, ir.blocks.length),
+    blocks: Math.max(base.blocks, liftedIR.blocks.length, ir.blocks.length),
     nodes,
     required_nodes: requiredNodes,
     ir,

@@ -22,9 +22,21 @@ export interface SourceFpPresentation {
   readonly expressions: ReadonlySet<Expression>;
 }
 
+/** FP control state: FPCR, and MXCSR bits overlapping [6:16] (DAZ, exception
+ * masks, rounding control, FTZ). */
+export function fpEnvironmentRegister(register: RegisterDescriptor): boolean {
+  return (
+    register.root === 'arm64:fpcr' ||
+    (register.root === 'x86_64:mxcsr' &&
+      register.offset_bits < 16 &&
+      register.offset_bits + register.width_bits > 6)
+  );
+}
+
 /** A default environment is a precondition at each recorded epoch, not a fact
- * about arbitrary writes. Only entry state, call clobbers and their unchanged
- * transports qualify. A computed/loaded control state retains explicit guards. */
+ * about arbitrary writes. Only entry state and its unchanged transports qualify;
+ * calls preserve it except environment writers. A computed/loaded control
+ * state or a writer call retains explicit guards. */
 export function sourceFpPresentation(
   program: Reconstruction,
   context: OperationContext,
@@ -92,11 +104,11 @@ export function sourceFpPresentation(
   const guardSubjects = new Set<string>();
   for (const { site } of predicates.values())
     for (const id of site.subject_ids) guardSubjects.add(id);
-  const environment = (register: RegisterDescriptor): boolean =>
-    register.root === 'arm64:fpcr' ||
-    (register.root === 'x86_64:mxcsr' &&
-      register.offset_bits < 16 &&
-      register.offset_bits + register.width_bits > 6);
+  // Calls preserve the control state (`fp_environment_preserved`): only the
+  // calls of environment writers define it, and their outputs are no epochs,
+  // so the fixpoint keeps every guard they reach. A local writer callee (its
+  // summary) has no output in this body: its guards stay as a whole.
+  const writers = program.source.fp_environment_writers;
   const epochs = new Set<string>();
   const incoming = new Map<string, string[]>();
   const predecessors = new Map<string, number>();
@@ -109,7 +121,7 @@ export function sourceFpPresentation(
         : [];
   };
   for (const binding of program.blocks.get(program.function.entry)!.register_entry)
-    if (environment(binding.register)) epochs.add(binding.value.id);
+    if (fpEnvironmentRegister(binding.register)) epochs.add(binding.value.id);
   // The last effect of a block that ends in an unresolved exit cannot change the
   // environment of any recorded operation: no modeled code executes after it.
   const terminalEffects = new Set<string>(),
@@ -117,12 +129,12 @@ export function sourceFpPresentation(
   for (const block of program.blocks.values()) {
     context.checkpoint(1);
     for (const [index, node] of block.statements.entries()) {
-      if (node.kind === 'write_register' && environment(node.register)) return unchanged;
+      if (node.kind === 'write_register' && fpEnvironmentRegister(node.register)) return unchanged;
       // Opaque instructions can write control state. Recognized guard failures
-      // are the only opaque effects removed by the conditional presentation.
+      if (node.kind === 'call' && writers?.has(node.id)) return unchanged;
       if (
         node.kind === 'unknown_effect' &&
-        node.register_outputs.some((binding) => environment(binding.register)) &&
+        node.register_outputs.some((binding) => fpEnvironmentRegister(binding.register)) &&
         !guardSubjects.has(node.id)
       ) {
         if (block.control.kind !== 'unknown' || index !== block.statements.length - 1)
@@ -130,9 +142,7 @@ export function sourceFpPresentation(
         terminalEffects.add(node.id);
         terminalBlocks.add(block.id);
       }
-      if (node.kind === 'call')
-        for (const binding of node.register_outputs)
-          if (environment(binding.register)) epochs.add(binding.value.id);
+      if (node.kind === 'call' && writers.has(node.id)) return unchanged;
     }
     for (const transfer of block.control.kind === 'jump'
       ? [block.control.transfer]
@@ -147,14 +157,14 @@ export function sourceFpPresentation(
   }
   // Coinductive acceptance (a greatest fixpoint) over the bitcast/phi transport
   // web: a bitcast or phi only transports its inputs' values, so a member whose
-  // parents are all entry/call-clobber epochs or accepted members holds one of
+  // parents are all entry epochs or accepted members holds one of
   // those epochs on every execution, around loop cycles too. A member with no
   // parent or with any other parent is rejected, and so is every member it reaches.
   const roots = [...predicates.values()].map(({ site }) => site.state_epoch);
   for (const block of program.blocks.values())
     for (const binding of block.register_exit)
       if (
-        environment(binding.register) &&
+        fpEnvironmentRegister(binding.register) &&
         !guardSubjects.has(block.control.id) &&
         !terminalBlocks.has(block.id)
       )
@@ -241,8 +251,8 @@ export function sourceFpPresentation(
         'fp_environment_guard',
         control.id,
         requirement.site.supported_predicate_value
-          ? 'exact lifter environment guard; unknown entry/call epoch, directly or through the listed accepted phi/bitcast transports, no explicit environment writer; unsupported arm is exclusively owned; supported edge and copies unchanged'
-          : 'exact lifter x86 MXCSR[6:16] guard (all exceptions masked, DAZ off, round to nearest, FTZ off); unknown entry/call epoch, directly or through the listed accepted phi/bitcast transports, no explicit MXCSR control writer (exception-status MXCSR[0:6] writes are disjoint); unsupported arm is exclusively owned; supported edge and copies unchanged',
+          ? 'exact lifter environment guard; unknown entry epoch, directly or through the listed accepted phi/bitcast transports, preserved by every call (no environment-writer call), no explicit environment writer; unsupported arm is exclusively owned; supported edge and copies unchanged'
+          : 'exact lifter x86 MXCSR[6:16] guard (all exceptions masked, DAZ off, round to nearest, FTZ off); unknown entry epoch, directly or through the listed accepted phi/bitcast transports, preserved by every call (no environment-writer call), no explicit MXCSR control writer (exception-status MXCSR[0:6] writes are disjoint); unsupported arm is exclusively owned; supported edge and copies unchanged',
         [...requirement.site.subject_ids, ...transported(requirement.site.state_epoch)],
         `Conditional on ${requirement.requirement.id} at ${requirement.site.id}, epoch ${requirement.site.state_epoch}; original guard and failure remain in checked view and requirement metadata`,
       )
@@ -251,6 +261,14 @@ export function sourceFpPresentation(
     guards.add(control.id);
     omitted.add(no.transfer.target);
   }
+  // The omitted guards rest on every call of this body preserving the control
+  // state: none is a known environment writer (those keep every guard above).
+  if (guards.size && program.calls.size)
+    validation.requireAbi(
+      'fp_environment_preserved',
+      [...program.calls.keys()],
+      'Calls to targets that are not known FP environment writers (unknown, indirect or ordinary callees) preserve the FP control state: FPCR control fields (AAPCS64 6.1.2), MXCSR[6:16] and the x87 control word (SysV psABI, Microsoft x64 nonvolatile state). fenv.h, MSVC _controlfp-family and BSD fpset* imports and local callees that write it keep their guards.',
+    );
   // An omitted guard no longer reads its condition. Mark pass over the web its
   // conditions reach (operands, phi copy sources): a member with a demand from
   // outside the web (its use count exceeds its uses inside the web) is observed,

@@ -35,6 +35,7 @@ import {
 } from '../../analysis/types/index.js';
 import {
   bitWidth,
+  successors,
   expressionOperands,
   type DataType,
   type Edge,
@@ -59,7 +60,8 @@ import {
 } from './native-summaries.js';
 import { records } from '../queries/scope.js';
 import type { AnalysisScope } from './index.js';
-import type { CallScope } from './calls.js';
+import { environmentWriterCalls, type CallScope } from './calls.js';
+import { fpEnvironmentRegister } from '../../reconstruction/source-fp.js';
 import {
   nativeDependencies,
   prepareNativeUnit,
@@ -1357,6 +1359,67 @@ function nativeArgumentReaching(
   );
 }
 
+/** A prepared body whose exit FP control state may differ from its entry
+ * state: it writes that state (an exit binding differs from the entry binding,
+ * an opaque effect or a writer-import call clobbers it) in a block that reaches
+ * a return or tail exit, tails into a writer import, or calls a writer callee.
+ * A body that restores a saved state through a writer call still counts. */
+function environmentWriter(
+  input: SourceFactsInput,
+  ir: SSAForm,
+  interfaces: ReadonlyMap<string, NativeInterface>,
+  context: OperationContext,
+): boolean {
+  if ([...interfaces.values()].some((callee) => callee.fp_environment_writer)) return true;
+  const tails = environmentWriterCalls(ir, input.image, input.functions, input.references, context);
+  const predecessors = new Map<string, string[]>(),
+    leaving: string[] = [];
+  for (const block of ir.blocks) {
+    context.checkpoint(1);
+    const control = block.terminator;
+    if (tails.has(control.id)) return true;
+    if (control.kind === 'return' || (control.kind === 'indirect' && control.tail_call))
+      leaving.push(block.id);
+    for (const edge of successors(control)) {
+      const row = predecessors.get(edge.target) ?? [];
+      row.push(block.id);
+      predecessors.set(edge.target, row);
+    }
+  }
+  const entry = new Map<string, string>();
+  const states = new Map(ir.register_states.map((state) => [state.block, state]));
+  for (const binding of states.get(ir.entry)?.entry ?? [])
+    if (fpEnvironmentRegister(binding.register)) entry.set(binding.register.id, binding.value.id);
+  for (const id of leaving)
+    for (const binding of states.get(id)?.exit ?? []) {
+      context.checkpoint(1);
+      if (
+        fpEnvironmentRegister(binding.register) &&
+        entry.get(binding.register.id) !== binding.value.id
+      )
+        return true;
+    }
+  const reaching = new Set(leaving);
+  for (let cursor = 0; cursor < leaving.length; cursor++)
+    for (const parent of predecessors.get(leaving[cursor]!) ?? []) {
+      context.checkpoint(1);
+      if (reaching.has(parent)) continue;
+      reaching.add(parent);
+      leaving.push(parent);
+    }
+  return ir.blocks.some(
+    (block) =>
+      reaching.has(block.id) &&
+      block.instructions.some((node) => {
+        context.checkpoint(1);
+        return (
+          (node.kind === 'call' || node.kind === 'unknown_effect') &&
+          node.clobbers.registers.some(fpEnvironmentRegister)
+        );
+      }),
+  );
+}
+
 function observeNativeUnit(
   input: SourceFactsInput,
   unit: PreparedNativeUnit,
@@ -1441,6 +1504,8 @@ function observeNativeUnit(
       ],
     };
   }
+  if (environmentWriter(input, unit.ir, interfaces, context))
+    observed = { ...observed, fp_environment_writer: true };
   if (unit.context_assumptions) {
     const assumed = [
       ...unit.context_assumptions.constants.map((item) => item.register),
