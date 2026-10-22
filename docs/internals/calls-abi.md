@@ -54,6 +54,8 @@ Contracts come from [types-metadata](types-metadata.md#algorithm): library proto
 
 For calls without an established contract, scan ABI argument slots in order. A slot counts if its whole carrier is covered and some cell was _prepared_ (loaded, computed, constant, or a different incoming value forwarded; untouched entry state, clobbers and the call-target alias do not count). First gap ends the prefix; the tail stays open. Result registers are those whose bits are semantically consumed (backward slice from effects, branches, stores, arguments, returns; bit ranges tracked through extract/truncate/concat), restricted to the primary return register.
 
+The same scan runs over the exit register state of each unresolved indirect exit (`observePreparedTailInterfaces`, the branch target taking the call target's place). Those prefixes are published only as source-view `source_callees`, never as native call interfaces or summaries; reconstruction uses one only when it proves the exit a tail call ([reconstruction](reconstruction.md)).
+
 ### 4. Callee summaries
 
 ```mermaid

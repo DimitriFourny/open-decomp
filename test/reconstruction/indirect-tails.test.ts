@@ -87,7 +87,8 @@ function prepare(input: RegisterIR, abi: AbiProfile) {
   return { ir, extra, source: program('source'), checked: program('checked') };
 }
 
-type Arm64Shape = 'valid' | 'link-overwritten' | 'sp-unrestored' | 'table' | 'frame-escape';
+type Arm64Shape =
+  'valid' | 'link-overwritten' | 'sp-unrestored' | 'table' | 'known-target' | 'frame-escape';
 
 /** f(x0, x1, x2, x3): a frame saving x29/x30/x19, `x19 = x3`, an inner call of
  * x0 (or of a frame address), then `return 7` when the inner result is even,
@@ -154,7 +155,9 @@ function arm64(shape: Arm64Shape) {
             tail.constant(u64, 2n),
           ),
         )
-      : tail.readRegister(x16);
+      : shape === 'known-target'
+        ? tail.int('add', tail.constant(u64, 0x8000n), tail.constant(u64, 0x800n))
+        : tail.readRegister(x16);
   tail.terminate({ kind: 'indirect', target, reason: REASON });
   return prepare(b.finish(entry, [u64]), abi);
 }
@@ -263,6 +266,7 @@ for (const [shape, reason] of [
   ['link-overwritten', 'x30 holds neither its entry value nor a frame-save reload'],
   ['sp-unrestored', 'SP is not the entry SP'],
   ['table', 'the target is a code base plus a table entry'],
+  ['known-target', 'the target is a known (constant-only) destination'],
   ['frame-escape', 'a frame address is passed to the inner call'],
 ] as const)
   test(`darwin-arm64: no tail when ${reason}`, () => {

@@ -13,9 +13,10 @@ const TARGET_CONE_NODES = 128;
  * transfer exactly like a call of their runtime target by this function's
  * caller. An exit qualifies when
  * - its SP is the entry SP;
- * - no value of the target's expression cone (at most 128 values; loads, call
- *   results and entry values are leaves) is a code address of the image, which
- *   would make the branch switch-like;
+ * - the target is a runtime value: some leaf of its expression cone (at most
+ *   128 values; loads, call results and entry values are leaves) is not a
+ *   constant, and no value of the cone is a code address of the image, which
+ *   would make the branch switch-like (a known destination, a table base);
  * - its return location holds the entry return address: on a link-register ABI
  *   the link register is its unmodified entry value, or a reload of a slot
  *   that qualifies as a frame save with this exit included (recorded under an
@@ -57,6 +58,7 @@ export function classifyIndirectTails(facts: {
   const switchLike = (target: Value): boolean => {
     const seen = new Set<string>(),
       pending = [target];
+    let runtime = false;
     while (pending.length) {
       context.checkpoint(1);
       const value = pending.pop()!;
@@ -68,10 +70,16 @@ export function classifyIndirectTails(facts: {
         if (code(BigInt.asUintN(bitWidth(value.type), expression.bits))) return true;
       } else if (expression?.kind === 'address') {
         if (expression.address.space !== 'va' || code(expression.address.value)) return true;
-      } else if (expression) pending.push(...expressionOperands(expression));
-      else pending.push(...(incoming.get(value.id) ?? []));
+      } else if (expression?.kind === 'indeterminate') runtime = true;
+      else if (expression) pending.push(...expressionOperands(expression));
+      else {
+        const sources = incoming.get(value.id);
+        if (sources?.length) pending.push(...sources);
+        else runtime = true;
+      }
     }
-    return false;
+    // A cone of constants only is a known destination, not a runtime target.
+    return !runtime;
   };
   const sp = abi.stack_pointer,
     link = abi.link_register;
