@@ -225,7 +225,9 @@ export interface SourceLocal {
  * bounds describe observed affine accesses, not a proven dynamic allocation.
  * Source view: `object` is this activation's frame kept as memory, printed as
  * one local object of `size` bytes ending at the entry SP; `minimum_offset` is
- * its entry-SP offset. */
+ * its entry-SP offset. Its `entry` is the live entry SP when addresses at or
+ * above the entry SP (incoming arguments, the return address, the caller's
+ * frame) remain: those keep the `entry_sp + k` form beside the object. */
 export type SourceStackStorage = {
   readonly minimum_offset: bigint;
   readonly size: bigint;
@@ -233,8 +235,18 @@ export type SourceStackStorage = {
 } & (
   | { readonly kind: 'private' }
   | { readonly kind: 'entry'; readonly base: Value; readonly dynamic: boolean }
-  | { readonly kind: 'object'; readonly id: string; readonly members: readonly FrameMember[] }
+  | {
+      readonly kind: 'object';
+      readonly id: string;
+      readonly members: readonly FrameMember[];
+      readonly entry: Value | null;
+    }
 );
+/** The entry-SP input a source frame prints addresses from: the base of
+ * entry-backed storage, or the live entry SP beside a frame object. */
+export function stackEntry(stack: SourceStackStorage | null | undefined): Value | null {
+  return stack?.kind === 'entry' ? stack.base : stack?.kind === 'object' ? stack.entry : null;
+}
 /** One named member of a frame object, in entry-SP coordinates. Bytes between
  * members are padding; every byte stays ordinary, aliasable memory. */
 export interface FrameMember {

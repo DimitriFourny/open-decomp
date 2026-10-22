@@ -1934,9 +1934,9 @@ export function planSourceStack(
   // object ending at the entry SP instead of `entry_sp` arithmetic. Only an
   // address at or above the entry SP (incoming stack arguments, the return
   // address, the caller's frame) still needs the entry SP as an input; such an
-  // address, when live, keeps the whole frame in entry-SP form. A load through
-  // a reloaded address prints through the reload, so the stored address at or
-  // above the entry SP is what designates those bytes.
+  // address, when live, keeps its `entry_sp + k` form beside the object. A
+  // load through a reloaded address prints through the reload, so the stored
+  // address at or above the entry SP is what designates those bytes.
   const frameObject =
     view === 'source' &&
     sharedEntry &&
@@ -1989,43 +1989,71 @@ export function planSourceStack(
       }
     if (!remaining.length && !addressLive) return null;
     const alignment = input.source!.abi.layout.stack_alignment;
-    if (entryStorage && live.has(entryStorage.id))
-      return {
-        kind: 'entry',
-        base: entryStorage,
-        dynamic: dynamicStorage,
-        minimum_offset: minimum,
-        size: maximum - minimum,
-        alignment,
-      };
+    const entryLive = entryStorage !== null && live.has(entryStorage.id);
+    const fallback = (): SourceStackStorage =>
+      entryLive
+        ? {
+            kind: 'entry',
+            base: entryStorage!,
+            dynamic: dynamicStorage,
+            minimum_offset: minimum,
+            size: maximum - minimum,
+            alignment,
+          }
+        : { kind: 'private', minimum_offset: minimum, size: maximum - minimum, alignment };
+    // With the entry SP live, the object holds the bytes below it; no retained
+    // access may span the entry SP, since its bytes would lie in both forms.
     if (
       view !== 'source' ||
-      maximum > 0n ||
-      (sharedEntry
-        ? !frameObject
-        : !validation.presentation('frame_object', input.function.id, FRAME_OBJECT_SCOPE))
+      (entryLive
+        ? remaining.some((access) => access.offset < 0n && access.end > 0n)
+        : maximum > 0n) ||
+      (sharedEntry && !frameObject)
     )
-      return { kind: 'private', minimum_offset: minimum, size: maximum - minimum, alignment };
+      return fallback();
+    const below = entryLive ? remaining.filter((access) => access.end <= 0n) : remaining;
     const taken: bigint[] = [];
-    for (const [id, offset] of presented) if (live.has(id)) taken.push(offset);
-    context.checkpoint(remaining.length + taken.length);
+    for (const [id, offset] of presented) if (live.has(id) && offset < 0n) taken.push(offset);
+    context.checkpoint(below.length + taken.length);
     const layout = frameLayout(
-      remaining.map((access) => ({ offset: access.offset, end: access.end, id: access.node.id })),
+      below.map((access) => ({ offset: access.offset, end: access.end, id: access.node.id })),
       taken,
       indexedBases,
       alignment,
       input.source!.abi.stack_return_address_bytes,
     );
-    if (sharedEntry)
+    // An object needs a member: no frame byte below the entry SP stays memory
+    // and no address of one is live, so the entry-SP form alone remains.
+    if (
+      !layout.members.length ||
+      (!sharedEntry &&
+        !validation.presentation('frame_object', input.function.id, FRAME_OBJECT_SCOPE)) ||
+      (entryLive &&
+        !validation.presentation(
+          'frame_object_beside_entry_sp',
+          input.function.id,
+          'with the entry SP live, the frame object holds every frame byte below it; addresses at or above the entry SP (incoming stack arguments, the return address, the caller frame) keep the entry_sp + k form and every address below it prints through the object; no retained access spans the entry SP; every load and store keeps its address, width, order and aliasing, nothing is forwarded',
+        ))
+    )
+      return fallback();
+    if (sharedEntry) {
       validation.requireAbi(
         'frame_object',
-        [input.function.id, ...remaining.slice(0, 63).map((access) => access.node.id)],
+        [input.function.id, ...below.slice(0, 63).map((access) => access.node.id)],
         "The frame object is this activation's stack frame: its bytes end at the entry SP, and its start is stack-aligned. Under ABI conformance a frame address handed to a callee, stored or indexed designates bytes inside it (never the caller's frame, incoming stack arguments or the return address), and no caller-supplied, global, loaded or returned pointer designates its bytes. Every load and store keeps its address, width, order and aliasing; the checked view and the original mappings keep the entry-SP form.",
       );
+      if (entryLive)
+        validation.requireAbi(
+          'frame_object',
+          [input.function.id, ...remaining.slice(0, 63).map((access) => access.node.id)],
+          'Beside the frame object, an address at or above the entry SP designates incoming stack arguments, the return address or the caller frame, and no arithmetic on it (stored, reloaded, indexed or handed to a callee) reaches the frame object; under ABI conformance the incoming argument area and the caller frame are objects distinct from this activation frame.',
+        );
+    }
     return {
       kind: 'object',
       id: `entity_${fingerprint(['source-frame', input.function.id])}`,
       alignment,
+      entry: entryLive ? entryStorage : null,
       ...layout,
     };
   };

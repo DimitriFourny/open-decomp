@@ -45,13 +45,14 @@ import type { BoundaryProjection, Reconstruction } from '../reconstruction/model
 import { validateReconstruction, validateRenderedTransfers } from '../reconstruction/validate.js';
 import { foldSourceCondition } from '../reconstruction/source-conditions.js';
 import { constantRotationOperands } from '../reconstruction/source-shifts.js';
-import type {
-  FrameMember,
-  ObjCMessage,
-  SourceAddress,
-  SourceFormalType,
-  SourceLocal,
-  SourceStackStorage,
+import {
+  stackEntry,
+  type FrameMember,
+  type ObjCMessage,
+  type SourceAddress,
+  type SourceFormalType,
+  type SourceLocal,
+  type SourceStackStorage,
 } from '../reconstruction/source-model.js';
 import { selectorArity } from '../metadata/runtime/objc-types.js';
 import { objcMessageText, objcStringLiteral } from './objc.js';
@@ -727,9 +728,8 @@ export class Renderer {
   private sourceIdentifier(id: string, preferred: string, linkage = false): string {
     const previous = this.identifiers.get(id);
     if (previous) return previous.identifier;
-    const stack = this.program.source?.stack;
     const entryStack =
-      (stack?.kind === 'entry' && stack.base.id === id) ||
+      stackEntry(this.program.source?.stack)?.id === id ||
       this.program.parameter_registers.get(id)?.role === 'stack_pointer';
     const stem = entryStack ? 'entry_sp' : sourceIdentifierStem(preferred, linkage);
     let name = stem,
@@ -1657,10 +1657,13 @@ export class Renderer {
     const stack = this.program.source?.stack,
       offset = this.program.source?.stack_addresses.get(value.id);
     if (stack && offset !== undefined) {
-      if (stack.kind === 'object') return this.frameAddress(stack, offset);
-      if (stack.kind === 'entry') {
+      // Beside a frame object only addresses at or above the entry SP keep it.
+      if (stack.kind === 'object' && (offset < 0n || !stack.entry))
+        return this.frameAddress(stack, offset);
+      const entry = stackEntry(stack);
+      if (entry) {
         if (source) {
-          const base = this.printed(stack.base);
+          const base = this.printed(entry);
           if (offset === 0n) return base;
           const amount = this.printer.literal(offset < 0n ? -offset : offset, 64);
           return this.printer.reduce(
@@ -1673,7 +1676,7 @@ export class Renderer {
             ),
           );
         }
-        const base = this.value(stack.base);
+        const base = this.value(entry);
         if (offset === 0n) return this.printer.primary(base);
         const address = `(${base} ${offset < 0n ? '-' : '+'} ${offset < 0n ? -offset : offset})`;
         return this.printer.primary(
@@ -3999,7 +4002,8 @@ export class Renderer {
   /** A plain access at a known frame offset: the member itself when it is
    * exactly that member with its declared type, otherwise one cast
    * dereference of the member or object bytes. Undefined keeps the general
-   * memory spelling (volatile, big-endian, aligned or non-byte accesses). */
+   * memory spelling (volatile, big-endian, aligned or non-byte accesses, and
+   * bytes at or above the entry SP beside the object). */
   private frameStorage(node: Extract<Instruction, { kind: 'load' | 'store' }>): string | undefined {
     const stack = this.program.source?.stack,
       offset = this.program.source?.stack_addresses.get(node.address.id),
@@ -4007,6 +4011,7 @@ export class Renderer {
     if (
       stack?.kind !== 'object' ||
       offset === undefined ||
+      offset >= 0n ||
       bits % 8n ||
       node.access.endian !== 'little' ||
       node.access.volatile ||

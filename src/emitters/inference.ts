@@ -6,7 +6,7 @@ import type { Region } from '../presentation/index.js';
 import type { BoundaryProjection, Reconstruction } from '../reconstruction/model.js';
 import type { LocalValidationRecord } from '../reconstruction/local-validation.js';
 import { sourceConstantValues, sourceDataValues } from '../reconstruction/source-data.js';
-import type { SourceAddress } from '../reconstruction/source-model.js';
+import { stackEntry, type SourceAddress } from '../reconstruction/source-model.js';
 import type { EmissionInput } from './model.js';
 import {
   MetadataLimitError,
@@ -496,8 +496,7 @@ function gatherInferences(
     const stack = offsets.size === 1 ? offsets.values().next().value : undefined;
     const parameter = program.signature?.signature.parameters[ordinal];
     const role =
-      register?.role === 'stack_pointer' ||
-      (program.source?.stack?.kind === 'entry' && program.source.stack.base.id === value.id)
+      register?.role === 'stack_pointer' || stackEntry(program.source?.stack)?.id === value.id
         ? 'entry_storage'
         : program.source
           ? 'observed_input'
