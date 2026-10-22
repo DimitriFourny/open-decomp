@@ -44,7 +44,7 @@ for (const [fixture, entry] of [
       const result: StoredDecompilation = p.payload(
         (await p.decompile(fn.id, { options: { emitter } })).result,
       ).result;
-      const emission = result.data.emission;
+      const emission: StoredDecompilation['data']['emission'] = result.data.emission;
       assert.doesNotMatch(emission.text, /\bentry_sp\b/, emission.text);
       assert.match(emission.text, /\(\w+ \w+, \.\.\.\)|\(\w+: \w+, \.\.\.\)/, emission.text);
       assert.match(
@@ -53,8 +53,7 @@ for (const [fixture, entry] of [
       );
       assert.ok(
         emission.local_validation?.some(
-          (record: { kind: string; rule?: string }) =>
-            record.kind === 'presentation' && record.rule === 'va_start',
+          (record) => record.kind === 'presentation' && record.rule === 'va_start',
         ),
       );
       const formals = emittedFormals(emission);
