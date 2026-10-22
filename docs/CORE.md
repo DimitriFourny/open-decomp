@@ -571,7 +571,12 @@ result, projected result or tail interface), computed nonprimary slices may
 instead accompany a void-like `return;`. This is an explicit ABI assumption,
 not a recovered authored void prototype. Positive
 consumption evidence from already prepared native units keeps slices inline;
-callers are not exhaustively scanned. The inference explicitly records
+callers are not exhaustively scanned. A self-recursive call is one of those
+callers: its result demand counts only where it is _semantic_ (reached from a
+load, store, call argument, branch, switch, indirect target or explicit return
+value). Bits it only forwards to the function's own return-exit snapshot are
+circular and gather no evidence; demand from other prepared callers still
+counts in full, forwarded bits included. The inference explicitly records
 “no result-use evidence gathered; callers not scanned” and requires
 `abi_conformance`; it is an assumption, not proof of non-consumption. The existing
 `unavailable_semantics` diagnostic remains. These slices cease to be source
