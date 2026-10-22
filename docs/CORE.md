@@ -471,8 +471,11 @@ Neither rewrite claims purity or permits motion across memory accesses, calls
 or fences. Unsupported FP-environment effects remain opaque unless the existing
 requirement projection independently applies; memory fences remain explicit.
 At the presentation-record bound the full `boundary(...)` contract remains
-visible, and unknown instructions retain `opaque_effect(...)`. Checked rendering
-is unchanged.
+visible, and unknown instructions retain `opaque_effect(...)`. A call printed as
+a short-circuit comma operand has its `call_effects` record admitted when the
+operand is planned, with the same scope and contract the printed call asks for:
+a call whose record is refused never becomes a comma operand, so its boundary
+statement never lands inside a test. Checked rendering is unchanged.
 
 After inlining, both source dialects may combine an initial single-entry chain
 of expression-only loop tests. Short-circuit conditions preserve load order and
@@ -1162,6 +1165,16 @@ Once the shared source proof-work allowance is exhausted, further speculative
 bitvector candidates retain their original forms without another doomed check.
 One function-level unverified summary counts these unattempted candidates; the
 limitation remains visible rather than consuming one record per skipped rewrite.
+Source phi-copy emission checks after exhaustion fold the same way: one
+function-level `parallel-copy` record states "N later phi-copy emissions not
+validated; local validation allowance exhausted" (each such check charges the
+allowance before any proof step, so its outcome is that limitation), and the
+printed copies are unchanged. Each kind keeps one summary slot; at the record
+bound the summaries take the terminal slots and keep the bound in their reason.
+Without the fold these unverified records filled the 256-record bound in large
+functions, after which every presentation was refused (for example 9, 27 and 23
+`boundary(...)` statements in brotli `main`, `isDate` and
+`sqlite3Fts3Incrmerge`; 0 after).
 Exact source wiring is not speculative and still applies: same-type identity
 operand resolution, offset-zero/same-width bitcasts and extracts reselected from a
 contained slice, extension or extract relocate existing bits without arithmetic.
