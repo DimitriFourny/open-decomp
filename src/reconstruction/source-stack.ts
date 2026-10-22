@@ -1,4 +1,10 @@
-import { fingerprint, type OperationContext, type PresentationView } from '../core/index.js';
+import {
+  fingerprint,
+  type AbiProfile,
+  type OperationContext,
+  type PresentationView,
+  type RegisterDescriptor,
+} from '../core/index.js';
 import type { EmissionInput } from '../emitters/model.js';
 import { classifyStackRegion } from '../analysis/stack/index.js';
 import {
@@ -19,6 +25,7 @@ import type { Requirement } from '../core/inference.js';
 import { LocalValidationSession } from './local-validation.js';
 import { type ForwardedByte, validateStackPromotion } from './local-storage-validation.js';
 import { sourceRequirementPredicates } from './source-requirements.js';
+import { classifyIndirectTails } from './source-tails.js';
 
 type MemoryNode = Extract<Instruction, { kind: 'load' | 'store' }>;
 const FRAME_OBJECT_SCOPE =
@@ -109,6 +116,245 @@ export function frameLayout(
     unit = BigInt(alignment),
     minimum = lowest - (((lowest % unit) + unit) % unit) - returnAddressBytes;
   return { minimum_offset: minimum, size: -minimum, members };
+}
+
+/** A memory access at a known entry-SP offset; `key` is `offset:end`. */
+export interface FrameAccess {
+  readonly node: MemoryNode;
+  readonly block: string;
+  readonly offset: bigint;
+  readonly end: bigint;
+  readonly key: string;
+}
+/** Exact bits `[low, low + width)` of one entry register root. */
+export interface EntryBits {
+  readonly root: string;
+  readonly low: number;
+  readonly width: number;
+}
+/** A frame-private save of entry-register bits and the reloads restoring it. */
+export interface FrameSave {
+  readonly key: string;
+  readonly save: FrameAccess & { readonly node: Extract<MemoryNode, { kind: 'store' }> };
+  readonly loads: readonly FrameAccess[];
+  readonly bits: EntryBits;
+}
+export interface FrameSaveQualifier {
+  /** The slots that qualify as saves when every block of `exits` must restore
+   * them, in slot order. `accept`, when given, decides each qualifying slot
+   * before the next one is examined, so expressions it rewrites (reload
+   * aliases) are visible to later slots; without it the check changes nothing. */
+  qualify(exits: readonly BlockRegion[], accept?: (save: FrameSave) => boolean): FrameSave[];
+  /** Every binding of `bits`'s root at `exit` that overlaps `bits` holds
+   * exactly its bits, from reloads of `members` or as the unmodified entry
+   * value, and together they cover `bits`. */
+  restores(exit: BlockRegion, bits: EntryBits, members: ReadonlySet<string>): boolean;
+}
+
+/** Source view: frame-private save/restore of an entry register, qualified
+ * against an explicit exit list. A slot is a save when (i) its only store
+ * writes the entry value of a preserved register or the link register, (ii)
+ * every given exit restores that register from a dominated load of exactly
+ * this slot and no other access overlaps it, (iii) no stack address of it
+ * escapes and (iv) it is not established outgoing argument storage. Under ABI
+ * conformance callees never write it, so each reload equals the saved value and
+ * neither access is source-observable. The caller checks that the frame as a
+ * whole is not exposed. */
+export function frameSaveQualifier(
+  facts: {
+    readonly accesses: readonly FrameAccess[];
+    readonly groups: ReadonlyMap<string, readonly FrameAccess[]>;
+    readonly exposedOffsets: ReadonlySet<bigint>;
+    readonly outgoingRanges: readonly { readonly start: bigint; readonly end: bigint }[];
+    readonly entry: BlockRegion;
+    /** Read at each use: aliases applied by an accepted save are visible. */
+    readonly expressions: ReadonlyMap<string, Expression>;
+    readonly incoming: ReadonlyMap<string, readonly Value[]>;
+    readonly dominates: (first: FrameAccess, second: FrameAccess) => boolean;
+    readonly abi: AbiProfile;
+  },
+  context: OperationContext,
+): FrameSaveQualifier {
+  const { accesses, expressions, incoming, abi } = facts;
+  let entryCells: ReadonlyMap<string, RegisterDescriptor> | undefined,
+    loadsByResult: ReadonlyMap<string, string> | undefined;
+  const indexes = () => {
+    if (!entryCells || !loadsByResult) {
+      entryCells = new Map(
+        facts.entry.register_entry.map((binding) => [binding.value.id, binding.register]),
+      );
+      const loads = new Map<string, string>();
+      for (const access of accesses)
+        if (access.node.kind === 'load') loads.set(access.node.result.id, access.node.id);
+      loadsByResult = loads;
+    }
+    return { entryCells, loadsByResult };
+  };
+  // Exact entry bits through bitcasts, extracts and ordered concatenation only.
+  const entryBits = (value: Value, depth = 0): EntryBits | null => {
+    context.checkpoint(1);
+    const cell = indexes().entryCells.get(value.id);
+    if (cell) return { root: cell.root, low: cell.offset_bits, width: cell.width_bits };
+    const expression = depth < 16 ? expressions.get(value.id) : undefined;
+    const width = bitWidth(value.type);
+    if (expression?.kind === 'cast' && expression.op === 'bitcast')
+      return bitWidth(expression.value.type) === width
+        ? entryBits(expression.value, depth + 1)
+        : null;
+    if (expression?.kind === 'extract') {
+      const inner = entryBits(expression.value, depth + 1);
+      return inner && expression.offset + width <= inner.width
+        ? { root: inner.root, low: inner.low + expression.offset, width }
+        : null;
+    }
+    if (expression?.kind === 'concat') {
+      let result: EntryBits | null = null;
+      for (const part of expression.values) {
+        const bits = entryBits(part, depth + 1);
+        if (!bits) return null;
+        if (!result) result = bits;
+        else if (bits.root === result.root && bits.low === result.low + result.width)
+          result = { root: result.root, low: result.low, width: result.width + bits.width };
+        else return null;
+      }
+      return result;
+    }
+    return null;
+  };
+  // Bit offset within a reload of `members` on every incoming path, or null.
+  // An unmodified entry value of the saved register equals the reload at the
+  // same bit position (the slot holds exactly the saved entry bits), so a
+  // shrink-wrapped save that some path never executes still restores.
+  const reloadBits = (
+    value: Value,
+    members: ReadonlySet<string>,
+    active: Set<string>,
+    saved: EntryBits,
+    depth = 0,
+  ): number | null => {
+    context.checkpoint(1);
+    const load = indexes().loadsByResult.get(value.id);
+    if (load !== undefined) return members.has(load) ? 0 : null;
+    const unmodified = entryBits(value);
+    if (unmodified)
+      return unmodified.root === saved.root &&
+        unmodified.low >= saved.low &&
+        unmodified.low + unmodified.width <= saved.low + saved.width
+        ? unmodified.low - saved.low
+        : null;
+    if (depth >= 32 || active.has(value.id)) return null;
+    const expression = expressions.get(value.id);
+    if (expression?.kind === 'cast' && expression.op === 'bitcast')
+      return bitWidth(expression.value.type) === bitWidth(value.type)
+        ? reloadBits(expression.value, members, active, saved, depth + 1)
+        : null;
+    if (expression?.kind === 'extract') {
+      const inner = reloadBits(expression.value, members, active, saved, depth + 1);
+      return inner === null ? null : inner + expression.offset;
+    }
+    if (expression?.kind === 'concat') {
+      let start: number | null = null,
+        width = 0;
+      for (const part of expression.values) {
+        const offset = reloadBits(part, members, active, saved, depth + 1);
+        if (offset === null) return null;
+        if (start === null) start = offset;
+        else if (offset !== start + width) return null;
+        width += bitWidth(part.type);
+      }
+      return width === bitWidth(value.type) ? start : null;
+    }
+    const sources = expression ? undefined : incoming.get(value.id);
+    if (!sources?.length) return null;
+    active.add(value.id);
+    let result: number | null | undefined;
+    for (const source of sources) {
+      const bits = reloadBits(source, members, active, saved, depth + 1);
+      if (bits === null || (result !== undefined && result !== bits)) {
+        result = null;
+        break;
+      }
+      result = bits;
+    }
+    active.delete(value.id);
+    return result ?? null;
+  };
+  const restores = (exit: BlockRegion, bits: EntryBits, members: ReadonlySet<string>): boolean => {
+    let covered = 0;
+    for (const binding of exit.register_exit) {
+      const register = binding.register;
+      if (
+        register.root !== bits.root ||
+        register.offset_bits + register.width_bits <= bits.low ||
+        register.offset_bits >= bits.low + bits.width
+      )
+        continue;
+      if (
+        register.offset_bits < bits.low ||
+        register.offset_bits + register.width_bits > bits.low + bits.width ||
+        reloadBits(binding.value, members, new Set(), bits) !== register.offset_bits - bits.low
+      )
+        return false;
+      covered += register.width_bits;
+    }
+    return covered === bits.width;
+  };
+  const qualify = (
+    exits: readonly BlockRegion[],
+    accept?: (save: FrameSave) => boolean,
+  ): FrameSave[] => {
+    const saves: FrameSave[] = [];
+    for (const [key, group] of facts.groups) {
+      context.checkpoint(group.length);
+      const first = group[0]!;
+      const stores = group.filter((access) => access.node.kind === 'store'),
+        loads = group.filter((access) => access.node.kind === 'load');
+      const save = stores[0],
+        saved = save?.node.kind === 'store' ? save.node : null;
+      if (
+        !save ||
+        !saved ||
+        stores.length !== 1 ||
+        !loads.length ||
+        first.offset >= 0n ||
+        first.end > 0n ||
+        group.some(
+          (access) =>
+            access.node.access.volatile ||
+            access.node.access.endian !== saved.access.endian ||
+            (access.node.kind === 'load' && !sameType(access.node.result.type, saved.value.type)),
+        ) ||
+        accesses.some(
+          (access) => access.key !== key && access.offset < first.end && access.end > first.offset,
+        ) ||
+        [...facts.exposedOffsets].some((offset) => offset >= first.offset && offset < first.end) ||
+        facts.outgoingRanges.some((range) => range.start < first.end && range.end > first.offset)
+      )
+        continue;
+      const bits = entryBits(saved.value);
+      if (
+        !bits ||
+        bits.width !== bitWidth(saved.value.type) ||
+        !(
+          abi.link_register?.root === bits.root ||
+          abi.preserved.some(
+            (register) =>
+              register.root === bits.root &&
+              register.offset_bits <= bits.low &&
+              register.offset_bits + register.width_bits >= bits.low + bits.width,
+          )
+        ) ||
+        loads.some((load) => !facts.dominates(save, load))
+      )
+        continue;
+      const members = new Set(loads.map((load) => load.node.id));
+      if (!exits.every((exit) => restores(exit, bits, members))) continue;
+      const found: FrameSave = { key, save: { ...save, node: saved }, loads, bits };
+      if (!accept || accept(found)) saves.push(found);
+    }
+    return saves;
+  };
+  return { qualify, restores };
 }
 
 /** Exact private slots only. Escapes and overlapping access intervals retain one
@@ -1023,17 +1269,12 @@ export function planSourceStack(
       eligible.add(key);
       if (preceded.length) boundedSlots.add(key);
     }
-  // Source view: frame-private save/restore of an entry register. A slot is a
-  // save when (i) its only store writes the entry value of a preserved register
-  // or the link register, (ii) every return/tail exit restores that register
-  // from a dominated load of exactly this slot and no other access overlaps it,
-  // (iii) no stack address escapes and (iv) it is not established outgoing
-  // argument storage. Under ABI conformance callees never write it, so each
-  // reload equals the saved value and neither access is source-observable.
+  // Source view: frame-private save/restore of entry registers
+  // (`frameSaveQualifier`), restored on every return and tail exit.
   const saveStores = new Set<string>(),
     saveReloads = new Set<string>(),
     saveBytes = new Set<bigint>();
-  const exits = [...blocks.values()].filter(
+  const tailExits = [...blocks.values()].filter(
     (block) =>
       block.control.kind === 'return' ||
       (block.control.kind === 'indirect' && block.control.tail_call === true),
@@ -1054,188 +1295,68 @@ export function planSourceStack(
     }
     return false;
   };
+  const frameSaves = frameSaveQualifier(
+    {
+      accesses,
+      groups,
+      exposedOffsets,
+      outgoingRanges,
+      entry,
+      expressions,
+      incoming,
+      dominates,
+      abi,
+    },
+    context,
+  );
+  // Source view: indirect exits proven to transfer like a call by this
+  // function's caller are tail exits too.
+  const indirectTails =
+    view === 'source'
+      ? classifyIndirectTails({
+          input,
+          blocks,
+          expressions,
+          incoming,
+          stackOffset: (value) => addresses.get(value.id),
+          frameEscapes:
+            frameExposed || reachAll || reachFloor !== undefined || exposedOffsets.size > 0,
+          stores: accesses.filter((access) => access.node.kind === 'store'),
+          unknownStores: memory.some(
+            (node) => node.kind === 'store' && !addresses.has(node.address.id),
+          ),
+          exits: tailExits,
+          frameSaves,
+          validation,
+          context,
+        })
+      : new Set<string>();
+  const exits = indirectTails.size
+    ? [...tailExits, ...[...blocks.values()].filter((block) => indirectTails.has(block.control.id))]
+    : tailExits;
   if (!frameExposed && exits.length) {
-    const entryCells = new Map(
-      entry.register_entry.map((binding) => [binding.value.id, binding.register]),
-    );
-    const loadsByResult = new Map<string, string>();
-    for (const access of accesses)
-      if (access.node.kind === 'load') loadsByResult.set(access.node.result.id, access.node.id);
-    type Bits = { readonly root: string; readonly low: number; readonly width: number };
-    // Exact entry bits through bitcasts, extracts and ordered concatenation only.
-    const entryBits = (value: Value, depth = 0): Bits | null => {
-      context.checkpoint(1);
-      const cell = entryCells.get(value.id);
-      if (cell) return { root: cell.root, low: cell.offset_bits, width: cell.width_bits };
-      const expression = depth < 16 ? expressions.get(value.id) : undefined;
-      const width = bitWidth(value.type);
-      if (expression?.kind === 'cast' && expression.op === 'bitcast')
-        return bitWidth(expression.value.type) === width
-          ? entryBits(expression.value, depth + 1)
-          : null;
-      if (expression?.kind === 'extract') {
-        const inner = entryBits(expression.value, depth + 1);
-        return inner && expression.offset + width <= inner.width
-          ? { root: inner.root, low: inner.low + expression.offset, width }
-          : null;
-      }
-      if (expression?.kind === 'concat') {
-        let result: Bits | null = null;
-        for (const part of expression.values) {
-          const bits = entryBits(part, depth + 1);
-          if (!bits) return null;
-          if (!result) result = bits;
-          else if (bits.root === result.root && bits.low === result.low + result.width)
-            result = { root: result.root, low: result.low, width: result.width + bits.width };
-          else return null;
-        }
-        return result;
-      }
-      return null;
-    };
-    // Bit offset within a reload of `members` on every incoming path, or null.
-    // An unmodified entry value of the saved register equals the reload at the
-    // same bit position (the slot holds exactly the saved entry bits), so a
-    // shrink-wrapped save that some path never executes still restores.
-    const reloadBits = (
-      value: Value,
-      members: ReadonlySet<string>,
-      active: Set<string>,
-      saved: Bits,
-      depth = 0,
-    ): number | null => {
-      context.checkpoint(1);
-      const load = loadsByResult.get(value.id);
-      if (load !== undefined) return members.has(load) ? 0 : null;
-      const unmodified = entryBits(value);
-      if (unmodified)
-        return unmodified.root === saved.root &&
-          unmodified.low >= saved.low &&
-          unmodified.low + unmodified.width <= saved.low + saved.width
-          ? unmodified.low - saved.low
-          : null;
-      if (depth >= 32 || active.has(value.id)) return null;
-      const expression = expressions.get(value.id);
-      if (expression?.kind === 'cast' && expression.op === 'bitcast')
-        return bitWidth(expression.value.type) === bitWidth(value.type)
-          ? reloadBits(expression.value, members, active, saved, depth + 1)
-          : null;
-      if (expression?.kind === 'extract') {
-        const inner = reloadBits(expression.value, members, active, saved, depth + 1);
-        return inner === null ? null : inner + expression.offset;
-      }
-      if (expression?.kind === 'concat') {
-        let start: number | null = null,
-          width = 0;
-        for (const part of expression.values) {
-          const offset = reloadBits(part, members, active, saved, depth + 1);
-          if (offset === null) return null;
-          if (start === null) start = offset;
-          else if (offset !== start + width) return null;
-          width += bitWidth(part.type);
-        }
-        return width === bitWidth(value.type) ? start : null;
-      }
-      const sources = expression ? undefined : incoming.get(value.id);
-      if (!sources?.length) return null;
-      active.add(value.id);
-      let result: number | null | undefined;
-      for (const source of sources) {
-        const bits = reloadBits(source, members, active, saved, depth + 1);
-        if (bits === null || (result !== undefined && result !== bits)) {
-          result = null;
-          break;
-        }
-        result = bits;
-      }
-      active.delete(value.id);
-      return result ?? null;
-    };
-    for (const [key, group] of groups) {
-      context.checkpoint(group.length);
-      const first = group[0]!;
-      const stores = group.filter((access) => access.node.kind === 'store'),
-        loads = group.filter((access) => access.node.kind === 'load');
-      const save = stores[0],
-        saved = save?.node.kind === 'store' ? save.node : null;
+    frameSaves.qualify(exits, ({ key, save, loads, bits }) => {
       if (
-        !save ||
-        !saved ||
-        stores.length !== 1 ||
-        !loads.length ||
-        first.offset >= 0n ||
-        first.end > 0n ||
-        group.some(
-          (access) =>
-            access.node.access.volatile ||
-            access.node.access.endian !== saved.access.endian ||
-            (access.node.kind === 'load' && !sameType(access.node.result.type, saved.value.type)),
-        ) ||
-        accesses.some(
-          (access) => access.key !== key && access.offset < first.end && access.end > first.offset,
-        ) ||
-        [...exposedOffsets].some((offset) => offset >= first.offset && offset < first.end) ||
-        outgoingRanges.some((range) => range.start < first.end && range.end > first.offset)
-      )
-        continue;
-      const bits = entryBits(saved.value);
-      if (
-        !bits ||
-        bits.width !== bitWidth(saved.value.type) ||
-        !(
-          abi.link_register?.root === bits.root ||
-          abi.preserved.some(
-            (register) =>
-              register.root === bits.root &&
-              register.offset_bits <= bits.low &&
-              register.offset_bits + register.width_bits >= bits.low + bits.width,
-          )
-        ) ||
-        loads.some((load) => !dominates(save, load))
-      )
-        continue;
-      const members = new Set(loads.map((load) => load.node.id));
-      const restored = exits.every((exit) => {
-        let covered = 0;
-        for (const binding of exit.register_exit) {
-          const register = binding.register;
-          if (
-            register.root !== bits.root ||
-            register.offset_bits + register.width_bits <= bits.low ||
-            register.offset_bits >= bits.low + bits.width
-          )
-            continue;
-          if (
-            register.offset_bits < bits.low ||
-            register.offset_bits + register.width_bits > bits.low + bits.width ||
-            reloadBits(binding.value, members, new Set(), bits) !== register.offset_bits - bits.low
-          )
-            return false;
-          covered += register.width_bits;
-        }
-        return covered === bits.width;
-      });
-      if (
-        !restored ||
         !validation.presentation(
           'frame_save',
           `stack:${key}`,
-          `frame-private save of ${bits.root}[${bits.low}:${bits.width}] at entry SP ${first.offset}; restored from this exact slot on every return/tail exit; nonescaping, nonoverlapping, not established outgoing argument storage`,
-          [save.node.id, ...members].slice(0, 64),
+          `frame-private save of ${bits.root}[${bits.low}:${bits.width}] at entry SP ${save.offset}; restored from this exact slot on every return/tail exit; nonescaping, nonoverlapping, not established outgoing argument storage`,
+          [save.node.id, ...loads.map((load) => load.node.id)].slice(0, 64),
         )
       )
-        continue;
+        return false;
       // A proven save is machine bookkeeping, not a scalar source local.
       // Classify it before promotion even in leaf functions without calls.
       eligible.delete(key);
       saveStores.add(save.node.id);
-      for (let byte = first.offset; byte < first.end; byte++) saveBytes.add(byte);
+      for (let byte = save.offset; byte < save.end; byte++) saveBytes.add(byte);
       for (const load of loads) {
         saveReloads.add(load.node.id);
         if (load.node.kind === 'load')
-          alias(load.node.result, { kind: 'cast', op: 'bitcast', value: saved.value });
+          alias(load.node.result, { kind: 'cast', op: 'bitcast', value: save.node.value });
       }
-    }
+      return true;
+    });
     if (saveStores.size)
       validation.requireAbi(
         'frame_save',
@@ -1920,5 +2041,7 @@ export function planSourceStack(
     saves,
     deadReloadCandidates,
     forwardedReloads,
+    /** Source view: indirect exits accepted by `classifyIndirectTails`. */
+    indirectTails,
   };
 }

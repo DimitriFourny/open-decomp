@@ -264,9 +264,11 @@ export function planSourceInlining(
       for (const binding of projection?.outputs ?? block.register_exit) use(binding.value, at);
     }
     for (const binding of program.physical_exits.get(control.id) ?? []) use(binding.value, at);
-    if (!['return', 'jump', 'if'].includes(control.kind))
+    const tail = program.tails.get(control.id);
+    // A target-value tail prints only its target and observed argument prefix.
+    if (!['return', 'jump', 'if'].includes(control.kind) && tail?.target !== null)
       for (const binding of block.register_exit) use(binding.value, at);
-    for (const value of program.tails.get(control.id)?.boundary.arguments ?? []) use(value, at);
+    for (const value of tail?.boundary.arguments ?? []) use(value, at);
     const transfers =
       control.kind === 'jump'
         ? [control.transfer]
