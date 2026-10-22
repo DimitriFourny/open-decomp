@@ -46,13 +46,21 @@ function interpret(result: Api.ToolResult<'function_decompile'>): Interpreted {
       ? { state: 'partial', reason: result.reason, text, work }
       : { state: 'complete', reason: null, text, work };
   }
-  if ('error' in result)
+  if ('error' in result) {
+    // A work-limit failure has no result envelope; its diagnostic reports the count at which
+    // the limit tripped (the first charge past it) and the limit.
+    const details = result.error.details;
+    const work =
+      details?.kind === 'limit' && details.resource === 'work'
+        ? { consumed: details.consumed, limit: details.limit }
+        : null;
     return {
       state: 'failed',
       reason: `${result.error.code}: ${result.error.message}`,
       text: null,
-      work: null,
+      work,
     };
+  }
   return {
     state: 'failed',
     reason: `unexpected result state ${result.state}`,
