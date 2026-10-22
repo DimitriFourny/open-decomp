@@ -8403,13 +8403,21 @@ export class Renderer {
     }
   }
 
-  /** Restate a do-while test over the variable its repeat copy just wrote: for
-   * a copy `x <- x + c` and test `(x or zext x) ==/!= K`, test `x ==/!= K + c`;
-   * for a copy `x <- x >> c` (logical or arithmetic, 0 < c < width) and an
-   * unsigned range test `x < 2^c` (or `x <= 2^c - 1`, or their negations), test
-   * `x ==/!= 0`. The derivation is exact over the IR; while the shared
-   * allowance remains, the bit-vector checker independently re-proves the
-   * restated test (over the copy's source value) and may veto it. */
+  /** Restate a do-while test over the variable its repeat copy just wrote, so
+   * the copy prints before the test:
+   * - for a copy `x <- x + c` and an equality `L ==/!= B` whose `L` is `x` (or
+   *   `x mod 2^w`) plus a constant k through casts and constant steps, test
+   *   `x (mod 2^w) ==/!= B + c - k` (mod 2^w). `B` is a constant (a zero
+   *   extended `L` against a constant in its range tests the narrower value),
+   *   or an expression over variables the repeat copies do not write, without
+   *   inline loads or calls; `B + d` folds into `B = y ± m`. A test on the
+   *   copy's source value is the case k = c: the same predicate over `x`.
+   * - for a copy `x <- x >> c` (logical or arithmetic, 0 < c < width) and an
+   *   unsigned range test `x < 2^c` (or `x <= 2^c - 1`, or their negations),
+   *   test `x ==/!= 0`. Other ordered compares are not restated.
+   * The derivation is exact over the IR; while the shared allowance remains,
+   * the bit-vector checker independently re-proves the restated test (over the
+   * copy's source value) and may veto it. */
   private restateTest(
     control: Extract<Control, { kind: 'if' }>,
     repeat: ParallelTransfer,
@@ -8428,70 +8436,202 @@ export class Renderer {
       compare = program.expressions.get(tested.id);
     }
     if (compare?.kind !== 'compare') return false;
-    const right = constant(compare.right),
-      bound = right ?? constant(compare.left);
-    let leaf = right === undefined ? compare.right : compare.left;
-    if (bound === undefined) return false;
-    // The predicate with the variable on its left.
-    const op =
-      right !== undefined
-        ? compare.op
-        : compare.op === 'ult'
-          ? 'ugt'
-          : compare.op === 'ule'
-            ? 'uge'
-            : compare.op === 'ugt'
-              ? 'ult'
-              : compare.op === 'uge'
-                ? 'ule'
-                : compare.op;
-    if (!['eq', 'ne', 'ult', 'ule', 'ugt', 'uge'].includes(op)) return false;
-    for (let i = 0; i < 16 && this.inline.has(leaf.id); i++) {
-      const cast = program.expressions.get(leaf.id);
-      if (cast?.kind !== 'cast' || (cast.op !== 'zero_extend' && cast.op !== 'bitcast'))
-        return false;
-      leaf = cast.value;
-    }
-    if (this.inline.has(leaf.id) || leaf.type.kind !== 'integer') return false;
-    const width = leaf.type.bits;
-    if (bound >= 1n << BigInt(width)) return false;
+    const original = compare;
     const key = (value: Value): string => (this.variables.get(value.id) ?? value).id;
-    const copies = this.printedCopies(repeat),
-      copy = copies.find((item) => key(item.destination) === key(leaf));
-    if (!copy || copy.destination.type.kind !== 'integer' || copy.destination.type.bits !== width)
-      return false;
-    let restatedOp: 'eq' | 'ne', bits: bigint, scope: string;
-    if (op === 'eq' || op === 'ne') {
-      const offset = (value: Value, depth: number): bigint | null => {
-        if (value.id === leaf.id) return 0n;
-        const expression = program.expressions.get(value.id);
-        if (depth > 8 || !expression || value.type.kind !== 'integer' || value.type.bits < width)
-          return null;
+    const copies = this.printedCopies(repeat);
+    // `value - leaf` when `value` is `leaf` plus a constant modulo 2^|leaf|,
+    // through casts and constant steps no narrower than `leaf`.
+    const offset = (value: Value, leaf: Value, depth = 0): bigint | null => {
+      if (value.id === leaf.id) return 0n;
+      const expression = program.expressions.get(value.id);
+      if (
+        depth > 8 ||
+        !expression ||
+        value.type.kind !== 'integer' ||
+        leaf.type.kind !== 'integer' ||
+        value.type.bits < leaf.type.bits
+      )
+        return null;
+      if (
+        expression.kind === 'cast' &&
+        ['bitcast', 'zero_extend', 'sign_extend', 'truncate'].includes(expression.op)
+      )
+        return offset(expression.value, leaf, depth + 1);
+      if (expression.kind === 'extract' && expression.offset === 0)
+        return offset(expression.value, leaf, depth + 1);
+      if (expression.kind !== 'integer' || (expression.op !== 'add' && expression.op !== 'sub'))
+        return null;
+      const step = constant(expression.right);
+      if (step !== undefined) {
+        const base = offset(expression.left, leaf, depth + 1);
+        return base === null ? null : expression.op === 'add' ? base + step : base - step;
+      }
+      const first = constant(expression.left);
+      if (first === undefined || expression.op !== 'add') return null;
+      const base = offset(expression.right, leaf, depth + 1);
+      return base === null ? null : base + first;
+    };
+    const synthetic = new Map<string, Expression>();
+    const make = (suffix: string, type: DataType, expression: Expression): Value => {
+      const value = { id: `${control.id}#${suffix}`, type };
+      synthetic.set(value.id, expression);
+      return value;
+    };
+    type Restated = {
+      readonly copy: { readonly destination: Value; readonly source: Value };
+      readonly op: 'eq' | 'ne';
+      /** The restated left operand over the copy's destination, and the same over its source. */
+      readonly subject: Value;
+      readonly source: Value;
+      readonly bound: Value;
+      readonly scope: string;
+    };
+    const equality = (side: Value, other: Value, op: 'eq' | 'ne'): Restated | undefined => {
+      synthetic.clear();
+      const fixed = constant(other);
+      let operand = side;
+      // `zext v ==/!= K` with K < 2^|v| is `v ==/!= K`.
+      for (let i = 0; i < 16 && fixed !== undefined && this.inline.has(operand.id); i++) {
+        const cast = program.expressions.get(operand.id);
         if (
-          expression.kind === 'cast' &&
+          cast?.kind !== 'cast' ||
+          (cast.op !== 'bitcast' && cast.op !== 'zero_extend') ||
+          cast.value.type.kind !== 'integer' ||
+          fixed >= 1n << BigInt(cast.value.type.bits)
+        )
+          break;
+        operand = cast.value;
+      }
+      if (operand.type.kind !== 'integer') return undefined;
+      const width = operand.type.bits,
+        type = integer(width);
+      // operand = (leaf mod 2^width) + step, through inline casts and constant steps.
+      let leaf = operand,
+        step = 0n;
+      for (let i = 0; i < 16 && this.inline.has(leaf.id); i++) {
+        const expression = program.expressions.get(leaf.id);
+        let next: Value | undefined;
+        if (
+          expression?.kind === 'cast' &&
           ['bitcast', 'zero_extend', 'sign_extend', 'truncate'].includes(expression.op)
         )
-          return offset(expression.value, depth + 1);
-        if (expression.kind === 'extract' && expression.offset === 0)
-          return offset(expression.value, depth + 1);
-        if (expression.kind !== 'integer' || (expression.op !== 'add' && expression.op !== 'sub'))
-          return null;
-        const step = constant(expression.right);
-        if (step !== undefined) {
-          const base = offset(expression.left, depth + 1);
-          return base === null ? null : expression.op === 'add' ? base + step : base - step;
+          next = expression.value;
+        else if (expression?.kind === 'extract' && expression.offset === 0) next = expression.value;
+        else if (
+          expression?.kind === 'integer' &&
+          (expression.op === 'add' || expression.op === 'sub')
+        ) {
+          const right = constant(expression.right),
+            left = expression.op === 'add' ? constant(expression.left) : undefined;
+          if (right !== undefined) {
+            step += expression.op === 'add' ? right : -right;
+            next = expression.left;
+          } else if (left !== undefined) {
+            step += left;
+            next = expression.right;
+          }
         }
-        const first = constant(expression.left);
-        if (first === undefined || expression.op !== 'add') return null;
-        const base = offset(expression.right, depth + 1);
-        return base === null ? null : base + first;
+        if (!next || next.type.kind !== 'integer' || next.type.bits < width) return undefined;
+        leaf = next;
+      }
+      if (this.inline.has(leaf.id) || leaf.type.kind !== 'integer') return undefined;
+      const full = leaf.type.bits,
+        copy = copies.find((item) => key(item.destination) === key(leaf));
+      if (!copy || copy.destination.type.kind !== 'integer' || copy.destination.type.bits !== full)
+        return undefined;
+      const shift = offset(copy.source, leaf);
+      if (shift === null) return undefined;
+      const delta = BigInt.asUintN(width, shift - step),
+        x = width === full ? 'x' : `(x mod 2^${width})`,
+        tested = `${x}${step === 0n ? '' : ` + ${BigInt.asUintN(width, step)}`}`,
+        copied = `x <- x ${shift < 0n ? '-' : '+'} ${shift < 0n ? -shift : shift} (mod 2^${full})`;
+      let bound: Value, scope: string;
+      if (fixed !== undefined) {
+        const bits = BigInt.asUintN(width, fixed + delta);
+        bound = make('restated_bound', type, { kind: 'constant', bits });
+        scope = `test of ${tested} ==/!= ${fixed} restated after the repeat copy ${copied} as ${x} ==/!= ${bits}`;
+      } else {
+        // B prints the same after the repeat copies: they write none of its variables.
+        const written = new Set(copies.map((item) => key(item.destination)));
+        if (
+          other.type.kind !== 'integer' ||
+          other.type.bits !== width ||
+          this.leafIds(other).some(
+            (id) => this.inlined.get(id)?.node.kind === 'load' || this.inlinedCalls.has(id),
+          ) ||
+          liveness.leaves(other).some((index) => written.has(key(liveness.values[index]!)))
+        )
+          return undefined;
+        let base = other,
+          total = delta;
+        const folded = this.inline.has(other.id) ? program.expressions.get(other.id) : undefined;
+        if (folded?.kind === 'integer' && (folded.op === 'add' || folded.op === 'sub')) {
+          const right = constant(folded.right),
+            left = folded.op === 'add' ? constant(folded.left) : undefined;
+          if (right !== undefined) {
+            base = folded.left;
+            total += folded.op === 'add' ? right : -right;
+          } else if (left !== undefined) {
+            base = folded.right;
+            total += left;
+          }
+        }
+        total = BigInt.asUintN(width, total);
+        const negative = total >= 1n << BigInt(width - 1),
+          magnitude = negative ? (1n << BigInt(width)) - total : total;
+        bound =
+          total === 0n
+            ? base
+            : make('restated_bound', type, {
+                kind: 'integer',
+                op: negative ? 'sub' : 'add',
+                left: base,
+                right: make('restated_step', type, { kind: 'constant', bits: magnitude }),
+              });
+        scope = `test of ${tested} ==/!= B, an expression without inline loads or calls over variables the repeat copies do not write, restated after the repeat copy ${copied} as ${x} ==/!= B + ${delta} (mod 2^${width})${base === other ? '' : ', folded into B = y ± m'}`;
+      }
+      const narrow = (value: Value, suffix: string): Value =>
+        width === full ? value : make(suffix, type, { kind: 'cast', op: 'truncate', value });
+      return {
+        copy,
+        op,
+        subject: narrow(copy.destination, 'restated_subject'),
+        source: narrow(copy.source, 'restated_source'),
+        bound,
+        scope,
       };
-      const shift = offset(copy.source, 0);
-      if (shift === null) return false;
-      restatedOp = op;
-      bits = BigInt.asUintN(width, bound + shift);
-      scope = `test of x ==/!= ${bound} restated after the repeat copy x <- x ${shift < 0n ? '-' : '+'} ${shift < 0n ? -shift : shift} (mod 2^${width}) as x ==/!= ${bits}`;
-    } else {
+    };
+    const range = (): Restated | undefined => {
+      const right = constant(original.right),
+        fixed = right ?? constant(original.left);
+      if (fixed === undefined) return undefined;
+      // The predicate with the variable on its left.
+      const op =
+        right !== undefined
+          ? original.op
+          : original.op === 'ult'
+            ? 'ugt'
+            : original.op === 'ule'
+              ? 'uge'
+              : original.op === 'ugt'
+                ? 'ult'
+                : original.op === 'uge'
+                  ? 'ule'
+                  : original.op;
+      if (op !== 'ult' && op !== 'ule' && op !== 'ugt' && op !== 'uge') return undefined;
+      let leaf = right === undefined ? original.right : original.left;
+      for (let i = 0; i < 16 && this.inline.has(leaf.id); i++) {
+        const cast = program.expressions.get(leaf.id);
+        if (cast?.kind !== 'cast' || (cast.op !== 'zero_extend' && cast.op !== 'bitcast'))
+          return undefined;
+        leaf = cast.value;
+      }
+      if (this.inline.has(leaf.id) || leaf.type.kind !== 'integer') return undefined;
+      const width = leaf.type.bits;
+      if (fixed >= 1n << BigInt(width)) return undefined;
+      const copy = copies.find((item) => key(item.destination) === key(leaf));
+      if (!copy || copy.destination.type.kind !== 'integer' || copy.destination.type.bits !== width)
+        return undefined;
       const uncast = (value: Value): Value => {
         for (let i = 0; i < 16; i++) {
           const cast = program.expressions.get(value.id);
@@ -8513,49 +8653,59 @@ export class Renderer {
         count <= 0n ||
         count >= BigInt(width)
       )
-        return false;
+        return undefined;
       // x >> c == 0 iff x <u 2^c (an arithmetic shift too: 2^c <= 2^(width-1)).
       const limit = 1n << count,
         below = op === 'ult' || op === 'ule';
-      if (bound !== (op === 'ult' || op === 'uge' ? limit : limit - 1n)) return false;
-      restatedOp = below ? 'eq' : 'ne';
-      bits = 0n;
-      scope = `unsigned test x ${below ? '<' : '>='} 2^${count} restated after the repeat copy x <- x >> ${count} (${shifted.op}, width ${width}) as x ${below ? '==' : '!='} 0`;
-    }
-    const restated: Value = { id: `${control.id}#restated_bound`, type: copy.destination.type };
-    const original = compare,
-      subject = tested;
+      if (fixed !== (op === 'ult' || op === 'uge' ? limit : limit - 1n)) return undefined;
+      synthetic.clear();
+      return {
+        copy,
+        op: below ? 'eq' : 'ne',
+        subject: copy.destination,
+        source: copy.source,
+        bound: make('restated_bound', copy.destination.type, { kind: 'constant', bits: 0n }),
+        scope: `unsigned test x ${below ? '<' : '>='} 2^${count} restated after the repeat copy x <- x >> ${count} (${shifted.op}, width ${width}) as x ${below ? '==' : '!='} 0`,
+      };
+    };
+    const op = original.op;
+    const restated =
+      op === 'eq' || op === 'ne'
+        ? (equality(original.left, original.right, op) ??
+          equality(original.right, original.left, op))
+        : range();
+    if (!restated) return false;
     const expressions = new Map(program.expressions);
-    expressions.set(restated.id, { kind: 'constant', bits });
+    for (const [id, expression] of synthetic) expressions.set(id, expression);
     const record = this.localValidation.allowance.exhausted
       ? undefined
       : this.localValidation.check(
           'bitvector',
-          subject.id,
+          tested.id,
           'do-while test restated over its repeat copy result; not whole-function equivalence',
           () =>
             validateBitvectorCandidate(
-              subject,
+              tested,
               original,
-              { kind: 'compare', op: restatedOp, left: copy.source, right: restated },
+              { kind: 'compare', op: restated.op, left: restated.source, right: restated.bound },
               expressions,
               this.localValidation.allowance,
             ),
         );
     if (
       record?.status === 'rejected' ||
-      !this.localValidation.presentation('loop_test_restatement', control.id, scope, [
+      !this.localValidation.presentation('loop_test_restatement', control.id, restated.scope, [
         tested.id,
-        copy.destination.id,
+        restated.copy.destination.id,
       ])
     )
       return false;
-    this.synthetic.set(restated.id, { kind: 'constant', bits });
+    for (const [id, expression] of synthetic) this.synthetic.set(id, expression);
     this.rebased.set(control.id, {
       kind: 'compare',
-      op: restatedOp,
-      left: copy.destination,
-      right: restated,
+      op: restated.op,
+      left: restated.subject,
+      right: restated.bound,
     });
     return true;
   }
