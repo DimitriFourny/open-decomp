@@ -69,6 +69,11 @@ const ENVIRONMENT_CASTS: Partial<Record<CastOp, true>> = {
   float_convert: true,
 };
 
+/** Statements and predecessor hops scanned back from a reload for the access
+ * that proves it cannot fault: the proving access is usually a few statements
+ * earlier, and the bound keeps the scan's work linear in the reloads. */
+const RELOAD_REACH = 64;
+
 /** Binary operations cheap enough to repeat at their reader (with a constant operand). */
 const REPEATABLE_OPERATIONS: Partial<Record<IntegerOp, true>> = {
   add: true,
@@ -546,7 +551,8 @@ export function planSourceInlining(
     };
     const entry = program.function.entry;
     let incoming: Map<string, string[]> | undefined;
-    /** Whether a printed access of `[address, address + bytes)` reaches `position` of `block`. */
+    /** Whether a printed access of `[address, address + bytes)` reaches `position`
+     * of `block` within the nearest RELOAD_REACH statements. */
     const accessed = (block: BlockRegion, position: number, address: string, bytes: number) => {
       if (!incoming) {
         incoming = new Map([[entry, ['']]]);
@@ -555,12 +561,14 @@ export function planSourceInlining(
             incoming.set(successor, [...(incoming.get(successor) ?? []), from.id]);
       }
       let current = block,
-        end = position;
-      for (let hops = 0; hops < 32; hops++) {
+        end = position,
+        remaining = RELOAD_REACH;
+      for (;;) {
         for (let p = end - 1; p >= 0; p--) {
-          context.checkpoint(1);
+          if (--remaining < 0) return false;
           const prior = current.statements[p]!;
           if (prior.kind === 'assign' || prior.kind === 'read_register') continue;
+          context.checkpoint(1);
           if (prior.kind !== 'load' && prior.kind !== 'store') return false;
           if (prior.access.volatile) return false;
           if (!program.retained.has(prior.id) || source.locals.has(prior.id)) continue;
@@ -581,13 +589,13 @@ export function planSourceInlining(
         if (
           !previous ||
           omitted.has(previous.id) ||
-          !['jump', 'if', 'switch'].includes(previous.control.kind)
+          !['jump', 'if', 'switch'].includes(previous.control.kind) ||
+          --remaining < 0
         )
           return false;
         current = previous;
         end = current.statements.length;
       }
-      return false;
     };
     for (const { block, position, node } of candidates) {
       if (

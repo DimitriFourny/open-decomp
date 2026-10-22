@@ -320,10 +320,12 @@ nonvolatile loads (never a store, call, fence, unknown effect or volatile access
 anchored at each reader): a printed nonvolatile access to the same structural
 address (identical pure inline expressions over the same SSA leaves) of at least
 its width reaches it through its block and single-predecessor blocks with only
-assignments, register reads and nonvolatile loads/stores in between; an access
-printed inside a later reader does not count. `-O0` `matrix_alias` (Mach-O, ELF,
-PE) prints `*address = *address + arg2; *address_1 = *address_1 ^ *address;
-return *address + *address_1;` instead of two reload temporaries. Both explicit
+assignments, register reads and nonvolatile loads/stores in between (within 64
+statements and hops back); an access printed inside a later reader does not
+count. `-O0` `matrix_alias` (Mach-O, ELF, PE) prints `*address = *address +
+arg2; *address_1 = *address_1 ^ *address; return *address + *address_1;`
+instead of two reload temporaries; on the odbench full tier five texts change
+(those three, `vdbeMemAddTerminator`, `fts5FlushSecureDelete`). Both explicit
 addresses and symbolic-table indices
 participate in use/liveness accounting. `single_use_inlining` records one
 function-level presentation inference, and original load/definition identities
