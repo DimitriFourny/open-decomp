@@ -21,6 +21,7 @@ const INTEGRATION = [
   'test/reconstruction/image-types-source.test.ts',
   'test/reconstruction/integer-conversion-source.test.ts',
   'test/reconstruction/memory-shapes-source.test.ts',
+  'test/reconstruction/recursive-result-source.test.ts',
   'test/reconstruction/source-names-executable.test.ts',
   'test/reconstruction/source-names.test.ts',
   'test/reconstruction/sqlite-cell-constants.test.ts',
