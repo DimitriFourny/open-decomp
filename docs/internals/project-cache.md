@@ -70,7 +70,7 @@ flowchart TD
 
 ### 4. Callee-unit reuse
 
-Decompiling prepares many callee bodies ([calls-abi](calls-abi.md#algorithm)), the dominant cold cost. Two tiers: in-process per loaded image (size-bounded LRU), then `native_summaries`. Key: revision, image, target, versions, ABI/lifter, supplied native types. Only units that are not `limited`, carry no reason and have a complete call analysis are kept (`reusablePreparation`); the stored row requires `limited: false` (summary format 4). A row is a _candidate_: digest, identity and a replay of its recorded dependency reads must pass. Oversized units are not persisted (encode+load exceeds preparing). Writes batch into the next publication or request end; a write failure never fails a request.
+Decompiling prepares many callee bodies ([calls-abi](calls-abi.md#algorithm)), the dominant cold cost. Two tiers: in-process per loaded image (size-bounded LRU), then `native_summaries`. Key: revision, image, target, versions, ABI/lifter, supplied native types. Only units that are not `limited`, carry no reason and have a complete call analysis are kept (`reusablePreparation`); the stored row requires `limited: false` (summary format 4). A row is a _candidate_: digest, identity and a replay of its recorded dependency reads must pass. Oversized units are not persisted (encode+load exceeds preparing). Writes are deferred, batched and off the request path (flush points in §7); a write failure never fails a request.
 
 ### 5. Budgets and deterministic work accounting
 
@@ -87,11 +87,25 @@ Decompiling prepares many callee bodies ([calls-abi](calls-abi.md#algorithm)), t
 
 Check `expected_revision` → validate edits against the snapshot (subjects, evidence, types, ABI) → derive assertion evidence → one synchronous transaction commits annotations, evidence and completed job; the response is validated in the commit hook, so failure rolls everything back. Stale → `stale_revision`; no merge, no retry.
 
+### 7. Durability and flush points
+
+What is durable when, in the order a decompile request meets it:
+
+| Point                                                 | Durable how                                                                                                                                                  | Acknowledged before?                 |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------ |
+| Admission (`queued` job)                              | SQLite commit, `synchronous=FULL`                                                                                                                            | yes: the child acknowledges after it |
+| Publication (artifact file, indexes, `completed` job) | Artifact file `fsync` then rename, then one `synchronous=FULL` commit of the rows and the job                                                                | yes: the response is sent after it   |
+| Native callee summaries                               | Queued in memory; written in a separate transaction at `synchronous=NORMAL` (no fsync; WAL frames reach disk with the next full commit, checkpoint or close) | no: derived data                     |
+
+- **Flush points of summaries.** (1) Idle: the worker schedules a write 200 ms after its last command finished (cancelled by the next command; 8 rows per slice, so a command arriving meanwhile waits for one slice, and a slice is skipped while a command is pending). (2) Queue bound: when the queued rows' reported retained size exceeds 65,536 (a quarter of the process tier's bound; larger bounds kept about 0.5 GB more resident in a SQLite run) the queueing call flushes. (3) Close. Nothing flushes in a request's commit or before its response. A request's rows become readable at its end (`releaseNativeSummaries`), served from the queue exactly as the written row would be.
+- **Crash after acknowledge.** Killing the child (SIGKILL) after a response loses only queued, unwritten summaries: the job is `completed`, its artifact is readable and hash-valid, the database passes `integrity_check`, and a later request prepares the missing units again (`test/project/store/native-summaries.test.ts`, `test/workers/lifecycle.test.ts`). An OS crash can additionally lose summary rows written at NORMAL since the last full commit; every row is digest-checked on use.
+- **What is not deferred, and why.** The artifact `fsync` and the `FULL` commit of publication stay on the request path (measured about 6 ms and 7 ms per publication, under 1% of a SQLite decompile). The completed job is job state: "durable before acknowledged" covers it, and deferring either would let an acknowledged result, handle or `completed` job vanish after a power loss. Only data a request can recompute is deferred.
+
 ## Design decisions
 
 - **Trust split.** Host never deserializes target bytes; the child accepts no SQL, module names or target-derived paths. Fault containment, not a sandbox.
 - **Immutable snapshots.** Old reads stay valid; mutations are compare-and-swap on the global counter; one exclusive writer per project.
-- **Durable before acknowledged.** A lost connection leaves an inspectable job, not an orphan; the job row is authoritative.
+- **Durable before acknowledged.** A lost connection leaves an inspectable job, not an orphan; the job row is authoritative. Job state (admission and publication) is fsynced before its acknowledgement; only derived caches are written later (§7).
 - **Existence is not authority.** Artifacts, summaries and candidates are verified (hash, identity, readset) on every use; damage → recompute or `invalid_input`.
 - **Budget in the key.** Sub-budget decisions make small-budget and large-budget results differ.
 - **Refusal over guessing:** no stale-batch merge, no retry of interrupted mutations; settings (flag/option/request > file > default) are never read implicitly and an invalid file is an error.
