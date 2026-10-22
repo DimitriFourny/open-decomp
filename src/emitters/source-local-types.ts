@@ -701,16 +701,10 @@ export function planIntegerSpellings(host: IntegerSpellingHost): Map<string, Int
       if (widened(copy.source) && admit(copy.destination)) fixed.add(copy.destination.id);
       join(copy.destination, resolve(copy.source));
     }
-  // A return or tail block entered by several edges may print once per edge
-  // (return tail duplication, decided after this plan): its reads count as often.
-  const home = new Map<string, string>(),
-    entries = new Map<string, number>();
+  const entries = new Map<string, number>();
   for (const block of program.blocks.values()) {
     context.checkpoint(1);
-    for (const value of block.parameters) home.set(value.id, block.id);
     for (const node of block.statements) {
-      if ('result' in node) home.set(node.result.id, block.id);
-      if (node.kind === 'call') for (const value of node.results) home.set(value.id, block.id);
       if (node.kind !== 'assign' || !program.retained.has(node.id)) continue;
       const expression = program.expressions.get(node.result.id) ?? node.expression;
       if (expression.kind !== 'cast') continue;
@@ -737,15 +731,84 @@ export function planIntegerSpellings(host: IntegerSpellingHost): Map<string, Int
     group.push(id);
     groups.set(root, group);
   }
-  const repeats = (value: Value): number => {
-    const block = program.blocks.get(home.get(value.id) ?? '');
-    return block && (block.control.kind === 'return' || program.tails.has(block.control.id))
-      ? Math.max(1, entries.get(block.id) ?? 1)
-      : 1;
+  // A return or tail block entered by several edges may print once per edge
+  // (return tail duplication, decided after this plan): each read it prints,
+  // directly or inside an inline expression, prints that many more times.
+  const extra = new Map<string, number>();
+  const repeat = (value: Value, times: number, depth = 0): void => {
+    context.checkpoint(1);
+    extra.set(value.id, (extra.get(value.id) ?? 0) + times);
+    const expression = host.inline.has(value.id) ? program.expressions.get(value.id) : undefined;
+    if (expression && depth < 16)
+      for (const operand of expressionOperands(expression))
+        if (host.inline.has(operand.id)) repeat(operand, times, depth + 1);
   };
+  // Tails as planLayout copies them: a return, indirect or trap block, or a
+  // chain of at most four jumps ending in one. Every edge into a tail block
+  // prints it once more, and so does every print of a tail block jumping to it.
+  const jumps = new Map<string, string[]>();
+  for (const block of program.blocks.values())
+    if (block.control.kind === 'jump') {
+      const list = jumps.get(block.control.transfer.target) ?? [];
+      list.push(block.id);
+      jumps.set(block.control.transfer.target, list);
+    }
+  const tail = (id: string, depth = 0): boolean => {
+    const control = program.blocks.get(id)?.control;
+    return (
+      depth < 4 &&
+      control !== undefined &&
+      (control.kind === 'return' ||
+        control.kind === 'indirect' ||
+        control.kind === 'trap' ||
+        (control.kind === 'jump' && tail(control.transfer.target, depth + 1)))
+    );
+  };
+  const prints = (id: string, depth = 0): number => {
+    const inside = depth < 4 ? (jumps.get(id) ?? []).filter((other) => tail(other)) : [];
+    return (
+      (entries.get(id) ?? 0) -
+      inside.length +
+      inside.reduce((sum, other) => sum + prints(other, depth + 1), 0)
+    );
+  };
+  for (const block of program.blocks.values()) {
+    context.checkpoint(1);
+    const control = block.control;
+    if (!tail(block.id)) continue;
+    const times = prints(block.id) - 1;
+    if (times < 1) continue;
+    for (const node of block.statements) {
+      if (!program.retained.has(node.id)) continue;
+      const reads =
+        node.kind === 'store'
+          ? [node.address, node.value]
+          : node.kind === 'load'
+            ? [node.address]
+            : node.kind === 'write_register'
+              ? [node.value]
+              : node.kind === 'call'
+                ? [
+                    ...(program.calls.get(node.id)?.arguments ?? node.arguments),
+                    ...(program.calls.get(node.id)?.inputs ?? node.register_inputs).map(
+                      (binding) => binding.value,
+                    ),
+                  ]
+                : node.kind === 'assign'
+                  ? expressionOperands(program.expressions.get(node.result.id) ?? node.expression)
+                  : [];
+      for (const value of reads) repeat(value, times);
+    }
+    if (control.kind === 'return')
+      for (const value of program.returns.get(control.id)?.results ?? control.values)
+        repeat(value, times);
+    for (const value of program.tails.get(control.id)?.boundary.arguments ?? [])
+      repeat(value, times);
+  }
   const weight = (value: Value): number =>
-    (host.inline.has(value.id) ? Math.max(1, program.use_counts.get(value.id) ?? 1) : 1) *
-    repeats(value);
+    host.inline.has(value.id)
+      ? Math.max(1, program.use_counts.get(value.id) ?? 1) + (extra.get(value.id) ?? 0)
+      : 1;
   /** Reads of `value` that are neither a live printed expression nor a copy
    * into the set: statements, call arguments, returns, other copies. */
   const others = (value: Value, members: ReadonlySet<string>): number => {
@@ -771,7 +834,9 @@ export function planIntegerSpellings(host: IntegerSpellingHost): Map<string, Int
       cost.veto = true;
       return;
     }
-    cost.signed += others(value, members) * scale;
+    cost.signed +=
+      (others(value, members) + (host.inline.has(value.id) ? 0 : (extra.get(value.id) ?? 0))) *
+      scale;
     for (const { value: user, expression } of users.get(value.id) ?? []) {
       const times = scale * weight(user);
       if (identity(user)?.id === value.id) {
