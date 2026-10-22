@@ -7786,7 +7786,7 @@ export class Renderer {
       if (reloads.some((site) => candidates.has(site.node.result.id)))
         this.localValidation.requireAbi(
           'nonfaulting_reload',
-          reloads.slice(0, 64).map(({ node }) => node.id),
+          [...new Set(reloads.map(({ anchor }) => anchor))].slice(0, 64),
           'A successful access to [a, a+w) implies that a later read of it does not fault, absent an intervening call, unknown effect or volatile access: no other agent unmaps, protects or remaps those bytes in between. Each moved reload keeps its address, width and value; the checked view keeps every load at its original position.',
         );
       for (const [id, site] of candidates) {
