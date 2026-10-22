@@ -808,7 +808,8 @@ export function selectSourcePrimaryResult(
           )
             return undefined;
         if (walked.leaves.length) top = covered;
-        else literal.push({ offset: cell.register.offset_bits, zero: walked.constants.every(zero) });
+        else
+          literal.push({ offset: cell.register.offset_bits, zero: walked.constants.every(zero) });
       }
       if (!cells.length || covered !== cells[0]!.register.root_width_bits) return undefined;
       if (!top) continue;
