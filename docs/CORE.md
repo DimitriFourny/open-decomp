@@ -1028,7 +1028,7 @@ than a size). Tables up to 512 bytes print in full; larger ones a 256-byte prefi
 `/* ... K more */`; an unbounded index over an unsized object shows its first 16 elements
 (`extent not established`). Writable storage, storage with a relocation slot and
 a per-function budget of 1536 content bytes keep the `extern` view. Synthesized
-struct members are `field_0xOFFSET` and gaps `pad_0xOFFSET` (hexadecimal, never `f_36`).
+struct members are `field_0xOFFSET` and gaps `pad_0xOFFSET`, printed in external declarations and `types.h` (hexadecimal, never `f_36`).
 
 Source-only `constant_pool_literal` replaces exact-width, aligned, nonvolatile
 scalar reads when their constant address names available bytes in one read-only,
@@ -1128,7 +1128,7 @@ Source-view locals take their printed pointer type from every definition and use
 
 Synthetic source structure views use deterministic `struct_N` names, unified by
 observed member types and offsets within the function. Their C typedefs expose
-`f_<hex offset>` members and explicit byte gaps, with a `/* partial; N fns */` note (`partial`: only the members the text uses; `N fns`: merged from that many functions; conflicts are listed): a function declares only the members its text accesses (byte gaps keep every offset; a structure the text never accesses stays an incomplete typedef), the image-wide layout lives in the types view / `types.h`. `observed_struct_layout` records nonoverlap and exact
+`f_<hex offset>` members and explicit byte gaps, with a `/* partial; N fns */` note (`partial`: only the members the text uses; `N fns`: merged from that many functions; conflicts are listed): a function declares only the members its text accesses (the inline body omits the byte gaps: a member named `field_0xOFFSET` states its own offset, recorded as the `compact_struct_members` presentation rule with the omitted gaps; the access-stride comment states the element size instead of a trailing pad; an Objective-C ivar, whose name carries no offset, keeps its pad; `structures: external` declarations and `types.h` keep every gap as a `pad_0xOFFSET` member; a structure the text never accesses stays an incomplete typedef), the image-wide layout lives in the types view / `types.h`. `observed_struct_layout` records nonoverlap and exact
 width checks and a target-layout ABI requirement; overlapping, unsupported or
 budget-exhausted layouts stay opaque. Nested pointer types retain their complete
 declaration closure. Proven scalar array strides produce array members without
