@@ -56,9 +56,23 @@ function formalInput(
   return emittedFormals(emission).find((formal) => formal.name === name);
 }
 
+/** S4: incoming bytes kept as memory print as the `stack_args` struct formal,
+ * the address of the first incoming byte; no `entry_sp` formal remains. */
+function incomingObjectInput(
+  emission: Parameters<typeof execute>[0],
+  abi: AbiProfile,
+  entry: bigint,
+): Map<string, bigint> {
+  assert.doesNotMatch(emission.text, /\bentry_sp\b/, emission.text);
+  assert.ok(emission.local_validation?.some((record) => record.rule === 'incoming_object'));
+  const input = formalInput(emission, 'stack_args');
+  assert.ok(input, emission.text);
+  return new Map([[input.statement_id, entry + abi.stack_return_address_bytes]]);
+}
+
 for (const { abi, incoming } of targets)
   for (const framed of [false, true])
-    test(`${abi.id}: ${framed ? 'framed alias' : 'frameless'} unclassified incoming bytes remain entry storage`, () => {
+    test(`${abi.id}: ${framed ? 'framed alias' : 'frameless'} unclassified incoming bytes are incoming-object memory`, () => {
       const b = builder(`incoming-packed-${abi.id}-${framed}`),
         block = b.block('entry');
       const entry = block.readRegister(abi.stack_pointer);
@@ -78,13 +92,11 @@ for (const { abi, incoming } of targets)
       for (const language of ['c-like', 'python-like'] as const) {
         const output = emit(ir, extra, language);
         assert.doesNotMatch(output.emission.text, /\bstack_frame\b/);
-        const input = formalInput(output.emission, 'entry_sp');
-        assert.ok(input, output.emission.text);
         const memory = new Map<bigint, number>();
         bytes(memory, 0x9000n + incoming + 1n, 0x89abcdefn, 4);
         const observation = execute(
           output.emission,
-          new Map([[input.statement_id, 0x9000n]]),
+          incomingObjectInput(output.emission, abi, 0x9000n),
           memory,
         );
         assert.deepEqual(observation.values, [0x89abcdefn]);
@@ -112,7 +124,7 @@ for (const { abi } of targets.filter(({ abi }) => abi.stack_return_address_bytes
     }
   });
 
-test('Windows home space is entry-backed storage, not a fifth argument or a private local', () => {
+test('Windows home space is incoming-object memory, not a fifth argument or a private local', () => {
   const b = builder('windows-home-space'),
     block = b.block('entry');
   const address = block.int(
@@ -125,12 +137,11 @@ test('Windows home space is entry-backed storage, not a fifth argument or a priv
   for (const language of ['c-like', 'python-like'] as const) {
     const output = emit(ir, extra, language);
     assert.doesNotMatch(output.emission.text, /\bstack_frame\b/);
-    const input = formalInput(output.emission, 'entry_sp');
-    assert.ok(input, output.emission.text);
     const memory = new Map<bigint, number>();
     bytes(memory, 0x9008n, 0xfedcba9876543210n, 8);
     assert.deepEqual(
-      execute(output.emission, new Map([[input.statement_id, 0x9000n]]), memory).values,
+      execute(output.emission, incomingObjectInput(output.emission, windowsX64Abi, 0x9000n), memory)
+        .values,
       [0xfedcba9876543210n],
     );
   }
@@ -152,13 +163,11 @@ for (const { abi, incoming } of targets)
     for (const language of ['c-like', 'python-like'] as const) {
       const output = emit(ir, extra, language);
       assert.doesNotMatch(output.emission.text, /\bstack_frame\b/);
-      const input = formalInput(output.emission, 'entry_sp');
-      assert.ok(input, output.emission.text);
       const memory = new Map<bigint, number>();
       bytes(memory, 0x9000n + incoming, 0n, 8);
       const observation = execute(
         output.emission,
-        new Map([[input.statement_id, 0x9000n]]),
+        incomingObjectInput(output.emission, abi, 0x9000n),
         memory,
       );
       assert.deepEqual(observation.values, [0x12345678n]);
