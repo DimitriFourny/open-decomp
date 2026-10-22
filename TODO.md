@@ -166,7 +166,7 @@ Files that several items touch:
 
 ### C1: No edge copy into a proven stack-address phi
 
-- [ ] **Problem.** `sqlite3CodeRowTrigger` (`0x1000d41a8`) fails in both views with "Reconstruction invariant failed: a parallel edge copy has an invalid destination or width". `isDate` hits the same failure once A1 lands.
+- [x] **Problem.** `sqlite3CodeRowTrigger` (`0x1000d41a8`) fails in both views with "Reconstruction invariant failed: a parallel edge copy has an invalid destination or width". `isDate` hits the same failure once A1 lands.
   - **Root cause:**
     - `planSourceStack` proves that a loop phi is one frame address on every edge (`source-stack.ts:659-667`); here x28 carries `x29 − 0xb0`.
     - `reconstructView` therefore marks every `sourceStack.addresses` id inline (`src/reconstruction/index.ts:1043`).

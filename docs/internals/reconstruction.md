@@ -9,7 +9,7 @@ Turns one structured, immutable SSA function plus recovered types and native sou
 - **Input** (`EmissionInput`): region tree of SSA blocks with parallel-copy transfers ([SSA](ssa-values.md#data-model)), `TypeRecoveryResult` ([types](types-metadata.md#data-model)), and for native code `SourceEvidence`: ABI profile, observed/proven callee interfaces, address facts, caller result demands, variadic signatures, opt-in likely guesses ([calls](calls-abi.md#data-model)). Without evidence only declared-or-physical boundary projection runs (no source plan).
 - **`Reconstruction`**: a view keyed by original SSA ids.
   - rewritten pure definitions (operands stay original ids);
-  - demand: live values, retained statements, use counts, live edge copies;
+  - demand: live values, retained statements, use counts, live edge copies (no copy into a forced-inline alias or into a proven stack-address phi: that phi prints as its frame address and every incoming value has the same offset);
   - inline set: definitions the renderer may expand;
   - origins: each original statement → the printed statement that consumes it;
   - boundary projections per call/return/tail: `source` (declared), `inferred` (observed) or `physical` (registers), with argument-list completeness, out-of-line exit scratch, likely-arity mark;

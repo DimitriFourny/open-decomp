@@ -993,3 +993,110 @@ for (const abi of targets)
         for (const row of events) assert.deepEqual(row, events[0]);
       }
     });
+
+/** A loop carries `entry SP - 0xb0` in a register (a proven stack-address phi
+ * that is one frame address on every edge). One back edge rewrites the register
+ * with the address recomputed from the live SP, a different SSA value. The loop
+ * loads and stores through it: each round adds the stored word to a running
+ * total and stores `total + 1` back. */
+function rematerializedFrameAddress(abi: AbiProfile) {
+  const [count, carried, total] = [1, 2, 3].map((index) => {
+    const location = abi.classifyCall({
+      returns: { kind: 'void' },
+      parameters: Array.from({ length: 4 }, () => ({
+        kind: 'integer' as const,
+        bits: 64,
+        signed: false,
+      })),
+      variadic: false,
+      fixed_parameter_count: 4,
+    }).parameters[index - 1]!.locations[0]!;
+    if (location.kind !== 'register') throw new Error('Expected register argument');
+    return location.register;
+  }) as [RegisterDescriptor, RegisterDescriptor, RegisterDescriptor];
+  const b = builder(`stack-address-phi-${abi.id}`),
+    entry = b.block('entry'),
+    loop = b.block('loop'),
+    again = b.block('again'),
+    redo = b.block('redo'),
+    exit = b.block('exit');
+  const frame = entry.int(
+    'sub',
+    entry.readRegister(abi.stack_pointer),
+    entry.constant(u64, 0xc0n),
+  );
+  entry.writeRegister(abi.stack_pointer, frame);
+  const address = entry.int('add', frame, entry.constant(u64, 0x10n));
+  entry.store(address, entry.constant(u64, 5n));
+  entry.writeRegister(carried, address);
+  entry.writeRegister(total, entry.constant(u64, 0n));
+  entry.jump(loop);
+  const pointer = loop.readRegister(carried);
+  const sum = loop.int('add', loop.readRegister(total), loop.load(u64, pointer));
+  loop.writeRegister(total, sum);
+  loop.store(pointer, loop.int('add', sum, loop.constant(u64, 1n)));
+  const remaining = loop.int('sub', loop.readRegister(count), loop.constant(u64, 1n));
+  loop.writeRegister(count, remaining);
+  loop.branch(
+    loop.compare('ne', remaining, loop.constant(u64, 0n)),
+    loop.edge(again),
+    loop.edge(exit),
+  );
+  again.branch(
+    again.compare(
+      'ne',
+      again.int('and', again.readRegister(count), again.constant(u64, 1n)),
+      again.constant(u64, 0n),
+    ),
+    again.edge(redo),
+    again.edge(loop),
+  );
+  redo.writeRegister(
+    carried,
+    redo.int('add', redo.readRegister(abi.stack_pointer), redo.constant(u64, 0x10n)),
+  );
+  redo.jump(loop);
+  exit.return([
+    exit.int('add', exit.readRegister(total), exit.load(u64, exit.readRegister(carried))),
+  ]);
+  return prepare(b.finish(entry, [u64]), abi);
+}
+
+for (const abi of targets)
+  test(`${abi.id}: a stack-address phi re-materialized on one edge takes no edge copy`, () => {
+    const fixture = rematerializedFrameAddress(abi);
+    const entrySp = 0x8000n;
+    for (const view of ['source', 'checked'] as const) {
+      // A proven phi that prints as its frame address never receives an edge copy.
+      const program = fixture.view(view);
+      assert.ok(program.local_validation_session, view);
+      for (const language of ['c-like', 'python-like'] as const) {
+        const output = emit(fixture.ir, fixture.extra, language, view).emission;
+        assert.ok(output.text.length > 0, `${view} ${language}`);
+        for (const rounds of [1, 2, 3, 4, 5]) {
+          let stored = 5n,
+            running = 0n;
+          for (let round = 0; round < rounds; round++) {
+            running += stored;
+            stored = running + 1n;
+          }
+          const formals = emittedFormals(output);
+          const inputs = new Map(
+            formals.map((formal) => [
+              formal.statement_id,
+              formal.name === 'entry_sp' ? entrySp : BigInt(rounds),
+            ]),
+          );
+          const memory = new Map<bigint, number>();
+          for (let address = entrySp - 0x100n; address < entrySp + 0x20n; address++)
+            memory.set(address, 0);
+          const observation = execute(output, inputs, memory);
+          assert.deepEqual(
+            observation.values,
+            [BigInt.asUintN(64, running + stored)],
+            `${view} ${language} rounds=${rounds}\n${output.text}`,
+          );
+        }
+      }
+    }
+  });
