@@ -663,36 +663,48 @@ export function planSourceInlining(
   const displaced = new Map<string, InlineInstruction>(),
     definer = new Map<string, string>(),
     rematerialized = new Set<string>();
+  const baseOf = (node: InlineInstruction): Value | undefined =>
+    displacedBase(
+      program.expressions.get(node.result.id) ??
+        (node.kind === 'assign' ? node.expression : undefined),
+    );
   for (const { node } of repeatable) {
     const row = uses.get(node.result.id)!;
-    if (
-      !result.has(node.result.id) &&
-      row.count <= 8 &&
-      row.all.length <= 8 &&
-      displacedBase(program.expressions.get(node.result.id))
-    )
+    if (!result.has(node.result.id) && row.count <= 8 && row.all.length <= 8 && baseOf(node)) {
       rematerialized.add(node.id);
+      displaced.set(node.id, node);
+    }
   }
-  for (const [id, site] of result)
-    if (
-      site.node.kind === 'assign' &&
-      !site.local &&
-      !shared.has(id) &&
-      displacedBase(program.expressions.get(id))
-    )
-      displaced.set(site.node.id, site.node);
-  for (const id of rematerialized) displaced.set(id, anchors.get(id)!);
+  // With the inlined `y ± k` definitions their displacements reach.
+  for (const pending = [...rematerialized]; pending.length;) {
+    context.checkpoint(1);
+    for (const use of uses.get(displaced.get(pending.pop()!)!.result.id)!.all) {
+      const consumer = use.offset ? anchors.get(use.anchor) : undefined,
+        site = consumer && result.get(consumer.result.id);
+      if (
+        consumer?.kind === 'assign' &&
+        site &&
+        !site.local &&
+        !shared.has(consumer.result.id) &&
+        !displaced.has(consumer.id)
+      ) {
+        displaced.set(consumer.id, consumer);
+        pending.push(consumer.id);
+      }
+    }
+  }
   for (const [id, node] of displaced) definer.set(node.result.id, id);
   const addressOnly = (id: string): boolean => {
     const node = displaced.get(id)!,
-      base = displacedBase(program.expressions.get(node.result.id))!;
+      base = baseOf(node);
     // The leaf is a printed variable, or another rematerialized definition.
     if (
-      rematerialized.has(id) &&
-      (program.inline.has(base.id) ||
-        result.has(base.id) ||
-        program.source?.stack_addresses.has(base.id)) &&
-      !rematerialized.has(definer.get(base.id) ?? '')
+      !base ||
+      (rematerialized.has(id) &&
+        (program.inline.has(base.id) ||
+          result.has(base.id) ||
+          program.source?.stack_addresses.has(base.id)) &&
+        !rematerialized.has(definer.get(base.id) ?? ''))
     )
       return false;
     return (uses.get(node.result.id)?.all ?? []).every(
@@ -709,7 +721,7 @@ export function planSourceInlining(
     const node = displaced.get(id)!;
     displaced.delete(id);
     rematerialized.delete(id);
-    const upstream = definer.get(displacedBase(program.expressions.get(node.result.id))!.id);
+    const upstream = definer.get(baseOf(node)?.id ?? '');
     if (upstream) pending.push(upstream);
     for (const use of uses.get(node.result.id)?.all ?? [])
       if (displaced.has(use.anchor)) pending.push(use.anchor);
