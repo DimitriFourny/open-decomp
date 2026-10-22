@@ -4558,13 +4558,16 @@ export class Renderer {
   }
 
   /** Shared assignment spelling for retained pure definitions and source loads.
-   * The target is always a declared variable: a pure definition of any other
-   * value prints nothing, and a load of one prints as a bare read. */
+   * Source view: the target is always a declared variable; a pure definition
+   * of any other value prints nothing, and a load of one prints as a bare
+   * read. The checked view keeps its own spelling. */
   private assignmentText(
     node: Extract<Instruction, { kind: 'assign' | 'load' }>,
     storage?: string,
   ): string {
-    const assigned = this.declaredVariable(node.result);
+    const assigned = this.sourceView
+      ? this.declaredVariable(node.result)
+      : node.kind === 'assign' || this.program.live.has(node.result.id);
     if (node.kind === 'assign') {
       const expression = this.program.expressions.get(node.result.id) ?? node.expression;
       if (this.noMove(node) || !assigned) return '';
