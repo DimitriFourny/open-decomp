@@ -1,5 +1,5 @@
 import type { OperationContext } from '../core/index.js';
-import { bitWidth, expressionOperands, type Value } from '../ir/index.js';
+import { bitWidth, expressionOperands, type Instruction, type Value } from '../ir/index.js';
 import type {
   BlockRegion,
   Control,
@@ -223,6 +223,30 @@ export class VariableLiveness {
     return leaves;
   }
 
+  /** The values a printed statement reads (its inline expressions unexpanded). */
+  operands(node: Instruction): Value[] {
+    const program = this.program,
+      reads: Value[] = [];
+    if (node.kind === 'assign')
+      reads.push(...expressionOperands(program.expressions.get(node.result.id) ?? node.expression));
+    else if (node.kind === 'write_register') reads.push(node.value);
+    else if (node.kind === 'load' || node.kind === 'store') {
+      if (!program.source?.locals.has(node.id)) reads.push(node.address);
+      if (node.kind === 'store') reads.push(node.value);
+      reads.push(...(this.alternateIndices.get(node.id) ?? []));
+    }
+    if (node.kind === 'call') {
+      const projection = program.calls.get(node.id);
+      reads.push(...(projection?.arguments ?? node.arguments));
+      for (const binding of projection?.inputs ?? node.register_inputs) reads.push(binding.value);
+      if (node.target.kind === 'indirect') reads.push(node.target.value);
+    }
+    if ('register_inputs' in node)
+      for (const binding of program.physical_inputs.get(node.id) ?? node.register_inputs)
+        reads.push(binding.value);
+    return reads;
+  }
+
   /** Ordered printed definitions/reads of one block, excluding its parameters. */
   events(block: BlockRegion): { readonly def: boolean; readonly ids: readonly number[] }[] {
     const program = this.program,
@@ -254,34 +278,16 @@ export class VariableLiveness {
         program.retained.has(node.id) &&
         !('result' in node && this.inlined.has(node.result.id))
       ) {
-        const reads: Value[] = [];
-        if (node.kind === 'assign')
-          reads.push(
-            ...expressionOperands(program.expressions.get(node.result.id) ?? node.expression),
-          );
-        else if (node.kind === 'write_register') reads.push(node.value);
-        else if (node.kind === 'load' || node.kind === 'store') {
-          if (!program.source?.locals.has(node.id)) reads.push(node.address);
-          if (node.kind === 'store') reads.push(node.value);
-          reads.push(...(this.alternateIndices.get(node.id) ?? []));
-        }
-        if (node.kind === 'call') {
-          const projection = program.calls.get(node.id);
-          reads.push(...(projection?.arguments ?? node.arguments));
-          for (const binding of projection?.inputs ?? node.register_inputs)
-            reads.push(binding.value);
-          if (node.target.kind === 'indirect') reads.push(node.target.value);
-        }
-        if ('register_inputs' in node)
-          for (const binding of program.physical_inputs.get(node.id) ?? node.register_inputs)
-            reads.push(binding.value);
-        use(reads);
+        use(this.operands(node));
         const writes: Value[] = [];
         if ('result' in node) writes.push(node.result);
         if (node.kind === 'call') writes.push(...(program.calls.get(node.id)?.results ?? []));
         if (node.kind === 'call') writes.push(...node.results);
         if ('register_outputs' in node)
           for (const binding of node.register_outputs) writes.push(binding.value);
+        if (node.kind === 'call' || node.kind === 'unknown_effect')
+          for (const binding of program.source?.register_outputs?.get(node.id) ?? [])
+            writes.push(binding.value);
         define(writes);
       }
       definitions(node.id);
@@ -1224,6 +1230,12 @@ export interface LoopFacts {
   readonly copyReads: (transfer: ParallelTransfer) => readonly string[];
   /** The block prints nothing before its control. */
   readonly silent: (block: BlockRegion) => boolean;
+  /** The block prints exactly one statement before its `if`, which that test
+   * holds (the renderer's comma operand: `(x = f(), x != 0)`, `(x = f()) != 0`). */
+  readonly comma: (block: BlockRegion) => boolean;
+  /** The block ends in a jump and prints exactly one statement, which the test
+   * of the block it alone enters holds: the id of that block. */
+  readonly carrier: (block: BlockRegion) => string | undefined;
   /** The test is an ordinary printed condition (no requirement predicate). */
   readonly plain: (control: Control) => boolean;
   /** Representative variable ids read when printing the condition. */
@@ -1239,8 +1251,10 @@ export interface LoopFacts {
   /** Accept a `for` header: the single entry edge `init` and repeat edge `step`
    * write only induction variables (`x = x ± c`) that nothing else inside the
    * loop writes, and the test reads one. A bottom test must also be implied on
-   * entry by an enclosing `if` arm (`guards`, outermost first). */
+   * entry by an enclosing `if` arm (`guards`, outermost first). `header` is the
+   * loop header block (a top test holds its statement when it prints one). */
   readonly induction: (loop: {
+    readonly header: string;
     readonly test: Extract<Control, { kind: 'if' }>;
     readonly enter: boolean;
     readonly bottom: boolean;
@@ -1413,6 +1427,11 @@ export function planLoopForms(
     // never move ahead of the tests which guard them. The head of a
     // flag-carried short circuit and its merge right after it form one stage
     // that tests the merge's `if`.
+    // The header alone may print one statement, which its test holds
+    // (`comma`), or be a carrier jump block holding the statement of the test
+    // block right after it: that statement then prints inside the loop test.
+    const head = edge('first');
+    const held = head?.kind === 'block' && head.id === loop.header && !facts.silent(head);
     const chain: { block: string; test: string; enter: boolean }[] = [];
     let pending: readonly Region[] = regions;
     while (pending.length) {
@@ -1420,9 +1439,11 @@ export function planLoopForms(
       pending = unfold(pending);
       const first = pending[0]!;
       if (first.kind !== 'block') break;
+      const opening = held && !chain.length;
       let rest: readonly Region[] = pending.slice(1),
         tested: BlockRegion = first;
-      const merge = facts.flag(first);
+      const carried = opening ? facts.carrier(first) : undefined;
+      const merge = carried ?? facts.flag(first);
       if (merge !== undefined) {
         rest = unfold(rest);
         const next = rest[0];
@@ -1433,7 +1454,10 @@ export function planLoopForms(
       if (
         tested.control.kind !== 'if' ||
         !facts.plain(tested.control) ||
-        !facts.silent(first) ||
+        !(
+          facts.silent(first) ||
+          (opening && (carried !== undefined || (merge === undefined && facts.comma(first))))
+        ) ||
         (!chain.length && first.id !== loop.header) ||
         (chain.length > 0 && (incoming.get(first.id)?.length ?? 0) !== 1)
       )
@@ -1447,107 +1471,119 @@ export function planLoopForms(
       pending = stay.body ? [stay.body, ...rest] : rest;
       if (pending.length && firstBlock(pending[0]!) !== stay.transfer.target) break;
     }
-    if (chain.length > 1)
-      return { kind: 'while', test: chain[0]!.test, enter: chain[0]!.enter, chain };
-    const head = edge('first');
-    const headMerge = head?.kind === 'block' ? facts.flag(head) : undefined;
-    let headTest: Extract<Control, { kind: 'if' }> | undefined;
-    if (head?.kind === 'block' && head.id === loop.header && facts.silent(head)) {
-      if (headMerge === undefined) headTest = head.control.kind === 'if' ? head.control : undefined;
-      else {
-        const next = unfold(unfold([loop.body]).slice(1))[0];
-        if (
-          next?.kind === 'block' &&
-          next.id === headMerge &&
-          next.control.kind === 'if' &&
-          facts.silent(next)
-        )
-          headTest = next.control;
+    const top = (): LoopForm | undefined => {
+      if (chain.length > 1)
+        return { kind: 'while', test: chain[0]!.test, enter: chain[0]!.enter, chain };
+      const headCarrier = held && head?.kind === 'block' ? facts.carrier(head) : undefined;
+      const headMerge = head?.kind === 'block' ? facts.flag(head) : undefined;
+      let headTest: Extract<Control, { kind: 'if' }> | undefined;
+      if (
+        head?.kind === 'block' &&
+        head.id === loop.header &&
+        (!held || headCarrier !== undefined || (headMerge === undefined && facts.comma(head)))
+      ) {
+        const joined = headCarrier ?? headMerge;
+        if (joined === undefined) headTest = head.control.kind === 'if' ? head.control : undefined;
+        else {
+          const next = unfold(unfold([loop.body]).slice(1))[0];
+          if (
+            next?.kind === 'block' &&
+            next.id === joined &&
+            next.control.kind === 'if' &&
+            facts.silent(next)
+          )
+            headTest = next.control;
+        }
       }
-    }
-    if (headTest && facts.plain(headTest)) {
+      if (!headTest || !facts.plain(headTest)) return undefined;
       const control = headTest,
         stayTrue = !exit(control.when_true, true),
         stayFalse = !exit(control.when_false, true);
-      if (stayTrue !== stayFalse) {
-        // The body's lexical end is the only repeat edge: it becomes the step.
-        const repeats = entries.filter((occurrence) => inside.has(occurrence.block));
-        if (
-          headMerge === undefined &&
-          language === 'c-like' &&
-          init &&
-          repeats.length === 1 &&
-          occurrenceAction(repeats[0]!, language) === 'fallthrough' &&
-          facts.induction({
-            test: control,
-            enter: stayTrue,
-            bottom: false,
-            init,
-            step: repeats[0]!.transfer,
-            inside,
-            guards: entered,
-          })
-        )
-          return { kind: 'for', test: control.id, enter: stayTrue, bottom: false };
-        return { kind: 'while', test: control.id, enter: stayTrue };
-      }
-    }
-    const last = edge('last');
-    if (
-      language !== 'c-like' ||
-      last?.kind !== 'block' ||
-      last.control.kind !== 'if' ||
-      !facts.plain(last.control)
-    )
-      return undefined;
-    const control = last.control;
-    for (const repeat of [true, false]) {
-      const again = repeat ? control.when_true : control.when_false,
-        leave = repeat ? control.when_false : control.when_true;
+      if (stayTrue === stayFalse) return undefined;
+      // The body's lexical end is the only repeat edge: it becomes the step.
+      const repeats = entries.filter((occurrence) => inside.has(occurrence.block));
       if (
-        again.body ||
-        again.transfer.mode !== 'continue' ||
-        again.transfer.target !== loop.header ||
-        !exit(leave, true)
-      )
-        continue;
-      // `continue` in a do-while reaches the test, so the repeat edge must be
-      // the only way back to the header; outer entries only fall into it.
-      if (
-        entries.some(
-          (occurrence) =>
-            occurrence.transfer !== again.transfer &&
-            (inside.has(occurrence.block) ||
-              occurrenceAction(occurrence, language) !== 'fallthrough'),
-        )
-      )
-        return undefined;
-      // Repeat copies move before the test: they must be dead on exit, neither
-      // the test nor the exit copies may observe them (the test may be restated
-      // over their results).
-      const written = facts.writes(again.transfer);
-      if (facts.live(leave.transfer.target, written)) return undefined;
-      const exitReads = new Set(facts.copyReads(leave.transfer));
-      if (written.some((id) => exitReads.has(id))) return undefined;
-      const reads = new Set(facts.reads(control));
-      if (written.some((id) => reads.has(id)) && !facts.rebase(control, again.transfer))
-        return undefined;
-      if (
+        headMerge === undefined &&
+        language === 'c-like' &&
         init &&
+        repeats.length === 1 &&
+        occurrenceAction(repeats[0]!, language) === 'fallthrough' &&
         facts.induction({
+          header: loop.header,
           test: control,
-          enter: repeat,
-          bottom: true,
+          enter: stayTrue,
+          bottom: false,
           init,
-          step: again.transfer,
+          step: repeats[0]!.transfer,
           inside,
           guards: entered,
         })
       )
-        return { kind: 'for', test: control.id, enter: repeat, bottom: true };
-      return { kind: 'do_while', test: control.id, repeat };
-    }
-    return undefined;
+        return { kind: 'for', test: control.id, enter: stayTrue, bottom: false };
+      return { kind: 'while', test: control.id, enter: stayTrue };
+    };
+    const bottom = (): LoopForm | undefined => {
+      const last = edge('last');
+      if (
+        language !== 'c-like' ||
+        last?.kind !== 'block' ||
+        last.control.kind !== 'if' ||
+        !facts.plain(last.control)
+      )
+        return undefined;
+      const control = last.control;
+      for (const repeat of [true, false]) {
+        const again = repeat ? control.when_true : control.when_false,
+          leave = repeat ? control.when_false : control.when_true;
+        if (
+          again.body ||
+          again.transfer.mode !== 'continue' ||
+          again.transfer.target !== loop.header ||
+          !exit(leave, true)
+        )
+          continue;
+        // `continue` in a do-while reaches the test, so the repeat edge must be
+        // the only way back to the header; outer entries only fall into it.
+        if (
+          entries.some(
+            (occurrence) =>
+              occurrence.transfer !== again.transfer &&
+              (inside.has(occurrence.block) ||
+                occurrenceAction(occurrence, language) !== 'fallthrough'),
+          )
+        )
+          return undefined;
+        // Repeat copies move before the test: they must be dead on exit, neither
+        // the test nor the exit copies may observe them (the test may be restated
+        // over their results).
+        const written = facts.writes(again.transfer);
+        if (facts.live(leave.transfer.target, written)) return undefined;
+        const exitReads = new Set(facts.copyReads(leave.transfer));
+        if (written.some((id) => exitReads.has(id))) return undefined;
+        const reads = new Set(facts.reads(control));
+        if (written.some((id) => reads.has(id)) && !facts.rebase(control, again.transfer))
+          return undefined;
+        if (
+          init &&
+          facts.induction({
+            header: loop.header,
+            test: control,
+            enter: repeat,
+            bottom: true,
+            init,
+            step: again.transfer,
+            inside,
+            guards: entered,
+          })
+        )
+          return { kind: 'for', test: control.id, enter: repeat, bottom: true };
+        return { kind: 'do_while', test: control.id, repeat };
+      }
+      return undefined;
+    };
+    // A header printing a statement keeps a valid bottom test: its loop already
+    // reads as do-while, and its test would otherwise hold the statement.
+    return held ? (bottom() ?? top()) : (top() ?? bottom());
   };
   const rebuild = (region: Region, follow: string | null, guards: readonly Guard[]): Region => {
     context.checkpoint(1);

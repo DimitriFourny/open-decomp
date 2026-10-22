@@ -1,9 +1,10 @@
-import type { OperationContext } from '../core/index.js';
+import { fingerprint, type OperationContext } from '../core/index.js';
 import {
   bitWidth,
   integer,
   type DataType,
   type Expression,
+  type Instruction,
   type RegisterBinding,
   type Value,
 } from '../ir/index.js';
@@ -11,6 +12,7 @@ import type { BlockRegion, ParallelTransfer } from '../presentation/index.js';
 import { identityOperand } from './expressions.js';
 import { validateConstantCells, type LocalValidationSession } from './local-validation.js';
 type Copies = ParallelTransfer['copies'];
+type Writer = Extract<Instruction, { readonly kind: 'call' | 'unknown_effect' }>;
 
 interface CellPlan {
   make(
@@ -21,6 +23,8 @@ interface CellPlan {
     contributors?: readonly Value[],
   ): Value;
   alias(value: Value, expression: Expression): void;
+  /** Replace an instruction's register outputs in the source view. */
+  outputs(node: Writer, bindings: readonly RegisterBinding[]): void;
 }
 
 /** How one incoming edge writes every cell of a phi group at once. */
@@ -31,7 +35,10 @@ type EdgeSource =
   /** The unchanged cells of another (or the same) candidate phi group. */
   | { readonly kind: 'group'; readonly group: CellGroup }
   /** Every cell is an unknown (unavailable) value of the same reason. */
-  | { readonly kind: 'unknown'; readonly reason: string };
+  | { readonly kind: 'unknown'; readonly reason: string }
+  /** Every cell is the unprojected output of one call or unknown effect: that
+   * instruction writes the whole, which becomes its one output of the root. */
+  | { readonly kind: 'outputs'; readonly node: Writer; readonly block: string };
 
 interface CellGroup {
   readonly block: BlockRegion;
@@ -40,8 +47,10 @@ interface CellGroup {
   readonly width: number;
   /** Only corresponding slices of one value of exactly this width qualify. */
   readonly exact: boolean;
-  /** Some cell is a parameter that range analysis folded to a constant: the
-   * group is recombined only when every edge writes one whole constant. */
+  /** Some cell is a parameter that range analysis folded to a constant (the
+   * value every reachable incoming copy carries). The group is recombined only
+   * when every edge writes whole constants, or corresponding slices of wider
+   * values or groups whose folded slices equal those constants. */
   readonly folded: boolean;
   readonly edges: { readonly transfer: ParallelTransfer; readonly source: EdgeSource }[];
   recorded?: boolean;
@@ -53,6 +62,8 @@ export function recombineSourceCells(
   blocks: Map<string, BlockRegion>,
   transfers: readonly { transfer: ParallelTransfer; block: BlockRegion }[],
   expressions: ReadonlyMap<string, Expression>,
+  /** The block that defines each statement result, register output and parameter. */
+  owner: ReadonlyMap<string, string>,
   incoming: Map<string, Value[]>,
   plan: CellPlan,
   validation: LocalValidationSession,
@@ -141,20 +152,92 @@ export function recombineSourceCells(
       )
         webs.set(web(destination.id), web(source.id));
     }
+  // The cells each call or unknown effect writes (its register outputs), indexed
+  // per owning block on first use.
+  const writers = new Map<
+    string,
+    { readonly node: Writer; readonly block: string; readonly binding: RegisterBinding }
+  >();
+  const indexed = new Set<string>();
+  const writer = (piece: Value) => {
+    const id = owner.get(piece.id);
+    const block = id === undefined || indexed.has(id) ? undefined : blocks.get(id);
+    if (block) {
+      indexed.add(block.id);
+      for (const node of block.statements) {
+        context.checkpoint(1);
+        if (node.kind === 'call' || node.kind === 'unknown_effect')
+          for (const binding of node.register_outputs)
+            writers.set(binding.value.id, { node, block: block.id, binding });
+      }
+    }
+    return writers.get(piece.id);
+  };
+  // One instruction's write of a whole root: its outputs of the root tile it
+  // from bit 0, as integer cells it leaves unprojected (no result binds them).
+  const tiled = new Map<string, boolean>();
+  const wholeOutput = (node: Writer, root: string): boolean => {
+    const key = `${node.id}:${root}`;
+    let whole = tiled.get(key);
+    if (whole === undefined) {
+      const cells = node.register_outputs
+        .filter(({ register }) => register.root === root)
+        .sort((left, right) => left.register.offset_bits - right.register.offset_bits);
+      context.checkpoint(cells.length + 1);
+      let end = 0;
+      whole =
+        cells.length > 1 &&
+        cells.every(({ register, value }) => {
+          if (
+            register.offset_bits !== end ||
+            value.type.kind !== 'integer' ||
+            bitWidth(value.type) !== register.width_bits ||
+            expressions.has(value.id)
+          )
+            return false;
+          end += register.width_bits;
+          return true;
+        }) &&
+        end === cells[0]!.register.root_width_bits;
+      tiled.set(key, whole);
+    }
+    return whole;
+  };
+  // A concat of adjacent cells is a joint read of the upper cell with the cell
+  // below it, anywhere in that cell's web. Adjacent cells that one instruction
+  // wrote are read as its whole output.
   const joined = new Set<string>();
+  const read = new Map<Writer, Map<string, string>>();
   for (const expression of expressions.values()) {
     context.checkpoint(1);
     if (expression.kind !== 'concat') continue;
     for (let index = 1; index < expression.values.length; index++) {
-      const lower = cellRegisters.get(expression.values[index - 1]!.id),
-        upper = cellRegisters.get(expression.values[index]!.id);
+      const below = expression.values[index - 1]!,
+        above = expression.values[index]!;
+      const lower = cellRegisters.get(below.id),
+        upper = cellRegisters.get(above.id);
       if (
         lower &&
         upper &&
         lower.root === upper.root &&
         lower.offset_bits + lower.width_bits === upper.offset_bits
       )
-        joined.add(web(expression.values[index]!.id));
+        joined.add(web(above.id));
+      if (lower || upper || expressions.has(below.id) || expressions.has(above.id)) continue;
+      const first = writer(below),
+        second = writer(above);
+      if (
+        first &&
+        first.node === second?.node &&
+        first.binding.register.root === second.binding.register.root &&
+        first.binding.register.offset_bits + first.binding.register.width_bits ===
+          second.binding.register.offset_bits &&
+        wholeOutput(first.node, first.binding.register.root)
+      ) {
+        const roots = read.get(first.node) ?? new Map<string, string>();
+        roots.set(first.binding.register.root, first.block);
+        read.set(first.node, roots);
+      }
     }
   }
   const groups: CellGroup[] = [];
@@ -254,6 +337,25 @@ export function recombineSourceCells(
       )
     )
       return { kind: 'unknown', reason: first.reason };
+    // Cells that are the unprojected outputs of one instruction that writes the
+    // whole root are slices of that write; a projected result's slices are a
+    // `value` below.
+    const output = unknown.every((expression) => !expression) ? writer(pieces[0]!) : undefined;
+    if (
+      output &&
+      pieces.every((piece, index) => {
+        const { register } = bindings[index]!,
+          written = writer(piece);
+        return (
+          written?.node === output.node &&
+          written.binding.register.root === group.root &&
+          written.binding.register.offset_bits === register.offset_bits &&
+          written.binding.register.width_bits === register.width_bits
+        );
+      }) &&
+      wholeOutput(output.node, group.root)
+    )
+      return { kind: 'outputs', node: output.node, block: output.block };
     // Longest low prefix of corresponding slices of one value. Low slices of v
     // are also the low slices of an extension of v, so upper cells that slice
     // sign_extend(v) or zero_extend(v) extend the same whole.
@@ -304,19 +406,55 @@ export function recombineSourceCells(
   // Classify every incoming edge before any alias exists. A group whose cells
   // are not written jointly on some edge keeps its separate cells.
   const rejected = new Set<CellGroup>();
+  // Each edge's copies by destination, indexed once per transfer however many
+  // groups it enters.
+  const copied = new Map<ParallelTransfer, Map<string, Value[]>>();
+  const copiesOf = (transfer: ParallelTransfer): Map<string, Value[]> => {
+    let index = copied.get(transfer);
+    if (!index) {
+      context.checkpoint(transfer.copies.length);
+      index = new Map();
+      for (const { destination, source } of transfer.copies) {
+        const list = index.get(destination.id) ?? [];
+        list.push(source);
+        index.set(destination.id, list);
+      }
+      copied.set(transfer, index);
+    }
+    return index;
+  };
   for (const group of groups) {
     const { bindings } = group;
     for (const transfer of edges.get(bindings[0]!.value.id)!) {
       context.checkpoint(bindings.length);
-      const pieces: Value[] = [];
+      const index = copiesOf(transfer),
+        pieces: Value[] = [];
       for (const binding of bindings) {
-        const matches = transfer.copies.filter((copy) => copy.destination.id === binding.value.id);
-        context.checkpoint(transfer.copies.length);
-        if (matches.length !== 1) break;
-        pieces.push(matches[0]!.source);
+        const matches = index.get(binding.value.id);
+        if (matches?.length !== 1) break;
+        pieces.push(matches[0]!);
       }
       let source = pieces.length === bindings.length ? jointSource(group, pieces) : null;
-      if (source && group.folded && source.kind !== 'constant') source = null;
+      // A folded cell holds the constant range analysis proved for every
+      // reachable incoming copy (its interval fixed point over those edges). A
+      // `value`, `zero_extend` or `group` edge carries each copy's exact bits as
+      // the matching slice of its whole, so that slice is the proved constant;
+      // a slice that is itself a known constant must equal it. Unknown and
+      // instruction-output edges carry no such slice.
+      if (
+        source &&
+        group.folded &&
+        (source.kind === 'unknown' ||
+          source.kind === 'outputs' ||
+          (source.kind !== 'constant' &&
+            !bindings.every(({ value }, index) => {
+              const folded = expressions.get(value.id);
+              if (folded?.kind !== 'constant') return true;
+              const bits = constantBits(pieces[index]!);
+              return bits === null || bits === BigInt.asUintN(bitWidth(value.type), folded.bits);
+            })))
+      )
+        source = null;
       // Each recombined constant is proved on its own edge: the cells'
       // concatenation (low cell first) equals the whole constant.
       if (source?.kind === 'constant') {
@@ -339,6 +477,20 @@ export function recombineSourceCells(
       }
       group.edges.push({ transfer, source });
     }
+    // Folded cells whose edges are not all whole constants are recombined only
+    // when some edge carries a wider value (directly or through another
+    // group): zero extensions and self-carries alone already print exactly as
+    // the low cells and literal upper cells.
+    if (
+      group.folded &&
+      !rejected.has(group) &&
+      !group.edges.every(({ source }) => source.kind === 'constant') &&
+      !group.edges.some(
+        ({ source }) =>
+          source.kind === 'value' || (source.kind === 'group' && source.group !== group),
+      )
+    )
+      rejected.add(group);
   }
   // Carried cells are joint only while the carrying group is recombined too.
   for (let changed = true; changed;) {
@@ -359,8 +511,13 @@ export function recombineSourceCells(
       group.recorded = validation.presentation(
         'register_cell_recombination',
         group.bindings[0]!.value.id,
-        'complete contiguous integer root cells written jointly on every incoming edge: corresponding slices of one identical whole value, a zero extension of low slices of one value, one constant, unknown cells of one reason, or the unchanged cells of another recombined phi; preserves simultaneous transfers and full-width carries',
-        group.bindings.map(({ value }) => value.id),
+        'complete contiguous integer root cells written jointly on every incoming edge: corresponding slices of one identical whole value, a zero extension of low slices of one value, one constant, unknown cells of one reason, the unprojected outputs of one call or unknown effect (then its one whole output of the root), or the unchanged cells of another recombined phi; range-folded cells only from constants, or beside a wider value from slices that carry their interval-proved constant; preserves simultaneous transfers and full-width carries',
+        [
+          ...group.bindings.map(({ value }) => value.id),
+          ...group.edges.flatMap(({ source }) =>
+            source.kind === 'outputs' ? [source.node.id] : [],
+          ),
+        ],
       );
       if (!group.recorded) {
         rejected.add(group);
@@ -384,6 +541,26 @@ export function recombineSourceCells(
     );
   const owners = new Map(transfers.map(({ transfer, block }) => [transfer, block.id]));
   const added = new Map<string, Value[]>();
+  // One whole output per instruction and root, created once and shared by every
+  // group and joint read of its cells.
+  const outputWholes = new Map<Writer, Map<string, Value>>();
+  const outputWhole = (node: Writer, block: string, root: string): Value => {
+    const roots = outputWholes.get(node) ?? new Map<string, Value>();
+    outputWholes.set(node, roots);
+    let whole = roots.get(root);
+    if (!whole) {
+      const cells = node.register_outputs.filter(({ register }) => register.root === root);
+      whole = plan.make(
+        `cell-output:${node.id}:${root}`,
+        integer(cells[0]!.register.root_width_bits),
+        block,
+        undefined,
+        cells.map(({ value }) => value),
+      );
+      roots.set(root, whole);
+    }
+    return whole;
+  };
   for (const group of accepted) {
     const whole = wholes.get(group)!;
     const sources = group.edges.map(({ transfer, source }, index): Value => {
@@ -399,6 +576,16 @@ export function recombineSourceCells(
             state: 'unknown',
             reason: source.reason,
           });
+        case 'outputs': {
+          const output = outputWhole(source.node, source.block, group.root);
+          return bitWidth(output.type) === group.width
+            ? output
+            : plan.make(edge, integer(group.width), block, {
+                kind: 'extract',
+                value: output,
+                offset: 0,
+              });
+        }
         case 'constant':
           return plan.make(edge, integer(group.width), block, {
             kind: 'constant',
@@ -448,6 +635,47 @@ export function recombineSourceCells(
   for (const [id, wholeValues] of added) {
     const block = blocks.get(id)!;
     blocks.set(id, { ...block, parameters: [...block.parameters, ...wholeValues] });
+  }
+  // Cells one instruction wrote and that are read jointly outside any phi.
+  for (const [node, roots] of read)
+    for (const [root, block] of roots) {
+      context.checkpoint(1);
+      if (
+        outputWholes.get(node)?.has(root) ||
+        validation.presentation(
+          'register_cell_recombination',
+          node.id,
+          'adjacent integer cells of one root read jointly, where one call or unknown effect writes every cell of the root as unprojected outputs: its one whole output of the root, each cell a slice of it',
+          node.register_outputs
+            .filter(({ register }) => register.root === root)
+            .map(({ value }) => value.id),
+        )
+      )
+        outputWhole(node, block, root);
+    }
+  // The instruction writes each whole once; its cells become slices of it.
+  for (const [node, roots] of outputWholes) {
+    const outputs: RegisterBinding[] = [];
+    for (const binding of node.register_outputs) {
+      context.checkpoint(1);
+      const { register } = binding,
+        whole = roots.get(register.root);
+      if (!whole) {
+        outputs.push(binding);
+        continue;
+      }
+      plan.alias(binding.value, { kind: 'extract', value: whole, offset: register.offset_bits });
+      if (register.offset_bits === 0)
+        outputs.push({
+          register: {
+            ...register,
+            id: `ssa:${fingerprint([register.root, 0, register.root_width_bits]).slice(0, 32)}`,
+            width_bits: register.root_width_bits,
+          },
+          value: whole,
+        });
+    }
+    plan.outputs(node, outputs);
   }
   return replacements;
 }

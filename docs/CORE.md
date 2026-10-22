@@ -439,12 +439,13 @@ frame: bytes at or above the lowest escaped offset stay explicit frame memory
 `frame_object_base` requirement (code reached through an escaped address never
 steps below it; `container_of` or negative indexing from an interior pointer is
 outside this premise). A frame address stored into bytes an escaped address
-reaches escapes too. No current fact bounds an escaped object's extent
-(library contracts carry no size relation), so every escape covers everything
+reaches escapes too. No library or summary fact bounds an escaped object's extent
+(library contracts carry no size relation), so for promotion every escape covers everything
 above its base: when the lowest-addressed object escapes, as in optimized frames
 that place aggregates below scalars (SQLite `renameColumnFunc`, brotli `main`),
 all slots above it stay explicit; a 21-function SQLite/brotli sample of the LLM task set
-showed no change. Unknown effects and unbounded escapes keep the whole frame
+showed no change. Only the frame object's layout uses a tighter reach (A3,
+below): a proven frame save ends an escaped object under `frame_save`. Unknown effects and unbounded escapes keep the whole frame
 explicit. Accesses straddling a slot's end, outgoing argument slots and volatile
 accesses stay explicit. Same-width accesses of differing types (an O0
 integer/IEEE pun through memory) forward a bitcast of the reaching stored value;
@@ -496,12 +497,21 @@ statement never lands inside a test. Checked rendering is unchanged.
 
 After inlining, both source dialects may combine an initial single-entry chain
 of expression-only loop tests. Short-circuit conditions preserve load order and
-all tests leave to the same lexical continuation without exit copies. Assignment,
-comma and copy-smuggling conditional expressions are never introduced into loop
-conditions. Stages needing temporaries, exit copies, effects or shared entries
-remain explicit; unrelated early returns stay inside the body. `loop_form`
-records the conditions and existing control/move validation remains mandatory.
-Checked rendering is unchanged.
+all tests leave to the same lexical continuation without exit copies.
+Copy-smuggling conditional expressions are never introduced into loop
+conditions. The one exception to expression-only tests is the loop header's own
+statement (`loop_comma_condition`, roadmap 4 L1): a header (or the jump block
+that alone enters its test block) printing exactly one assignment, load or
+single-result call its first test reads prints it inside that test, as for
+`comma_condition` (C `while ((x = p->next) != 0)` or `(x = f(), test)`,
+Python-like only `while (x := p.next) != 0:`); the statement still runs once per
+header entry, immediately before the test. A header with a valid C bottom test
+stays `do`/`while` instead, and a `for` counts the statement's operands as test
+reads. Chained stages leaving on their true arm print the exact complement
+(`x == 0`, not `!(x != 0)`). Stages needing temporaries, exit copies, effects or
+shared entries remain explicit; unrelated early returns stay inside the body.
+`loop_form` records the conditions and existing control/move validation remains
+mandatory. Checked rendering is unchanged.
 
 A single-test loop (`while`, `for` or C `do`/`while`) may print its exit edge's
 copies right after the loop when that edge is the only one from inside the loop
@@ -543,6 +553,28 @@ Parameter roles distinguish observed source inputs, physical-register inputs and
 Optional `emission.requirements` localize assumptions, unresolved values/effects/calls/control and conflicts at original subjects and instruction-backed output spans. One function-level `fp_environment` explanation names every affected guard/operation and its original state epoch. Source-only `fp_environment_guard` presentation selects the supported edge of an exact lifter guard when its state is an entry value or call clobber, unchanged or carried through phis and bitcasts, there are no explicit environment writes, and the unsupported arm is exclusively owned. Transport acceptance is coinductive (a greatest fixpoint over the phi/bitcast web, so loop cycles through a call qualify): a member is accepted when each input is an entry/call epoch or an accepted member; one input of any other kind rejects the guards of the whole function. Each guard record lists the accepted transports its epoch passes through. This is conditional on the recorded requirement at **each** epoch, not proof that calls preserve FP state. Omitted guard/failure provenance maps to the top requirement comment; checked guards and ordered effects remain intact. Computed, loaded, known unsupported, or opaque-written control state retains explicit guards. An opaque effect that is the last statement of a block ending in an unresolved exit changes no recorded epoch (no modeled operation follows it) and does not retain them (`fp_terminal_effect`); an opaque effect elsewhere, such as an unsupported encoding inside the function, still does.
 
 Source-only `fp_native_operations` prints scalar IEEE arithmetic, negation, absolute value, square root, comparisons and compatible conversions under the FP requirement plus the target IEEE representation, no-excess-precision and disabled-contraction (`-ffp-contract=off`) contract. Every operation the recorded `fp_environment` requirement covers prints natively unless a rule below keeps it explicit: C uses `-x`, `__builtin_fabs[f]`/`__builtin_sqrt[f]` (no header, so no clash with an analyzed libm callee) and `(intN_t)x`/`(uintN_t)x`; Python-like prints `-x` and `abs(x)` for binary64. Backwards consumer tracing retains helpers for operations whose arithmetic NaN payload escapes through integer operations, memory, calls or physical boundaries; a promoted local slot is private storage, so a store to it is exactly as observable as the loads that read it back. Comparisons and float-to-integer conversions never observe a payload (a NaN converts to an undefined value, as in the IR), and negation/absolute value change only the sign bit, so none of them forces helpers on their operands or their own result. Float-to-integer conversion truncates toward zero and is undefined for NaN, infinities and out-of-range values, exactly as the IR specifies. Helpers remain for fused and vector operations, payload-escaping arithmetic and square roots, whole functions whose environment is not a recorded default epoch (explicit environment writes or unknown environment effects keep every guard and every FP helper), Python binary32 arithmetic, Python division, square root and float-to-integer conversion (Python raises where the IR yields a value). Finite floating literals retain exact target bits, including integer constants that join an established FP value as a bitcast operand, phi copy or select arm. FP/integer copies preserve representation bitcasts, never numeric assignment conversions. Exhausted presentation records retain the explicit form.
+
+Payload-escaping arithmetic still prints natively when it can never produce a
+NaN (`fp_nan_free`, subjects with their operand bounds; `source-fp.ts`): no
+canonical-NaN rule is then exercised. Integer-to-float conversions always
+qualify (an 8- to 128-bit integer converts to a finite value, or to infinity for
+2^128 in binary32). A bounded, memoized magnitude pass proves the other
+operations: literals give |c|, a W-bit conversion 2^(W-1) (signed) or 2^W
+(unsigned), add/sub/mul and division by a finite nonzero literal combine their
+operands' bounds with a rounding margin of 2^-20, phis and selects take the
+maximum, and cycles, entry values and every other definition are unbounded. A
+finite add, sub, mul, division by such a literal or format conversion of
+operands bounded below the format maximum rounds to a finite value or an
+infinity, never NaN. Division by a variable (0/0), square root and operands
+without a bound keep their helpers. So brotli `PrintBytes` prints
+`(double)arg0 * 9.313225746154785e-10` although the product is stored. A
+conversion depends only on the mathematical integer: when the IR operand
+zero-extends a narrower value (`zero_extend`, a mask of the low 8/16/32 bits, or
+a truncation/low extract of such an extension; either conversion) or
+sign-extends one (signed conversion only), both dialects convert the narrower
+operand that the printed cast collapses to: `(double)arg0 / (double)arg1`, not
+`(double)(int32_t)arg0 / (double)(int64_t)arg1` (recorded in
+`fp_native_operations`).
 
 Source-only `condition_flags` folds compare flags and their condition-code
 consumers into native relations (`src/reconstruction/source-conditions.ts`).
@@ -775,6 +807,18 @@ Library/format closure records `arity_closure` plus `abi_conformance`; refusal a
 the presentation-record bound preserves the open form. Checked text and original
 call/stack/type facts retain their conservative interfaces.
 
+An established, non-conflicting variadic library contract that no rule closed
+(a format that could be either of two literals with different actual types, a
+non-literal format) prints its fixed prefix (K3, source only): each fixed
+parameter binds at the register location of the ABI classification of the
+contract and the call is `inferred` with the argument list open, so the header
+states the open arity (`fprintf(stream, format)`). The declared result stays
+unbound (the exit register of a void caller does not become an established
+integer result), the anonymous arguments are never claimed, and a fixed
+location that is not a register, a hidden result or an unsupported layout keeps
+the unresolved call. Records `library_fixed_prefix` (presentation) and an
+`abi_conformance` requirement of the same name.
+
 Source-only `frame_save` uses the ABI's preserved register slices (including
 Windows x64 XMM6–XMM15 low 128 bits), not architecture-specific register lists.
 One nonvolatile entry-value store must dominate every same-slot reload; every
@@ -841,17 +885,38 @@ with upper cells that slice `sign_extend(v)`/`zero_extend(v)`; low slices with
 literal-zero upper cells, i.e. a 32-bit or narrower write that zero-extends; all
 literal constants; cells that are each an unknown (unavailable) value of the same
 reason (for example non-argument entry registers), which jointly form one unknown
-value of the full width; or the unchanged cells of another recombined phi, which is
-resolved as a fixpoint. A cell that range analysis already folded to a constant
-(`value7 = 1` on every edge) still counts as a cell of the group, but then every
-edge must write one constant per cell: the group becomes one whole-width
-parameter with one whole constant per edge (`0x100060ce8`, not `value6 | value7 << 32`),
-and source-fact discovery also offers each such whole constant as a candidate address,
-so function-pointer and global naming applies to it. Each constant is proved on its
-own edge by exact interpreter evaluation (a `bitvector` record: the cells'
-concatenation equals the constant; no BDD allowance is spent); a non-constant cell
-on any edge keeps every cell separate. Other register banks keep the complete-root rule with
-identical whole values. Original SSA cells and transfers remain immutable;
+value of the full width; the unprojected register outputs of one call or unknown
+effect whose outputs of the root are integer cells that tile it from bit 0; or the
+unchanged cells of another recombined phi, which is resolved as a fixpoint. An
+instruction-output edge gives the instruction one whole output of the root and makes
+its original cells slices of it: a source call prints one
+`unknown_value("uint64_t", "call clobbers x0")` instead of the `x0_low32`/`x0_high32`
+pair, and a physical call or unknown effect lists one boundary key
+(`"arm64:x27:0:64"`). Adjacent cells of one such instruction that a concat reads
+together outside any phi get the same whole output. A projected call result is a
+definition, never an unprojected output: a callee result bound to `w0` stays the low
+half of `x0` (`call_result | (uint64_t)high << 32`). A cell that range analysis
+already folded to a constant (`value7 = 1` on every edge) still counts as a cell of
+the group. When every edge writes one constant per cell, the group becomes one
+whole-width parameter with one whole constant per edge (`0x100060ce8`, not
+`value6 | value7 << 32`), and source-fact discovery also offers each such whole
+constant as a candidate address, so function-pointer and global naming applies to it.
+Each constant is proved on its own
+edge by exact interpreter evaluation (a `bitvector` record: the cells' concatenation
+equals the constant; no BDD allowance is spent). Otherwise a folded group needs some
+edge that carries a wider value (corresponding slices of one value, or another
+recombined group), and its other edges may be zero extensions or carried groups. Each
+folded cell's slice on those edges must be a non-constant value, which the interval
+fixed point over the reachable incoming copies proves equal to the folded constant,
+or a constant equal to it. Unknown and instruction-output edges keep a folded group
+split. `matrix_multi_exit` `-O2` (ELF/PE) keeps its sum below 0x10000 inside the loop,
+and its accumulator prints as one `uint64_t` instead of `value0 | value1 << 32`;
+`isDate` names its `sqlite3UpperToLower` table address (0x100132f08) instead of
+reassembling it from `0x132f08` and an upper cell at each dereference; loops that
+only zero-extend a 32-bit counter keep their cells. Other register banks
+keep the complete-root rule with identical whole values or one instruction's whole
+output, so a phi covering only part of a vector root (`isDate`'s `v0` double) keeps
+its cells. Original SSA cells and transfers remain immutable;
 source aliases extract slices from the new whole phi, preserving parallel copies
 and full-width arithmetic carries. Independently written cells (for example a
 partial write that preserves the other half), missing cells, differing whole
@@ -861,10 +926,15 @@ copy: publication validation accepts that edge only when the original edge copie
 every cell aliased to a slice of the whole to itself and those cells cover all of its
 bits (`sqlite3PagerSavepoint`, and `jsonTranslateTextToBlob` once its table proves,
 were rejected before). The `register_cell_recombination` presentation record documents this
-exact bitvector identity without an ABI assumption; checked output does not
-apply it. `test/reconstruction/source-loop-cells.test.ts` executes both dialects
-against independent oracles for a 32-bit-immediate-entered 64-bit loop variable,
-CRC-style byte/24-bit lanes and an independently written-halves refusal.
+exact bitvector identity without an ABI assumption (its subjects include each
+instruction whose whole output an edge uses, and a second scope covers joint reads
+of one instruction's cells); checked output does not apply it.
+`test/reconstruction/source-loop-cells.test.ts` executes both dialects against
+independent oracles for a 32-bit-immediate-entered 64-bit loop variable, CRC-style
+byte/24-bit lanes, an independently written-halves refusal and the `multi_exit`
+loop (including its overflow path and a carry into the upper cell);
+`test/reconstruction/source-cells.test.ts` executes phis fed by a call's clobbered
+`x0` and `v0` cells and by a bound 32-bit result.
 
 The same source-only rule also follows straight-line integer bit wiring through
 identity casts, extracts, extensions, concatenations, inserts, constant shifts,
@@ -1523,6 +1593,8 @@ Bounded native parameter summaries refine the caller's existing memory shapes wi
 Incoming stack arguments use callee-entry-SP coordinates. Exact, unchanged ABI scalar slots become provenance-backed source inputs, not freshly allocated private frame bytes. The symbol-bearing and stripped Mach-O ten-input fixture is evaluated in both dialects against 25 independent uint64 cases, including `1..10 → 385`, high-bit values and modulo-overflow boundaries. The source view decides per slot (`incoming_formal`, ABI premise `incoming_arguments_private`): the stack plan's _incoming floor_ is the lowest entry-SP offset that any escaping or indexing address that can designate incoming bytes (a known base ≥ 0, a mixed-sign phi or reload, an unknown base, or a floor ≥ 0) can take; a word-sized ABI parameter slot that is only loaded, exact, nonvolatile, not overlapped by another access and wholly below that floor is the formal, even after open calls, unknown stores or a frame address that escaped elsewhere, as long as no unbounded escape or unknown effect exists. Callers, callees, globals and loaded or returned pointers are assumed never to designate this activation's incoming area; only addresses derived from it can. The checked view keeps the whole-function gates (no escape, no store through an unknown address, clear per-load alias facts). `test/reconstruction/incoming-stack.test.ts` executes, for AAPCS64 (9 parameters) and SysV (7), a slot read after an open call and a store through argument 1 (formal, oracle-equal for 0, 2^64−1 and 2^63, events `store, call` only) and the same slot whose address is passed to the call (memory read through `entry_sp`, observing the call oracle's write). SQLite `createFunctionApi` now prints `arg8, arg9, opaque_1* arg10` and no `entry_sp`.
 
 Source storage distinguishes this activation's frame from an entry-backed view with one explicit `entry_sp` base. In the source view, frame bytes kept as memory below the entry SP print as one local frame object (`_Alignas(16) struct { ... } frame;`, Python-like `frame = stack_frame(size, alignment)` with `frame.local_N: T` members): it ends at the entry SP and starts stack-aligned; each exact (offset, width) access set is a scalar member; a wider access that covers whole narrower scalar members (two `uint32_t` halves under a `uint64_t` load, or a `uint32_t` and its padding under one) keeps them as members when every wider access in the group only moves bytes (a load whose every use is a store's datum, possibly through bitcast/extract/concat, or a store of a constant or a load result: copies, zero and constant initialization; a wide value that is computed on or dereferenced stays a byte array), the uncovered bytes of its span become byte-array padding members, and the wide access is a cast at the member holding its first byte (`*(uint64_t *)&frame.local_d4`, `*(uint64_t *)frame.local_d8` over padding); partially overlapping accesses, a wide access cutting a member, interior addresses and indexed bases (with the accesses continuing them without a gap) are byte arrays, gaps are padding. Accesses print `frame.local_38`, `&frame.local_38`, `*(uint32_t *)&frame.local_1ac[4]` or `(uint8_t *)&frame + k`; every load and store keeps its address, width, order and aliasing, and an escaped frame records the `frame_object` ABI premise (frame addresses stay inside the frame; no outside pointer designates it). Only live addresses at or above the entry SP (incoming bytes, observed return-address/shadow-space bytes) that the incoming object below does not hold keep `entry_sp`; that view retains the original address space, observed bounds do not imply a complete dynamic footprint, and the extra storage input marks the interface inferred rather than preserving an exact source-signature claim. A stack address read back from memory by a load that stays in the program (a `va_list` cursor, a spilled pointer) prints through that load's declared variable (`address = frame.local_10;` … `*(uint64_t *)address`), not as the stored address constant again; only the store of the address spells it. An assignment statement targets only a declared formal or local. Such addresses coexist with the frame object (`frame_object_beside_entry_sp` presentation record; the object's `entry` is the live entry SP): offsets ≥ 0 print `entry_sp + k`, negative ones `frame.*`, and an escaped frame adds a second `frame_object` premise (arithmetic on an address at or above the entry SP never reaches the frame object). A retained access spanning the entry SP, or no member below it (no frame byte kept as memory and no live frame address), keeps the whole frame in entry-SP form, so no memberless `struct { } frame;` is printed. The checked view keeps the entry-SP form. Saved-register traffic is not a source argument. Unknown outgoing stack arity retains ordered stores, established argument prefixes and an explicit unknown remainder, not a guessed complete call signature. Framed/frameless, overlap, alignment, Windows shadow-space, SysV return-address/red-zone/dynamic-local, Darwin vararg, escaped/indexed/overlapping frame-object and reloaded incoming/frame-address walk cases, a frame object beside a live entry SP (an incoming address stored in a frame slot and dereferenced) and frame objects beside the incoming object below (an escaped slot, an indexed base, each with a stored and reloaded incoming slot) execute through the shared representation in both dialects with the checked view's values and event order. ELF debug metadata and unsupported FP environments remain separately partial.
+
+With no unbounded escape and no live entry SP the frame object is narrowed under the existing premises (A3, `escapedSlots` in `src/reconstruction/source-stack.ts`). When every byte from the lowest proven save slot to the entry SP is a hidden save byte (no retained access, live address, indexed base, escape or `va` there), the object ends at that slot instead of the entry SP (`frame_object_save_area` presentation record, `frame_save` premise), which drops the trailing pad; a taken address in a gap then runs to that slot. Each bounded escape (call argument, open argument register, stored or returned address, indexed base) reaches the bytes from its floor up to the lowest proven save slot above it when its only base is the floor itself (an exact address, or one stepped by nonnegative index addends: under `frame_save` the object it designates never holds a save slot), else up to the object's end; overlapping reaches merge. A merged reach that is exactly one member, which no access crosses and inside which no escape or indexed base lies except at its start, is a local of its own (`FrameMember.independent`): it is declared outside the struct (`uint32_t local_34;`, `uint8_t local_28[8];`, Python-like `local_34: uint32_t`, `local_28: array<uint8_t, 8>`) and addressed as `&local_34` / `address_of(local_34)`; the struct then spans its other members and the reaches that hold them, and is omitted when no other member is left (`escaped_slot_object` presentation record, `frame_object_base` and `frame_save` premises). Python-like `frame = stack_frame(size, alignment, -0xE)` states an end below the entry SP. Memory operations are unchanged and the checked view keeps the entry-SP form. Semantic tests (`test/reconstruction/frame-object.test.ts`, `frame-saves.test.ts`, Darwin arm64, SysV and Win64, both dialects) execute an escaped u32 slot directly below a save and a byte array indexed from its start as independent locals whose callee writes through the pointer and equal the IR interpretation; a gap byte, two members in the reach, an escaped interior address, an interior indexed base and a live entry SP keep the struct; a save area with a kept local or an untouched byte above it keeps the end at the entry SP.
 
 Incoming bytes the function keeps as memory (a SysV MEMORY-class by-value aggregate updated in place, or any incoming byte that is no incoming formal because it is stored, narrower, overlapped, misaligned or Win64 home space) print as one source-only struct formal, last in the parameter list, when no exposure can designate incoming bytes (no incoming floor), no frame escape is unbounded and no retained access spans the first incoming byte (`incoming_object` presentation record and ABI premise: caller-supplied pointers such as the sret pointer, globals, loaded pointers and stores through unknown addresses never designate the incoming area). C prints a preamble `struct stack_args_XXXX { uint64_t arg_8; uint8_t arg_10[8]; double arg_18; };` and the formal `struct stack_args_XXXX stack_args`; Python-like annotates `stack_args: struct{arg_8: uint64_t, arg_10: array<uint8_t, 8>, arg_18: double}`. The struct starts at the first incoming byte (SysV and Win64 entry SP + 8, AAPCS64 + 0), members are named by entry-SP offset and laid out like frame members, and accesses print `stack_args.arg_8`, `&stack_args.arg_8`, `*(uint32_t *)&stack_args.arg_8[8]`. Nothing is forwarded: every load and store keeps its address, width, order and aliasing. Only inferred interfaces gain it; the entry SP, when no other address needs it, is then no formal. The checked view keeps the entry-SP form. SysV IR fixtures (an in-place add, increment and multiply of a 24-byte copy at +8 copied to the sret buffer, `-O2`-style with a 16-byte copy and `-O0`-style through a `lea`-computed base) execute in both dialects with wrapping totals, `count = 0xffffffff`, NaN and −0.0 weights byte-equal to an independent oracle and to the checked view; when the copy's address reaches a call, the entry-SP form stays and the call's write is observed. `test/reconstruction/stack-storage.test.ts` executes misaligned, overlapping and home-space incoming bytes through `stack_args` on all three ABIs.
 

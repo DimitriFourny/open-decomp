@@ -388,7 +388,7 @@ Files that several items touch:
     - Part 1 measured: `sqlite3DropTrigger` prints `sqlite3ErrorMsg(address, "no such trigger: %S", address_3);` and loses its frame struct. `sqlite3RowidConstraint` prints `sqlite3MPrintf(address_2, "%s.%s", …)` without a frame. `parserDoubleLinkSelect` loses its frame. `sqlite3CreateForeignKey` binds 2/2 sites.
     - Part 2: `verifyDbFile` (needs K7 as well), `selectInnerLoop`, `generateSortTail`.
     - Every other text is byte-identical. Checked view unchanged.
-  - **Done (K1, reconstruction 84):** tail boundaries with SP at or above a slot no longer observe it; a slot written on every incoming edge binds through the existing join value or a source-only join parameter (`variadic_stack_join`). OD lane: exactly `sqlite3DropTrigger`, `sqlite3RowidConstraint`, `parserDoubleLinkSelect` (frames gone) and `sqlite3CreateForeignKey` (2/2 sites) change; checked view identical. Part 2 fires on no full-tier text yet: `generateSortTail` (`sqlite3VdbeExplain`, two branches) is blocked by R1d (the next ambiguous `sqlite3VdbeAddOp3` sees the slot); `verifyDbFile` and `selectInnerLoop` abort on an escaped frame address (K7). With that abort lifted, `verifyDbFile` binds its 4-edge join (`sqlite3_log(28, value5, value4)`), while `selectInnerLoop`'s slot at both `sqlite3VdbeComment` calls is an unowned unknown fact in the escaped/aliased snapshot, so K7 must also keep store facts below its floor.
+  - **Done (K1, reconstruction 87):** tail boundaries with SP at or above a slot no longer observe it; a slot written on every incoming edge binds through the existing join value or a source-only join parameter (`variadic_stack_join`). OD lane: exactly `sqlite3DropTrigger`, `sqlite3RowidConstraint`, `parserDoubleLinkSelect` (frames gone) and `sqlite3CreateForeignKey` (2/2 sites) change; checked view identical. Part 2 fires on no full-tier text yet: `generateSortTail` (`sqlite3VdbeExplain`, two branches) is blocked by R1d (the next ambiguous `sqlite3VdbeAddOp3` sees the slot); `verifyDbFile` and `selectInnerLoop` abort on an escaped frame address (K7). With that abort lifted, `verifyDbFile` binds its 4-edge join (`sqlite3_log(28, value5, value4)`), while `selectInnerLoop`'s slot at both `sqlite3VdbeComment` calls is an unowned unknown fact in the escaped/aliased snapshot, so K7 must also keep store facts below its floor.
 
 ### K2: Consume outgoing stores that a bound stack argument already shows
 
@@ -412,7 +412,7 @@ Files that several items touch:
 
 ### K3: Print the fixed prefix of an established variadic library contract
 
-- [ ] **Problem.** brotli `PrintBytes` and brotli `main` (5 sites) print `fprintf(...)` with no arguments at all, plus dead `__stderrp;` statements. Ghidra prints `_fprintf(pFVar2,pcVar3)`. These cause 3 wrong claims ("fprintf arguments are elided").
+- [x] **Problem.** brotli `PrintBytes` and brotli `main` (5 sites) print `fprintf(...)` with no arguments at all, plus dead `__stderrp;` statements. Ghidra prints `_fprintf(pFVar2,pcVar3)`. These cause 3 wrong claims ("fprintf arguments are elided").
   - **Root cause:**
     - A contract is rendered only when `layout.state === 'complete'` and the argument count equals the declared count (`source-planner.ts:544-557`).
     - The fallback needs an `InferredCallee`, but `observePreparedCallInterfaces` skips calls with an established contract (`src/analysis/calls/observed.ts:55-59`).
@@ -429,6 +429,7 @@ Files that several items touch:
     - `PrintBytes` prints `stream = __stderrp; … fprintf(stream, format)` with no dead `__stderrp;` statements (measured).
     - The 4 brotli `main` sites change the same way.
     - Everything else byte-identical. Checked view unchanged.
+  - **Done (K3):** `PrintBytes` prints `fprintf(stream, format)` with no dead `__stderrp;`; brotli `main` loses 15 dead `__stderrp;` statements and its 4 open sites print `fprintf(stream, format, ...)` / the literal format. Only those 2 lane texts change, checked view identical. The declared result stays unbound (binding it turned void `PrintBytes` into `uint64_t` with an `unknown_value` return). brotli `main` work 9.238M → 9.266M.
 
 ### K4: String literals from tail-exit arguments and partly constant phis
 
@@ -581,7 +582,7 @@ Files that several items touch:
 
 ### F4: Native FP where NaN-freedom is provable; value-preserving conversion spelling
 
-- [ ] **Problem:**
+- [x] **Problem:** _Done (`wt/rm4-f4`): lane `od-rm4-f4` differs from `od-main-91c0552` in exactly the 13 acceptance texts (plus C1's new `sqlite3CodeRowTrigger`): `PrintBytes` 168 → 145 lexical tokens (`(double)arg0 * 9.313225746154785e-10`), `PrintFileProcessingProgress` `(double)(value2 - value1) / 1000000.0`, 9 `matrix_mixed` cells `(double)arg0 / (double)arg1`, `cume_distValueFunc`/`rtreeInsertCell` lose every `cast_signed_to_float` (`fp_div` by a variable stays); checked view byte-identical; records `fp_nan_free` (subjects + operand bounds) and extended `fp_native_operations`._
   - `fp_mul(64, cast_unsigned_to_float("ieee64_t", "bits64_t", arg0), 9.3e-10)` in brotli `PrintBytes` (×3);
   - `fp_div(…cast_unsigned_to_float…, 1000000.0)` in `PrintFileProcessingProgress`;
   - `cast_signed_to_float` in `cume_distValueFunc` and `rtreeInsertCell`;
@@ -677,7 +678,7 @@ Files that several items touch:
 
 ### A3: Escaped slots bounded by a frame save print as independent locals
 
-- [ ] **Problem.** 67 texts declare a `_Alignas(16) struct { … } frame;`. That costs 3,420 declaration tokens, 155 pads and 2,292 `frame.` prefixes, and the judges cite the frame in 30 noise losses. Small functions that pass one local's address to a callee print a padded object: `getConstraintToken` prints `struct { uint8_t pad_40[12]; uint32_t local_34; uint8_t pad_30[48]; } frame;` for `&frame.local_34`.
+- [x] **Problem.** 67 texts declare a `_Alignas(16) struct { … } frame;`. That costs 3,420 declaration tokens, 155 pads and 2,292 `frame.` prefixes, and the judges cite the frame in 30 noise losses. Small functions that pass one local's address to a callee print a padded object: `getConstraintToken` prints `struct { uint8_t pad_40[12]; uint32_t local_34; uint8_t pad_30[48]; } frame;` for `&frame.local_34`. _Done (`wt/rm4-a3`, lane `od-rm4-a3` vs `od-main-56a18f1`): frame structs 66 → 59 (the 7 acceptance functions print none), `fts3DestroyMethod`/`unixSync` print `uint32_t local_24;` outside it, 42 more structs lose (26) or shrink (16) their tail pad, 50 texts changed, no state change; checked view identical on the acceptance set._
   - **Root cause:** `frame()`/`frameLayout` (`source-stack.ts:2423-2531`, `:66-316`) treat the whole escaped region up to the entry SP as one object. The existing `frame_save` premise (`:1579`) says that a frame address handed to a callee designates its own object and never a save slot, so an escaped object below a save slot ends at that slot. `frame()` does not use this.
   - **Change** (source view, `!reachAll`, entry SP not live):
     1. Each escaped or indexed base at or above `reachFloor` defines a region running to the lowest proven save slot above it (`saveBytes`), or to the entry SP. Overlapping regions merge.
@@ -747,7 +748,7 @@ Files that several items touch:
 
 ### E3: Recombine 64-bit cells from call outputs, range-folded groups and narrowed halves
 
-- [ ] **Problem.** 259 reassemblies `x | ((uint64_t)y << 32)` and 56 split pairs in 17 functions: `isDate` alone has 166 lines (`value16 | ((uint64_t)value17 << 32)` for one pointer). `matrix_multi_exit` ELF/PE `-O2` returns `value0 | ((uint64_t)value1 << 32)`, which the grader read as a "packed low/high pair" (6 wrong claims). The source returns `sum ^ i`.
+- [x] **Problem.** 259 reassemblies `x | ((uint64_t)y << 32)` and 56 split pairs in 17 functions: `isDate` alone has 166 lines (`value16 | ((uint64_t)value17 << 32)` for one pointer). `matrix_multi_exit` ELF/PE `-O2` returns `value0 | ((uint64_t)value1 << 32)`, which the grader read as a "packed low/high pair" (6 wrong claims). The source returns `sum ^ i`. **Done:** (1) and (2) landed (range-folded groups beside a wider value; `outputs` edges giving a call or unknown effect one whole output per root). (3) was dropped: it never fired in the reconstruction/emitter suites or in sampled corpus functions. (4) was not done. In lane `od-rm4-e3`, `<< 32` reassemblies went from 260 to 75 and `>> 32` split lines from 68 to 18 against `od-main-91c0552`. `isDate` went from 173 to 10, with no pointer among the 10: 7 are entry-register saves and 3 are `v0` doubles, which are item (4). `matrix_multi_exit` ELF/PE `-O2` prints one `uint64_t` accumulator. `call clobbers` placeholders went from 13 to 12. The checked view is byte-identical (reconstruction 82, emitters 90).
   - **Root cause** (instrumented `recombineSourceCells`, `src/reconstruction/source-cells.ts`):
     - (1) a range-folded group accepts only constant edges (`:216`, `:319`): `multi_exit`'s high sum cell is folded inside the loop;
     - (2) the per-cell register outputs of one call or unknown effect never form a joint source (`:222-303`, reasons compared per cell `:243-256`): 58 + 52 + 76 `isDate` rejections;
@@ -900,7 +901,7 @@ Files that several items touch:
 
 ### L1: A loop header's one statement prints inside the test
 
-- [ ] **Problem.** A loop header that prints any statement cannot become `while (c)`. 13 measured loops print `while (true) { x = e; if (!c) break; … }` where Ghidra prints a tested loop. Examples: the `sqlite3ParseUri` scan; the `sqlite3BtreeOpen` pointer chase.
+- [x] **Problem.** A loop header that prints any statement cannot become `while (c)`. 13 measured loops print `while (true) { x = e; if (!c) break; … }` where Ghidra prints a tested loop. Examples: the `sqlite3ParseUri` scan; the `sqlite3BtreeOpen` pointer chase. _Done (`wt/rm4-l1`): lane `od-rm4-l1` vs `od-rm3-final`: `while (true)` 217 → 203, tested loops 220 → 234, `break;` 379 → 360, `for` 18 → 19, gotos 759 unchanged; 14 loops in 10 texts print their header statement inside the test (`openDatabase` becomes a `for`), and 2 more texts (`fts3EvalNextRow`, `sqlite3Fts3Incrmerge`) only print chained negations as `x == 0`; every other text byte-identical; checked view identical; `loop_comma_condition`._
   - **Root cause:** `planLoopForms` accepts a chain stage only when `facts.silent(first)` (`src/emitters/source-control.ts:1436`), and a head test only when `facts.silent(head)` (`:1455`). The comma-operand machinery already exists for later short-circuit operands (`commaOperand` `renderer.ts:6574-6586`, `operandTerm` `:6685-6719`, carriers `:7686-7706`), and `commaOperands` is computed for every block.
   - **Change:**
     - `LoopFacts` gains `comma(block)` (a non-silent header whose `commaOperands` entry is one statement) and `carrier(block)`.

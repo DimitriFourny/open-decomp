@@ -243,8 +243,9 @@ for (const bits of [32, 64] as const)
           if (payload && operation === 'integer') continue;
           const f = fixture(sysvAMD64Abi, bits, operation, payload);
           const { emission } = emit(f.ir, { source: f.source }, language);
+          // An integer-to-float conversion never produces a NaN: no payload gate.
           const native =
-            !payload &&
+            (!payload || operation === 'convert') &&
             (operation === 'integer'
               ? language === 'c-like'
               : language === 'c-like' || (bits === 64 && operation !== 'div'));

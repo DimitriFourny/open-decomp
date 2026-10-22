@@ -5,6 +5,7 @@ import {
   type AbiProfile,
   type RegisterDescriptor,
 } from '../../src/core/index.js';
+import { darwinArm64Abi } from '../../src/abi/darwin-arm64/index.js';
 import { sysvAMD64Abi } from '../../src/abi/sysv-amd64/index.js';
 import { windowsX64Abi } from '../../src/abi/windows-x64/index.js';
 import { constructSSA } from '../../src/analysis/ssa/index.js';
@@ -15,6 +16,7 @@ import { structureControlFlow } from '../../src/presentation/index.js';
 import { reconstruct } from '../../src/reconstruction/index.js';
 import { builder, image, slice } from '../ir/support.js';
 import { acknowledgeRequirements, emit, emittedFormals, execute } from '../emitters/c/support.js';
+import { assertMatchesIR, savedFrame, sourcePlan } from './frame-support.js';
 
 const u64 = integer(64);
 type Shape = 'shrink-wrapped' | 'modified-early' | 'slot-escapes' | 'other-object-escapes';
@@ -293,3 +295,51 @@ test('Windows x64 preserves only the low 128 bits of nonvolatile vector roots', 
     assert.ok(!source.local_validation?.some((record) => record.rule === 'frame_save'));
   }
 });
+
+/** A3: an escaped u32 at entry-SP -24 and a u32 at -16 kept as memory below
+ * a save area. `trimmed`: the save is `[-8, 0)`, so every byte from the
+ * lowest save slot to the entry SP is hidden and the object ends at -8.
+ * `local-above-save`: the save is `[-16, -8)` and a u64 kept as memory lies at
+ * `[-8, 0)`; `gap-above-save`: the save is `[-16, -8)` and `[-8, 0)` is
+ * untouched. Neither may end the object below the entry SP. */
+for (const abi of [darwinArm64Abi, sysvAMD64Abi, windowsX64Abi])
+  for (const shape of ['trimmed', 'local-above-save', 'gap-above-save'] as const)
+    test(`${abi.id}: the trimmed frame object never drops a byte that is not a hidden save (${shape})`, () => {
+      const u32 = integer(32);
+      const f = savedFrame(abi, `trim-${shape}`, shape === 'trimmed' ? -8n : -16n);
+      const base = f.at(-24n);
+      f.block.store(base, f.block.constant(u32, 3n));
+      if (shape === 'trimmed') f.block.store(f.at(-16n), f.block.constant(u32, 4n));
+      if (shape === 'local-above-save') f.block.store(f.at(-8n), f.argument);
+      f.call(base);
+      let sum = f.block.cast('zero_extend', u64, f.block.load(u32, base));
+      if (shape === 'trimmed')
+        sum = f.block.int(
+          'add',
+          sum,
+          f.block.cast('zero_extend', u64, f.block.load(u32, f.at(-16n))),
+        );
+      if (shape === 'local-above-save') sum = f.block.int('add', sum, f.block.load(u64, f.at(-8n)));
+      const fixture = f.finish(sum);
+      const plan = sourcePlan(fixture),
+        stack = plan.source?.stack,
+        saves = plan.source?.frame_saves?.bytes;
+      assert.ok(stack?.kind === 'object' && saves?.size === 8);
+      const end = stack.minimum_offset + stack.size;
+      assert.equal(end, shape === 'trimmed' ? -8n : 0n);
+      // Every byte between the object and the entry SP is a hidden save byte,
+      // and every member lies inside the object.
+      for (let byte = end; byte < 0n; byte++) assert.ok(saves.has(byte), `${byte}`);
+      for (const member of stack.members) assert.ok(member.offset + member.size <= end);
+      assert.equal(
+        plan.local_validation?.some((record) => record.rule === 'frame_object_save_area'),
+        shape === 'trimmed',
+      );
+      const c = emit(fixture.ir, fixture.extra).emission.text,
+        python = emit(fixture.ir, fixture.extra, 'python-like').emission.text;
+      if (shape === 'trimmed') {
+        assert.match(c, /uint32_t local_10;\s+uint8_t pad_c\[4\];\s+\} frame;/, c);
+        assert.match(python, /frame = stack_frame\(\d+, 16, -0x8\)/, python);
+      } else assert.match(python, /frame = stack_frame\(\d+, 16\)/, python);
+      assertMatchesIR(fixture, abi, [0n, 1n, 0x1234n, (1n << 64n) - 1n]);
+    });

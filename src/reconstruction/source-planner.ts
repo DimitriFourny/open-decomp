@@ -17,6 +17,7 @@ import {
   sameType,
   type DataType,
   type Expression,
+  type Instruction,
   type RegisterBinding,
   type Value,
 } from '../ir/index.js';
@@ -580,6 +581,75 @@ export function planSource(
               signature: signatures.length === 1 ? signatures[0]! : null,
               arguments: args,
               results: returned,
+              inputs: [],
+              outputs: node.register_outputs,
+            };
+          }
+        }
+      }
+      // An established variadic library contract that no rule closed: the fixed
+      // parameters are exactly the ABI classification of the established
+      // signature, so they bind at their register locations; the anonymous
+      // tail is never claimed and the list stays open. The declared result is
+      // left unbound: nothing here reads it, and binding it would make a void
+      // caller's exit register an established integer result.
+      const fixedContract =
+        view === 'source' &&
+        !projection &&
+        fact?.status === 'established' &&
+        (contracts.length === 1 || repeatedContract)
+          ? contracts[0]!.contract.signature
+          : undefined;
+      if (fixedContract?.variadic && node.results.length === 0) {
+        const layout = abi.classifyCall({ ...fixedContract, argument_list_complete: false });
+        if (
+          layout.state !== 'unsupported' &&
+          !layout.hidden_result &&
+          fixedContract.parameters &&
+          fixedContract.fixed_parameter_count === fixedContract.parameters.length &&
+          layout.parameters.length === fixedContract.parameters.length
+        ) {
+          const args: Value[] = [];
+          let valid = true;
+          for (const parameter of layout.parameters) {
+            const type = machineType(fixedContract.parameters[parameter.index]!);
+            const value =
+              type &&
+              bind(
+                `${node.id}:arg:${parameter.index}`,
+                node.register_inputs,
+                parameter.locations,
+                type,
+                block.id,
+              );
+            if (!value) {
+              valid = false;
+              break;
+            }
+            args.push(value);
+          }
+          if (node.arguments.some((value) => !args.some((argument) => argument.id === value.id)))
+            valid = false;
+          if (
+            valid &&
+            validation.presentation(
+              'library_fixed_prefix',
+              node.id,
+              `library_variadic_prefix: the established, non-conflicting variadic library contract fixes its ${args.length} leading parameter(s) at their ${abi.id} register locations, each bound to the caller's value there; the anonymous arguments are not claimed and the argument list stays open`,
+              [node.id],
+            )
+          ) {
+            validation.requireAbi(
+              'library_fixed_prefix',
+              [node.id],
+              'Printing the fixed prefix of a variadic library call assumes the established contract and the ABI classification of its fixed parameters; the anonymous arguments stay unresolved.',
+            );
+            projection = {
+              kind: 'inferred',
+              signature: null,
+              arguments: args,
+              argument_list_complete: false,
+              results: [],
               inputs: [],
               outputs: node.register_outputs,
             };
@@ -1632,6 +1702,7 @@ export function planSource(
       : undefined;
   const incomingParameters = new Map<bigint, Value>(),
     formalStackOffsets = new Map<string, bigint>();
+  const registerOutputs = new Map<string, readonly RegisterBinding[]>();
   const presentation: SourcePresentation = {
     inferred: !functionSignature,
     parameter_names: parameterNames,
@@ -1657,6 +1728,7 @@ export function planSource(
     call_results: callResults,
     value_origins: valueOrigins,
     definitions,
+    register_outputs: registerOutputs,
     formal_stack_offsets: formalStackOffsets,
     ...(declaredExtension?.hidden ? { hidden_result: declaredExtension.hidden } : {}),
   };
@@ -1680,6 +1752,32 @@ export function planSource(
     forcedInline,
     alias,
     make,
+    /** Source view (E3): one whole output replaces the cells of a root that a
+     * call or unknown effect writes; a call's projection lists it too. */
+    outputs(
+      node: Extract<Instruction, { kind: 'call' | 'unknown_effect' }>,
+      bindings: readonly RegisterBinding[],
+    ): void {
+      registerOutputs.set(node.id, bindings);
+      const projection = node.kind === 'call' ? calls.get(node.id) : undefined;
+      if (!projection) return;
+      const replaced = new Set(
+        node.register_outputs
+          .filter((binding) => !bindings.includes(binding))
+          .map(({ value }) => value.id),
+      );
+      const added = bindings.filter((binding) => !node.register_outputs.includes(binding));
+      calls.set(node.id, {
+        ...projection,
+        outputs: projection.outputs.flatMap((binding) =>
+          !replaced.has(binding.value.id)
+            ? [binding]
+            : binding.register.offset_bits === 0
+              ? added.filter(({ register }) => register.root === binding.register.root)
+              : [],
+        ),
+      });
+    },
     entryStack(): Value {
       if (!entryParameter) {
         entryParameter = make(
