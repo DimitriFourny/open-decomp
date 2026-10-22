@@ -850,7 +850,7 @@ Files that several items touch:
 
 ### P2: Struct bodies without pad members in the inline text
 
-- [ ] **Problem.** Struct bodies cost 7,200 tokens, and 482 of their 1,382 members (35%) are `uint8_t pad_0xOFF[N];`. Every real member name already carries its offset (`field_0x14`). Judges cite pads in 28 reasons.
+- [x] **Problem.** Struct bodies cost 7,200 tokens, and 482 of their 1,382 members (35%) are `uint8_t pad_0xOFF[N];`. Every real member name already carries its offset (`field_0x14`). Judges cite pads in 28 reasons.
   - **Root cause:** `structureBodies` (`renderer.ts:3369-3435`) emits a pad for every gap (`:3407`, `:3418`), because the same lines feed `emission.structures`/`types.h` (`:9350-9355`).
   - **Change:**
     - `structureBodies(compact)`: for `options.structures === 'inline'`, omit pads (`struct X { uint32_t field_0x4; opaque_1* field_0x28; };`). For `external` (export/`types.h`, `src/cli/export.ts:468-478`), keep today's text.
@@ -861,6 +861,7 @@ Files that several items touch:
   - **Tests:** `test/emitters/c/source-structs.test.ts` (inline vs external; pads in `emission.structures`); one test per dialect for `address->field_0x14` with a gap before it, with equal `execute()` results.
   - **Acceptance:** the 99 functions with bodies change. Everything else, including `types.h`, `emission.structures` and the checked view, is byte-identical.
   - **Expected effect:** −2,892 lexical tokens, geomean −0.024 (measured on texts).
+  - **Done (`wt/rm4-p2`).** 482 pads removed from 89 of the 99 body texts (the other 10 have no gap); lane diff against `od-main-1511bd6` is struct lines only, −2,808 lexical tokens (`\w+|\S` tokenizer) over the lane texts; `isDate` and `sqlite3Fts3Incrmerge` sit at the 256-record validation bound, so the record is refused and they keep their pads. The `compact_struct_members` record costs about +1,200 work in a function with bodies (one function-level record). ObjC ivars (declared names) and unnamed-offset members keep their pad; a trailing stride pad is replaced by the `/* access stride N, not size */` comment.
 
 ### P3: Header comment diet
 
