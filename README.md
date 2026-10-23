@@ -104,7 +104,11 @@ undefined8 _fts5SentenceFinderAdd(long param_1,undefined4 param_2)
 
 ### Speed
 
-![Wall time of Open Decomp and Ghidra 12.1.4 on the odbench corpus](docs/assets/benchmark-speed.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-speed-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="docs/assets/benchmark-speed-light.svg">
+  <img alt="Wall time of Open Decomp and Ghidra 12.1.4 on the odbench corpus" src="docs/assets/benchmark-speed.svg">
+</picture>
 
 Pure JavaScript keeps pace with Ghidra end to end: slower on the large SQLite binary, 2.7× faster on small ones, and first results in half the time because nothing waits for whole-program analysis. On the same 232 functions, a blind LLM judge preferred Open Decomp's listing to Ghidra's 180 times, Ghidra's 6 times, with 46 ties.
 
