@@ -308,3 +308,93 @@ for (const fixture of [
       }
     }
   });
+
+// V3: `void_like` leaves its callee's result in x0 before a later store, so its native
+// summary is void-like (`result_incidental`); `value_leaf` computes its result for the exit.
+// A tail transfer into the void-like callee forwards no result and its caller prints
+// `void` (an `incidental_result` record naming the callee); `return value_leaf(...)`
+// keeps the forwarded result. Every function is exported: caller consensus abstains.
+test(
+  'a void-like callee summary voids a tail transfer; a value callee keeps it',
+  { skip: nativeOracleSkip(), timeout: 120000 },
+  async (t) => {
+    const root = await mkdtemp(join(tmpdir(), 'open-decomp-native-void-'));
+    let session: BinarySession | undefined;
+    t.after(async () => {
+      await session?.close();
+      await rm(root, { recursive: true, force: true });
+    });
+    const binary = join(root, 'native-summary-void');
+    const compiled = spawnSync(
+      '/usr/bin/clang',
+      [
+        '-target',
+        'arm64-apple-macos13.0',
+        '-O1',
+        '-g0',
+        '-fno-builtin',
+        resolve('test/service/analysis/native-summary-void-source.c'),
+        '-o',
+        binary,
+      ],
+      { encoding: 'utf8' },
+    );
+    assert.equal(compiled.status, 0, compiled.stderr);
+    session = await openBinary(binary, { cachePath: join(root, 'cache') });
+    const leaf = (value: bigint): bigint => u64(value * 3n + 7n);
+    for (const emitter of ['c-like', 'python-like'] as const)
+      for (const name of ['tail_void', 'tail_value'] as const) {
+        const result = await session.decompile({ name: `_${name}` }, { emitter, view: 'source' });
+        assert.ok('data' in result && result.data.delivery === 'inline');
+        const emission = result.data.emission;
+        const voidLike = name === 'tail_void';
+        const records = (emission.inferences ?? []).filter(
+          (item) => item.details.kind === 'rewrite' && item.details.rule === 'incidental_result',
+        );
+        assert.equal(records.length > 0, voidLike, `${emitter} ${name} incidental_result`);
+        if (voidLike) {
+          assert.match(
+            emission.text,
+            emitter === 'c-like' ? /^void tail_void\(/m : /\) -> void:$/m,
+            emission.text,
+          );
+          assert.doesNotMatch(emission.text, /return void_like\(|unknown_result/);
+        } else assert.match(emission.text, /return value_leaf\(/, emission.text);
+        const calls: string[] = [];
+        const oracles = new Map<string, SourceCallOracle>();
+        for (const callee of ['void_like', 'value_leaf']) {
+          const oracle: SourceCallOracle = (args) => {
+            calls.push(callee);
+            return callee === 'value_leaf' ? leaf(args[0]!) : 0x77n;
+          };
+          oracles.set(callee, oracle).set(`_${callee}`, oracle);
+        }
+        const cell = 0x4000n,
+          stack = 0x9000n;
+        for (const value of cases) {
+          calls.length = 0;
+          const memory = new Map<bigint, number>();
+          for (let offset = -256n; offset < 64n; offset++) memory.set(stack + offset, 0);
+          for (let offset = 0n; offset < 24n; offset++) memory.set(cell + offset, 0);
+          const observed = execute(
+            emission,
+            formals(emission, [voidLike ? cell : value], stack),
+            memory,
+            0n,
+            new Map(),
+            new Map([['non-argument entry register', 0n]]),
+            oracles,
+          );
+          assert.equal(observed.exit, 'machine_return');
+          if (voidLike) {
+            assert.equal(observed.memory.get(cell + 16n), 1);
+            assert.deepEqual(calls, ['void_like']);
+            assert.deepEqual(observed.values, []);
+          } else {
+            assert.deepEqual(calls, ['value_leaf']);
+            assert.deepEqual(observed.values, [leaf(u64(value + 1n))]);
+          }
+        }
+      }
+  },
+);
