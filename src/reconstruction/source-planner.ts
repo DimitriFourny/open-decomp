@@ -738,9 +738,10 @@ export function planSource(
       target: callee.target,
       result_types:
         callee.return_types ?? callee.returns.map((register) => integer(register.width_bits)),
+      // Proven void (a library or method contract), or void-like under the
+      // transitive `incidental_result` premise (`result_incidental`).
       ...(view === 'source' &&
-      callee.returns_void &&
-      !callee.returns.length &&
+      ((callee.returns_void && !callee.returns.length) || callee.result_incidental) &&
       callee.parameter_state !== 'ambiguous'
         ? { result_void: true as const }
         : {}),
@@ -1128,11 +1129,10 @@ export function planSource(
   }
   // An established void interface returns nothing on any path: a tail transfer
   // forwards no result even when its callee's interface is unresolved.
-  if (
+  const declaredVoid =
     view === 'source' &&
-    (functionSignature ?? plainDeclaration)?.declaration.returns.kind === 'void'
-  )
-    for (const [id, tail] of tails) tails.set(id, { ...tail, result_void: true });
+    (functionSignature ?? plainDeclaration)?.declaration.returns.kind === 'void';
+  if (declaredVoid) for (const [id, tail] of tails) tails.set(id, { ...tail, result_void: true });
   for (const binding of entry.register_entry) {
     if (binding.register.root !== abi.stack_pointer.root && !expressions.has(binding.value.id))
       alias(binding.value, {
@@ -1168,6 +1168,9 @@ export function planSource(
     }
     return callerDemand;
   };
+  // Calls whose callee is void-like (`result_incidental`) and whose final result the
+  // selection treated as incidental: the incidental_result record lists them.
+  const incidentalCalls = new Set<string>();
   const selectPrimary = (demands: readonly RegisterDescriptor[]): SourcePrimaryResult | null =>
     view === 'source' &&
     !functionSignature &&
@@ -1191,6 +1194,12 @@ export function planSource(
           demands,
           observed: evidence.function_returns?.registers ?? [],
           context,
+          voidTails: new Set([...tails].flatMap(([id, tail]) => (tail.result_void ? [id] : []))),
+          incidentalCall: (id) => {
+            if (!inferred.get(id)?.result_incidental) return false;
+            incidentalCalls.add(id);
+            return true;
+          },
         })
       : null;
   let primaryResult: SourcePrimaryResult | null =
@@ -1351,7 +1360,7 @@ export function planSource(
       validation.presentation(
         'incidental_result',
         input.function.id,
-        `void-like source interface: the integer result register qualifies on every exit, but no caller demands it, the FP result register is ${incidentalFloating ? 'an incidental vector copy or fill temporary (its own record)' : 'unchanged or undefined on every exit'}, no tail transfer exists, and no exit path establishes it deliberately (moved back after a call/unknown-effect clobber on some path, another argument copied in, a projected call result that is the final action, or a constant/load/computation consumed by nothing but function exits and stores); call results left in place before later effects, untouched arguments and values that also address memory or feed calls or branches stay in exit metadata`,
+        `void-like source interface: the integer result register qualifies on every exit, but no caller demands it, the FP result register is ${incidentalFloating ? 'an incidental vector copy or fill temporary (its own record)' : 'unchanged or undefined on every exit'}, ${tailIds.length ? 'every tail transfer forwards no result' : 'no tail transfer exists'}, and no exit path establishes it deliberately (moved back after a call/unknown-effect clobber on some path, another argument copied in, a projected call result that is the final action, or a constant/load/computation consumed by nothing but function exits and stores); call results left in place before later effects, untouched arguments and values that also address memory or feed calls or branches stay in exit metadata${incidentalCalls.size ? `; the final result of a void-like callee (its own incidental_result premise, applied transitively) establishes nothing; void-like callees: ${[...new Set([...incidentalCalls].map((id) => inferred.get(id)?.target_subject_id ?? id))].join(', ')}` : ''}`,
         exitIds,
         primaryResult.reason,
       )
@@ -1378,6 +1387,53 @@ export function planSource(
       exitIds,
       primaryResult.reason,
     );
+  // A tail into a void-like callee (`result_incidental`, no void contract) forwards
+  // no result under that callee's `incidental_result` premise, applied
+  // transitively, and is recorded with the callees it rests on. It does so only
+  // where this function presents no result either (only tail transfers, or a
+  // void-like or result-free selection): beside a returned value it keeps
+  // forwarding the callee's result storage. Caller consensus and a declared void
+  // interface already void every tail.
+  const incidentalTails =
+    declaredVoid ||
+    (primaryResult?.kind === 'none' && primaryResult.void_like === 'caller_consensus')
+      ? []
+      : [...tails].filter(([id, tail]) => {
+          const callee = inferred.get(id);
+          return (
+            tail.result_void &&
+            callee?.result_incidental &&
+            !(callee.returns_void && !callee.returns.length)
+          );
+        });
+  if (incidentalTails.length) {
+    const anchors = incidentalTails.map(([id]) => id);
+    const resultFree =
+      !functionSignature &&
+      (primaryResult === null
+        ? !exitIds.length
+        : primaryResult.kind === 'none' &&
+          (primaryResult.void_like !== undefined || !evidence.function_returns?.registers.length));
+    if (
+      resultFree &&
+      validation.presentation(
+        'incidental_result',
+        input.function.id,
+        `void-like tail callee: the callee of each listed tail transfer has a native summary of its own resolved body (the source-view result selection over its native SSA with only semantic caller demand, through its own tails and final calls, recursion coinductive) whose integer result register is incidental on every exit path or undefined on some exit without proven result storage, and whose FP result register is unchanged or undefined on every exit; this function presents no result either; the transfer forwards no result; void-like callees: ${[...new Set(anchors.map((id) => inferred.get(id)?.target_subject_id ?? id))].join(', ')}`,
+        anchors,
+      )
+    )
+      validation.requireAbi(
+        'incidental_result',
+        anchors,
+        'Presenting a tail transfer without a result assumes callers read no result register of the void-like callee, transitively; no caller was scanned and no result-use evidence exists. The result registers keep their exact exit values in the exit metadata and checked view.',
+      );
+    else
+      for (const [id, tail] of incidentalTails) {
+        const { result_void: _void, ...forwarding } = tail;
+        tails.set(id, forwarding);
+      }
+  }
   // Native written-result storage is not result evidence once this rule
   // rejects it: it records which registers were written, not which one is read.
   const floatingRoot =

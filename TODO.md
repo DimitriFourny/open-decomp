@@ -347,7 +347,7 @@ Files that several items touch:
 
 ### V3: Void-like tails and final calls through callee summaries
 
-- [ ] **Problem.** Exported or address-taken functions that tail-call or final-call a callee OD itself prints `void` still print `unknown_result` or a value: `sqlite3session_delete`, `cume_distValueFunc`, `jsonAppendRaw`. Callers also print `call_result = sqlite3_free(…)`, although `sqlite3_free` prints `void`.
+- [x] **Problem.** Exported or address-taken functions that tail-call or final-call a callee OD itself prints `void` still print `unknown_result` or a value _(done (V3, reconstruction 96, native summary format 6): `result_incidental` on callees with a complete own body (incidental x0, or x0 undefined with no proven result storage; semantic demand only; coinductive); OD lane `od-rm4-v3` vs `od-main-d5ff0a4`: exactly `jsonAppendRaw` and `codeOffset` (both source `void`) print `void`, checked view identical; M1 void-source 31/5/8 → 33/4/7 of 44, value-source unchanged 5/186/0; lane work −0.93M (V2 sweeps skipped on `pcache1RemoveFromHash`, `jsonAppendRaw`, `codeOffset`), largest increase +5.3k, `sqlite3Fts3Incrmerge` −100, `isDate` +39, brotli `main` ±0. Not reached: `cume_distValueFunc` (its null path returns the final `createAggContext` result, which the classes count as deliberate), `sqlite3session_delete` (`sqlite3_free` ends in an unresolved indirect tail, so no own-complete body))_: `sqlite3session_delete`, `cume_distValueFunc`, `jsonAppendRaw`. Callers also print `call_result = sqlite3_free(…)`, although `sqlite3_free` prints `void`.
   - **Root cause:** a callee's void-likeness exists only in its own reconstruction, never in its native summary.
   - **Change:**
     - `native-transfer.ts`: add `result_incidental?: true` to `NativeInterface`/`InferredCallee`. Compute it on complete callee units by evaluating the `incidentalInteger` classes over native SSA with _semantic_ caller demand only: forwarded demand from the requesting caller is circular, as for self-calls (`source-facts.ts:2052-2054`). Recurse through the callee's tails; SCCs are coinductive.
@@ -874,7 +874,7 @@ Files that several items touch:
 
 ### P3: Header comment diet
 
-- [ ] **Problem.** OD prints 33.5 KB of comments against Ghidra's 1.3 KB, and the Claude tokenizer counts them.
+- [x] **Problem.** OD prints 33.5 KB of comments against Ghidra's 1.3 KB, and the Claude tokenizer counts them.
   - **Change** (one emitter change each):
     1. Drop the bare `/* partial */` before struct bodies (183 lines; `renderer.ts:3424-3431`). Keep `/* conflicts with X, Y */`, and drop the `partial; N fns;` prefix.
     2. Table notes drop the basis words (with P1).
@@ -888,6 +888,7 @@ Files that several items touch:
   - **Acceptance:** only comment bytes change (about −14.5 KB); lexical metrics byte-identical; checked view identical.
   - **Expected effect:** Claude geomean about −0.015 [estimate].
   - **Depends on:** P2 (same function).
+  - **Done (`wt/rm4-p3`):** OD lane vs `od-main-66cb8fe`: 139 of 235 texts change; only comment bytes (360 `/* partial… */` lines, 119 `open arity` lines shortened, 21 `import from` comments dropped, 7,855 bytes removed in total); identical after stripping comments (0 lexical diffs); coverage and failures unchanged; versions C 106, Python-like 102.
 
 ### P4: Struct class names without another function's name
 
@@ -957,7 +958,7 @@ Files that several items touch:
 
 ### L4: Rotate loop-carried copies so bottom tests become do-while
 
-- [ ] **Problem.** 34 loops are do-while candidates rejected only because the repeat copies are live on exit (`source-control.ts:1529`). 29 loops end with "test, then pure var-to-var copies": `sqlite3BtreeOpen`, `pcache1RemoveFromHash`, `renameColumnFunc` ×4, `renameTableFunc` ×3, … Ghidra prints all of them as do-while, with the copy at the loop top.
+- [x] **Problem.** 34 loops are do-while candidates rejected only because the repeat copies are live on exit (`source-control.ts:1529`). 29 loops end with "test, then pure var-to-var copies": `sqlite3BtreeOpen`, `pcache1RemoveFromHash`, `renameColumnFunc` ×4, `renameTableFunc` ×3, … Ghidra prints all of them as do-while, with the copy at the loop top. _Done (`wt/rm4-l4`): lane `od-rm4-l4` vs `od-main-0914f06`: 9 texts change (`pcache1RemoveFromHash`, `sqlite3BtreeOpen`, `renameColumnFunc` ×4, `renameTableFunc` ×5, `fts3EvalTestExpr`, `fts5FlushSecureDelete`, `sqlite3session_delete`, Mach-O `adler32_z` `-O2` sym and stripped), every one losing `while (true)` loops for do-while: `while (true)` 204 → 188, `break;` 385 → 369, `do {` 199 → 215, gotos and `for` unchanged; states unchanged; checked view identical; `loop_copy_rotation`; near-limit work +74 (`isDate`, `sqlite3Fts3Incrmerge`), +19 (brotli `main`)._
   - **Root cause:** the header phi `x = φ(x0, y)` is resolved by a copy `x = y` on the repeat edge, after the test (`partitionVariables` `source-control.ts:448-461`, `edgeCopies` `:676-703`).
   - **Change:**
     - Only for loops whose bottom test is the sole repeat edge and whose only blocker is live-on-exit copies of a loop-defined `y`:

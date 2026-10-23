@@ -1,4 +1,4 @@
-import type { OperationContext } from '../core/index.js';
+import { fingerprint, type OperationContext } from '../core/index.js';
 import { bitWidth, expressionOperands, type Instruction, type Value } from '../ir/index.js';
 import type {
   BlockRegion,
@@ -149,18 +149,57 @@ export class VariableLiveness {
   /** Live at block entry after its parameters are bound (includes used parameters). */
   private readonly entry = new Map<string, Uint32Array>();
   private readonly leafMemo = new Map<string, readonly number[]>();
+  /** Rotated loop headers (rotateLoopCopies): phi id -> the pseudo value bound instead. */
+  private readonly pseudo = new Map<string, Map<string, Value>>();
   private readonly words: number;
   readonly complete: boolean;
 
   constructor(
     private readonly program: Reconstruction,
     private readonly context: OperationContext,
-    limit = 4096,
+    private readonly limit = 4096,
     private readonly inlined: ReadonlyMap<string, InlineSite> = new Map(),
     private readonly alternateIndices: ReadonlyMap<string, readonly Value[]> = new Map(),
     /** Values printed as an operand of their reader, never as a variable. */
     omitted: ReadonlySet<string> = new Set(),
+    /** Derive the liveness of `program` = rotateLoopCopies(from's program, rotations). */
+    rotation?: { readonly from: VariableLiveness; readonly rotations: readonly LoopCopyRotation[] },
   ) {
+    if (rotation) {
+      const { from, rotations } = rotation;
+      for (const value of from.values) {
+        this.index.set(value.id, this.values.length);
+        this.values.push(value);
+      }
+      for (const { header, phi, pseudo } of rotations) {
+        this.index.set(pseudo.id, this.values.length);
+        this.values.push(pseudo);
+        const phis = this.pseudo.get(header) ?? new Map<string, Value>();
+        phis.set(phi.id, pseudo);
+        this.pseudo.set(header, phis);
+      }
+      this.words = (this.values.length + 31) >>> 5;
+      this.complete = from.complete && this.values.length <= limit;
+      for (const [id, leaves] of from.leafMemo) this.leafMemo.set(id, leaves);
+      // Every edge into a rotated header removes what the header binds (its
+      // pseudo values instead of its phis), so only the header's own entry set
+      // changes: its first definitions read each pseudo value and write its phi.
+      for (const [block, live] of from.entry) {
+        context.checkpoint(this.words);
+        const next = new Uint32Array(this.words);
+        next.set(live);
+        this.entry.set(block, next);
+      }
+      for (const { header, phi, pseudo } of rotations) {
+        const live = this.entry.get(header);
+        if (!live) continue;
+        const old = this.index.get(phi.id)!,
+          id = this.index.get(pseudo.id)!;
+        live[old >>> 5]! &= ~(1 << (old & 31));
+        live[id >>> 5]! |= 1 << (id & 31);
+      }
+      return;
+    }
     const source = program.source;
     for (const value of program.values.values()) {
       context.checkpoint(1);
@@ -183,6 +222,20 @@ export class VariableLiveness {
     this.words = (this.values.length + 31) >>> 5;
     this.complete = this.values.length <= limit && program.blocks.size <= limit;
     if (this.complete) this.solve();
+  }
+
+  /** This liveness for `program`, the reconstruction rotateLoopCopies made
+   * from this one's with `rotations`. */
+  rotated(program: Reconstruction, rotations: readonly LoopCopyRotation[]): VariableLiveness {
+    return new VariableLiveness(
+      program,
+      this.context,
+      this.limit,
+      this.inlined,
+      this.alternateIndices,
+      undefined,
+      { from: this, rotations },
+    );
   }
 
   /** Variable leaves read when printing a value (inline expressions expanded). */
@@ -313,14 +366,16 @@ export class VariableLiveness {
     return events;
   }
 
-  /** Bound at block entry: its parameters, plus formals at the function entry. */
+  /** Bound at block entry: its parameters (a rotated phi's pseudo value instead
+   * of the phi), plus formals at the function entry. */
   bound(block: BlockRegion): number[] {
     const ids: number[] = [];
     const add = (value: Value): void => {
       const index = this.index.get(value.id);
       if (index !== undefined) ids.push(index);
     };
-    block.parameters.forEach(add);
+    const pseudo = this.pseudo.get(block.id);
+    for (const value of block.parameters) add(pseudo?.get(value.id) ?? value);
     if (block.id === this.program.function.entry) this.program.parameters.forEach(add);
     return ids;
   }
@@ -706,6 +761,224 @@ export function edgeCopies<T extends ValuePair>(
         bitWidth(narrow.type) < bitWidth(destination.type))
     );
   });
+}
+
+/** A loop-carried copy `x = y` rotated to the top of its loop (L4). The header
+ * binds `pseudo` instead of the phi `x`: every incoming edge writes it (the
+ * entry value, or `y` on the repeat edge), and the header's first statement is
+ * `definition`, `x = pseudo`. `pseudo` and `y` do not interfere, so the
+ * partition may give them one variable and the repeat edge prints no copy. */
+export interface LoopCopyRotation {
+  readonly header: string;
+  readonly phi: Value;
+  readonly source: Value;
+  readonly pseudo: Value;
+  readonly definition: Extract<Instruction, { kind: 'assign' }>;
+}
+
+/** Loops (C-like do-while candidates) whose lexically last block ends in a
+ * test with one copy-carrying arm that is the sole edge back to the header and
+ * one arm leaving the loop, where some repeat copies `x = y` are live on exit
+ * or read by the exit edge's copies: the only reason a do-while cannot move
+ * them before its test. Each such copy rotates when `y` is a printed value of
+ * the phi's type that is not live into the header (defined in the loop) and
+ * `eligible` holds. A loop rotates only when all of them do and every other
+ * repeat copy is unread by the test, so no copy blocker remains, and only when
+ * `topTested` is false for its header and the bottom test's exit target (a
+ * header test leaving for the same continuation may already print the loop as
+ * `while`, which the rotated copy would displace). */
+export function loopCopyRotations(
+  body: Region,
+  program: Reconstruction,
+  liveness: VariableLiveness,
+  plain: (control: Control) => boolean,
+  eligible: (phi: Value, source: Value) => boolean,
+  topTested: (header: BlockRegion, follow: string) => boolean,
+  context: OperationContext,
+): LoopCopyRotation[] {
+  const result: LoopCopyRotation[] = [];
+  if (!program.source || !liveness.complete) return result;
+  const blocksOf = (region: Region, into: BlockRegion[] = []): BlockRegion[] => {
+    context.checkpoint(1);
+    if (region.kind === 'sequence') for (const child of region.regions) blocksOf(child, into);
+    else if (region.kind === 'loop') blocksOf(region.body, into);
+    else {
+      into.push(region);
+      for (const arm of controlArms(region.control)) if (arm.body) blocksOf(arm.body, into);
+    }
+    return into;
+  };
+  // Lexical actions of the edges entering each block in this layout, found
+  // once on first use.
+  let incoming: Map<string, { transfer: ParallelTransfer; action: TransferAction }[]> | undefined;
+  const entries = (
+    header: string,
+  ): readonly { transfer: ParallelTransfer; action: TransferAction }[] => {
+    if (!incoming) {
+      const found = new Map<string, { transfer: ParallelTransfer; action: TransferAction }[]>();
+      visitTransfers(body, 'c-like', context, (occurrence) => {
+        const list = found.get(occurrence.transfer.target) ?? [];
+        list.push({
+          transfer: occurrence.transfer,
+          action: occurrenceAction(occurrence, 'c-like'),
+        });
+        found.set(occurrence.transfer.target, list);
+      });
+      incoming = found;
+    }
+    return incoming.get(header) ?? [];
+  };
+  const consider = (loop: Extract<Region, { kind: 'loop' }>): void => {
+    let last: Region | undefined = loop.body;
+    while (last?.kind === 'sequence') {
+      context.checkpoint(1);
+      last = last.regions.at(-1);
+    }
+    if (last?.kind !== 'block' || last.control.kind !== 'if' || !plain(last.control)) return;
+    const control = last.control,
+      header = program.blocks.get(loop.header);
+    const again = [control.when_true, control.when_false].find(
+      (arm) => arm.transfer.mode === 'continue' && arm.transfer.target === loop.header,
+    );
+    const leave = again === control.when_true ? control.when_false : control.when_true;
+    const copies = again ? (program.transfers.get(again.transfer) ?? []) : [];
+    if (
+      !again ||
+      again.body ||
+      leave.body ||
+      !copies.length ||
+      !header ||
+      topTested(header, leave.transfer.target)
+    )
+      return;
+    const exit = liveness.live(leave.transfer.target),
+      entry = liveness.live(loop.header);
+    if (!exit || !entry) return;
+    const exitReads = new Set(
+      (program.transfers.get(leave.transfer) ?? []).flatMap((copy) => liveness.leaves(copy.source)),
+    );
+    const testReads = new Set(liveness.leaves(control.condition));
+    const found: LoopCopyRotation[] = [];
+    for (const { destination: phi, source } of copies) {
+      context.checkpoint(1);
+      const index = liveness.index.get(phi.id);
+      if (index === undefined || program.inline.has(phi.id)) continue;
+      // Copies dead on exit move before the test; one the test reads keeps
+      // the loop from rotating (only L2's restatement could print it).
+      if (!liveness.has(exit, index) && !exitReads.has(index)) {
+        if (testReads.has(index)) return;
+        continue;
+      }
+      const carried = liveness.index.get(source.id);
+      if (
+        carried === undefined ||
+        program.inline.has(source.id) ||
+        liveness.has(entry, carried) ||
+        !header.parameters.some((parameter) => parameter.id === phi.id) ||
+        phi.type.kind !== source.type.kind ||
+        bitWidth(phi.type) !== bitWidth(source.type) ||
+        !eligible(phi, source)
+      )
+        return;
+      const pseudo: Value = {
+        id: `entity_${fingerprint(['loop-copy-rotation', phi.id])}`,
+        type: phi.type,
+      };
+      found.push({
+        header: loop.header,
+        phi,
+        source,
+        pseudo,
+        definition: {
+          kind: 'assign',
+          id: `entity_${fingerprint(['loop-copy-rotation-definition', phi.id])}`,
+          result: phi,
+          expression: { kind: 'cast', op: 'bitcast', value: pseudo },
+          provenance: header.provenance,
+        },
+      });
+    }
+    if (!found.length) return;
+    const inside = blocksOf(loop.body);
+    // The repeat edge is the only edge back, and every other edge falls into
+    // the loop (as bottom tests require: `continue` would reach the test).
+    if (
+      leave.transfer.target === loop.header ||
+      inside.some((block) => block.id === leave.transfer.target) ||
+      inside.some((block) =>
+        controlTransfers(block.control).some(
+          (transfer) => transfer !== again.transfer && transfer.target === loop.header,
+        ),
+      ) ||
+      entries(loop.header).some(
+        ({ transfer, action }) => transfer !== again.transfer && action !== 'fallthrough',
+      )
+    )
+      return;
+    result.push(...found);
+  };
+  // Charged per loop: the walk between loops only follows region links.
+  const visit = (region: Region): void => {
+    if (region.kind === 'sequence') region.regions.forEach(visit);
+    else if (region.kind === 'loop') {
+      context.checkpoint(1);
+      consider(region);
+      visit(region.body);
+    } else for (const arm of controlArms(region.control)) if (arm.body) visit(arm.body);
+  };
+  visit(body);
+  return result;
+}
+
+/** `program` with `rotations` applied: each edge into a rotated header writes
+ * the phi's pseudo value instead of the phi, and the header's first source
+ * definitions assign every rotated phi from its pseudo value. */
+export function rotateLoopCopies(
+  program: Reconstruction,
+  rotations: readonly LoopCopyRotation[],
+  context: OperationContext,
+): Reconstruction {
+  const source = program.source;
+  if (!source || !rotations.length) return program;
+  const pseudo = new Map<string, Map<string, Value>>(),
+    definitions = new Map(source.definitions ?? []),
+    values = new Map(program.values),
+    live = new Set(program.live),
+    counts = new Map(program.use_counts);
+  context.checkpoint(values.size + live.size + counts.size + definitions.size);
+  for (const rotation of [...rotations].reverse()) {
+    const phis = pseudo.get(rotation.header) ?? new Map<string, Value>();
+    phis.set(rotation.phi.id, rotation.pseudo);
+    pseudo.set(rotation.header, phis);
+    definitions.set(rotation.header, [
+      rotation.definition,
+      ...(definitions.get(rotation.header) ?? []),
+    ]);
+    values.set(rotation.pseudo.id, rotation.pseudo);
+    live.add(rotation.pseudo.id);
+    counts.set(rotation.pseudo.id, 1);
+  }
+  const transfers = new Map(program.transfers);
+  for (const [transfer, copies] of program.transfers) {
+    const phis = pseudo.get(transfer.target);
+    if (!phis) continue;
+    context.checkpoint(copies.length);
+    transfers.set(
+      transfer,
+      copies.map((copy) => {
+        const destination = phis.get(copy.destination.id);
+        return destination ? { destination, source: copy.source } : copy;
+      }),
+    );
+  }
+  return {
+    ...program,
+    source: { ...source, definitions },
+    values,
+    live,
+    use_counts: counts,
+    transfers,
+  };
 }
 
 export interface Occurrence {

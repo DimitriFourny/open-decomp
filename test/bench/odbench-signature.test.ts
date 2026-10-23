@@ -15,7 +15,7 @@ import type { FunctionResult, LaneRun } from '../../scripts/bench/odbench/types.
 
 const OD_TEXT = [
   '/* C-like */',
-  '/* open arity (calls show proven args only): helper (not a definition) */',
+  '/* open arity (proven args only): helper (not a definition) */',
   'typedef struct node_arg0_1f2e node_arg0_1f2e;',
   'struct node_arg0_1f2e { uint64_t field_0x0; uint8_t pad_0x8[8]; };',
   'extern _Noreturn void __stack_chk_fail(void);',

@@ -557,6 +557,22 @@ derivations over the IR; while the shared allowance remains, the bit-vector
 checker re-proves them over the copy's source value and may veto. Python-like
 keeps `while True` for bottom tests.
 
+A C loop whose lexically last test is its sole repeat edge, entered otherwise
+only by falling into it, whose only copy blocker is a repeat copy `x = y` live
+on exit (or read by the exit copies) of a value `y` defined in the loop (not
+live into the header), rotates that copy to the loop top
+(`loop_copy_rotation`, roadmap 4 L4): the header binds a fresh value `p`
+instead of the phi `x`, every incoming edge writes `p` (the entry value, `y` on
+the repeat edge) and the header's first statement is `x = p`. `p` is dead after
+that statement and `y` is defined later, so the partition gives them one
+variable (pseudo pairs join first) and the repeat edge prints no copy:
+`do { x = p; ... p = next(x); } while (p != 0);`. Copy placement only, no
+premise; the reconstruction validator treats `p` as the header's bound
+parameter and `x = p` as its first definition, and the parallel-copy check maps
+each edge's `x` to `p`. Not rotated: headers that test for the loop
+continuation with at most one printed statement (they may print as `while`),
+Python-like (no do-while) and the checked view.
+
 Return-tail copies remain owned by the edge that enters them. When all incoming
 edges use copies and a tail's original home is removed, its copied continuation
 is removed with it; no orphan return remains after a terminal statement.
@@ -1257,7 +1273,7 @@ a read and its declaration comment adds `initially <symbol>` when the slot holds
 symbol's exact address at load time. In the source view a
 pointer-width read of such a slot is the imported symbol's address (`&sym`) and a
 read through it is the symbol itself (`sym`), declared once with a compact comment
-(`import from <library basename>`) and the bind records as evidence. The declared type is
+(a `/* import <native name> */` comment only when the native symbol differs from the printed name or its Mach-O `_`-prefixed form; the Python-like `import_view` names the library and native symbol as arguments) and the bind records, which carry the library, as evidence. The declared type is
 the header-declared type when the library catalog knows the variable, otherwise the
 width of the accesses seen; a function that writes the
 slot keeps explicit memory accesses. Python-like declares them with `import_view`.
@@ -1313,7 +1329,7 @@ C source-view integer locals take a signed or narrow type by conversion cost (`l
 
 Synthetic source structure views use deterministic `struct_N` names, unified by
 observed member types and offsets within the function. Their C typedefs expose
-`f_<hex offset>` members and explicit byte gaps, with a `/* partial; N fns */` note (`partial`: only the members the text uses; `N fns`: merged from that many functions; conflicts are listed): a function declares only the members its text accesses (the inline body omits the byte gaps: a member named `field_0xOFFSET` states its own offset, recorded as the `compact_struct_members` presentation rule with the omitted gaps; the access-stride comment states the element size instead of a trailing pad; an Objective-C ivar, whose name carries no offset, keeps its pad; `structures: external` declarations and `types.h` keep every gap as a `pad_0xOFFSET` member; a structure the text never accesses stays an incomplete typedef), the image-wide layout lives in the types view / `types.h`. `observed_struct_layout` records nonoverlap and exact
+`f_<hex offset>` members and explicit byte gaps, with no note when the layout merely omits unaccessed members (every inline body is partial by construction) and a `/* conflicts with X, Y */` note when the image-wide layouts conflict: a function declares only the members its text accesses (the inline body omits the byte gaps: a member named `field_0xOFFSET` states its own offset, recorded as the `compact_struct_members` presentation rule with the omitted gaps; the access-stride comment states the element size instead of a trailing pad; an Objective-C ivar, whose name carries no offset, keeps its pad; `structures: external` declarations and `types.h` keep every gap as a `pad_0xOFFSET` member; a structure the text never accesses stays an incomplete typedef), the image-wide layout lives in the types view / `types.h`. `observed_struct_layout` records nonoverlap and exact
 width checks and a target-layout ABI requirement; overlapping, unsupported or
 budget-exhausted layouts stay opaque. Nested pointer types retain their complete
 declaration closure. Proven scalar array strides produce array members without
@@ -1365,7 +1381,7 @@ Arithmetic, narrowing and folding candidates keep the retained-original fallback
 The source C renderer emits `extern` declarations only for direct calls with an
 established prototype (library, debug or recovered source signatures, including variadic
 tails). A call interface observed only at its call sites is not declared: the call prints
-it, and an open list is stated once per function on the `open arity (calls show proven args
+it, and an open list is stated once per function on the `open arity (proven args
 only): f, g` comment line (both dialects) while the calls print only their proven
 arguments. Declarations never close an unknown argument remainder or manufacture an
 authored prototype; exhausted `call_declaration` records leave the call undeclared.
@@ -1687,6 +1703,35 @@ on every path (`void_like_result: 'caller_consensus'`), every tail transfer gets
 `result_void` and prints `h(...); return;`, the result registers move to
 `exit_scratch` with their exact values, and the `caller_consensus` presentation
 record names the direct sites. The checked view is unchanged.
+
+Void-like callee summaries (`result_incidental`; source view only; the
+`incidental_result` premise applied transitively). After the native dependency
+worklist, a callee whose result reaches the requesting function's own exit (a
+tail transfer, or a call whose result demand is forwarded to the exit alone) is
+classified on demand by the same result selection over its native SSA
+(`nativeIncidentalResult`): only callers' semantic result demand counts (a caller
+forwarding the result to its own exit is circular, as for a self-call); its
+callee interfaces project only proven written results; every tail of its own must
+forward no result (a void contract or a void-like callee) and a final call into a
+void-like callee establishes nothing; the FP carrier must be unchanged or
+undefined on every exit. The callee is void-like when its integer result register
+is incidental on every exit path, or undefined on some exit (unknown entry value,
+unprojected call clobber) with no proven written result storage: the cases in
+which its own source view presents no result. A context-specialized body
+qualifies for exactly the call that supplies its constants. Only bodies whose own
+graph, stack and call analysis are complete (no own reason, budget cut, refinement
+limit, closed parameter state) qualify; gaps deeper in their callees reach them
+only through proven written results and those callees' own flags. Recursion is
+coinductive: a callee under evaluation is assumed void-like, and an assumption
+that fails settles it non-void-like and reruns. In the requesting function, a
+tail into such a callee gets `result_void` where the function presents no result
+either (only tail transfers, or a void-like or result-free selection), recorded as
+an `incidental_result` presentation listing the callee ids plus an
+`abi_conformance` requirement; beside a returned value it keeps forwarding.
+`incidental_result` itself is open when every tail transfer forwards no result
+(also through a void library contract), and a final call into a void-like callee
+no longer establishes the result; the record's scope then lists those callee
+ids. `jsonAppendRaw` and `codeOffset` print `void` this way. The checked view is unchanged.
 
 A context-specialized callee summary (constant/alias call-site assumptions)
 keeps the callee's result root. The context unit carries the baseline body's

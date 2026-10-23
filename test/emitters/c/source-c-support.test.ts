@@ -349,7 +349,7 @@ for (const conflict of [false, true])
     // is stated on one comment line, not by a declaration or a marker at each call.
     assert.doesNotMatch(emission.text, /^extern /m);
     assert.ok(!emission.local_validation?.some((record) => record.rule === 'call_declaration'));
-    assert.match(emission.text, /^\/\* open arity \([^)]*\): sub_4000 \*\/$/m);
+    assert.match(emission.text, /^\/\* open arity \(proven args only\): sub_4000 \*\/$/m);
     assert.match(emission.text, /sub_4000\(7\)/);
     assert.doesNotMatch(emission.text, /, \.\.\.\)/);
     assert.ok(emission.helpers.some((helper) => helper.name === 'unknown_argument_remainder'));
@@ -370,7 +370,7 @@ for (const conflict of [false, true])
     assert.match(checked, /sub_4000\(7, unknown_argument_remainder\(\)\)/);
     // Python-like states the open arity the same way.
     const python = emit(ir, { source }, 'python-like').emission.text;
-    assert.match(python, /^# open arity \([^)]*\): sub_4000$/m);
+    assert.match(python, /^# open arity \(proven args only\): sub_4000$/m);
     assert.match(python, /sub_4000\(7\)/);
     assert.doesNotMatch(python, /\.\.\./);
   });

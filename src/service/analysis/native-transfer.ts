@@ -10,6 +10,7 @@ import {
   bitWidth,
   sameType,
   type DataType,
+  type Edge,
   type RegisterBinding,
   type SSAForm,
   type Value,
@@ -21,6 +22,11 @@ import {
   type RegisterTypeSlice,
 } from '../../reconstruction/source-register-types.js';
 import { createSlotTyper, type SlotTyper } from '../../reconstruction/source-slot-types.js';
+import {
+  selectSourcePrimaryResult,
+  type ResultBlock,
+  type ResultControl,
+} from '../../reconstruction/source-results.js';
 import { createNativeInterfaceIndex, type NativeInterfaceIndex } from './native-entry.js';
 import { parameterRegisters } from './native-abi.js';
 import type { NativeInterface } from './native-worklist.js';
@@ -650,4 +656,158 @@ export function inheritGenericResult<T extends NativeInterface>(
     return_types: types,
     written_result: { registers: returns, types },
   };
+}
+
+/** Reason the integer result register of a native body is incidental on every exit
+ * path, or undefined: the `incidental_result` classes of the source view
+ * (`selectSourcePrimaryResult`) evaluated over native SSA. `demands` is semantic
+ * caller demand only; a caller that forwards the result to its own exit is not
+ * evidence of use (it is the circular demand of a self-call). Every tail transfer
+ * must forward no result (a void contract, or `voidLike`), a final call into a
+ * `voidLike` callee establishes nothing, and the FP result register must be
+ * unchanged or undefined on every exit. Lane types are not consulted: an FP exit
+ * write without them is untyped and keeps the body from qualifying. A body with no
+ * return exit qualifies when it has tail transfers and all of them forward no result. */
+export function nativeIncidentalResult(
+  ir: SSAForm,
+  abi: AbiProfile,
+  analysis: CallAnalysisResult,
+  interfaces: ReadonlyMap<string, NativeInterface>,
+  own: Pick<NativeInterface, 'parameters' | 'returns'>,
+  demands: readonly RegisterDescriptor[],
+  voidLike: (call: string) => boolean,
+  context: OperationContext,
+  index?: NativeInterfaceIndex,
+): string | undefined {
+  const classify = (returns: { kind: 'pointer' } | { kind: 'float'; bits: 64 }) =>
+    abi.classifyCall({ returns, parameters: [], variadic: false, fixed_parameter_count: 0 })
+      .returns[0];
+  const integer = classify({ kind: 'pointer' }),
+    floating = classify({ kind: 'float', bits: 64 });
+  if (integer?.kind !== 'register' || floating?.kind !== 'register') return undefined;
+  if (demands.some((register) => register.root === integer.register.root)) return undefined;
+  const { states, entry, expressions, sources, calls, exits, tails } = (
+    index ?? createNativeInterfaceIndex(ir, abi, context)
+  ).preparation(ir, context, abi);
+  const voidTails = new Set<string>();
+  for (const tail of tails) {
+    context.checkpoint(1);
+    const id = tail.terminator.id,
+      callee = interfaces.get(id);
+    if (
+      callee?.parameter_state === 'ambiguous' ||
+      !((callee?.returns_void && !callee.returns.length) || voidLike(id))
+    )
+      return undefined;
+    voidTails.add(id);
+  }
+  if (!exits.length) return tails.length ? 'every tail transfer forwards no result' : undefined;
+  const parametersOf = new Map(ir.blocks.map((block) => [block.id, block.parameters]));
+  let reentered = false;
+  const transfer = (edge: Edge) => {
+    if (edge.target === ir.entry) reentered = true;
+    const destinations = parametersOf.get(edge.target) ?? [];
+    return {
+      target: edge.target,
+      copies: edge.arguments.flatMap((source, position) =>
+        destinations[position] ? [{ destination: destinations[position], source }] : [],
+      ),
+    };
+  };
+  const blocks = new Map<string, ResultBlock>();
+  for (const block of ir.blocks) {
+    context.checkpoint(1);
+    const terminator = block.terminator;
+    // Control continuing at an unresolved jump target may still return a result.
+    // An unknown exit (an FP-environment guard arm under its recorded requirement)
+    // returns nothing, as in the source view; the caller admits only bodies whose
+    // own graph is resolved.
+    if (terminator.kind === 'indirect' && !terminator.tail_call) return undefined;
+    const control: ResultControl =
+      terminator.kind === 'jump'
+        ? { kind: 'jump', id: terminator.id, transfer: transfer(terminator.edge) }
+        : terminator.kind === 'branch'
+          ? {
+              kind: 'if',
+              id: terminator.id,
+              condition: terminator.condition,
+              when_true: { transfer: transfer(terminator.when_true) },
+              when_false: { transfer: transfer(terminator.when_false) },
+            }
+          : terminator.kind === 'switch'
+            ? {
+                kind: 'switch',
+                id: terminator.id,
+                value: terminator.value,
+                cases: terminator.cases.map((item) => ({ arm: { transfer: transfer(item.edge) } })),
+                otherwise: { transfer: transfer(terminator.otherwise) },
+              }
+            : terminator;
+    const state = states.get(block.id);
+    blocks.set(block.id, {
+      id: block.id,
+      // Entry cells are ABI parameters or unknown, as in the source view.
+      parameters: block.id === ir.entry ? [] : block.parameters,
+      register_entry: state?.entry ?? [],
+      register_exit: state?.exit ?? [],
+      statements: block.instructions,
+      control,
+    });
+  }
+  // A loop back into the entry block would merge the entry values with others.
+  if (reentered) return undefined;
+  const roots = new Set(own.parameters.map((register) => register.root));
+  const parameterValues = new Map(
+    entry
+      .filter((binding) => roots.has(binding.register.root))
+      .map((binding) => [binding.value.id, binding.register]),
+  );
+  // Outputs inside the callee's written result storage are its projected results;
+  // other outputs are unprojected clobbers.
+  const callResults = new Map<string, Value[]>();
+  for (const node of calls) {
+    context.checkpoint(1);
+    const contract = interfaces.get(node.id);
+    const written = contract?.written_result?.registers ?? contract?.returns ?? [];
+    const values = node.register_outputs
+      .filter((binding) =>
+        written.some(
+          (register) =>
+            register.root === binding.register.root &&
+            register.offset_bits <= binding.register.offset_bits &&
+            register.offset_bits + register.width_bits >=
+              binding.register.offset_bits + binding.register.width_bits,
+        ),
+      )
+      .map((binding) => binding.value);
+    if (values.length) callResults.set(node.id, values);
+  }
+  const selected = selectSourcePrimaryResult({
+    blocks,
+    entry: blocks.get(ir.entry)!,
+    expressions,
+    sources,
+    typed: new Map(),
+    parameters: parameterValues,
+    callResults,
+    stack: analysis.stack,
+    integer,
+    floating,
+    argumentRoots: new Set(parameterRegisters(abi).map((register) => register.root)),
+    demands,
+    observed: [],
+    context,
+    voidTails,
+    incidentalCall: voidLike,
+  });
+  if (selected?.kind !== 'none' || selected.incidental_floating !== undefined) return undefined;
+  if (selected.void_like === 'incidental_result') return selected.reason;
+  // No result defined on some exit, and no proven written result storage: the
+  // source view presents no result either (the `primary_result` none rule).
+  return !selected.void_like &&
+    selected.integer_undefined &&
+    selected.floating_inert &&
+    !own.returns.some((register) => register.root === integer.register.root)
+    ? selected.reason
+    : undefined;
 }

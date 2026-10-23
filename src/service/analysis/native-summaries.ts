@@ -14,7 +14,7 @@ import type { NativePreparationInput, PreparedNativeUnit } from './native-prepar
 import type { NativeDependency } from './native-worklist.js';
 
 /** Bump when the stored shape of a prepared unit changes. */
-const NATIVE_SUMMARY_FORMAT = 5;
+const NATIVE_SUMMARY_FORMAT = 6;
 
 /** A prepared callee body kept for reuse, with exactly what reusing it must replay. */
 export interface PreparedUnitEntry {

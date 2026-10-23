@@ -73,6 +73,10 @@ export interface NativeWorklistResult<U extends NativeSummaryUnit> {
   readonly context_keys: ReadonlyMap<string, string>;
   readonly remaining: NativeSummaryCapacity;
   readonly complete: boolean;
+  /** Whether a unit with a complete own body is void-like (`result_incidental`), by the
+   * `incidental` option; evaluated on demand, recursing only into the tails and final
+   * calls the classification consults (recursion coinductive). False without the option. */
+  readonly result_incidental: (key: string) => boolean;
 }
 
 const unresolved = (): NativeInterface => ({
@@ -193,6 +197,18 @@ export function nativeDependencyWorklist<U extends NativeSummaryUnit>(options: {
     context: OperationContext,
     demandedReturns: readonly RegisterDescriptor[],
   ) => NativeInterface;
+  /** Whether a complete unit's integer result is incidental (`nativeIncidentalResult`).
+   * `dependencies` are its final callee interfaces by call id, `observed` its own
+   * summary, `demands` only the semantic result demand of loaded callers (forwarded
+   * demand is circular), and `voidLike` evaluates a callee's own flag by call id. */
+  readonly incidental?: (
+    unit: U,
+    observed: NativeInterface,
+    dependencies: ReadonlyMap<string, NativeInterface>,
+    demands: readonly RegisterDescriptor[],
+    voidLike: (call: string) => boolean,
+    context: OperationContext,
+  ) => boolean;
 }): NativeWorklistResult<U> {
   const { context } = options;
   const units = new Map<string, U>(),
@@ -781,11 +797,93 @@ export function nativeDependencyWorklist<U extends NativeSummaryUnit>(options: {
       reasons: limits,
       complete: false,
     });
+  // `result_incidental`, evaluated on demand after completeness is known. A cycle
+  // through a key under evaluation assumes it void-like (coinduction); when an
+  // assumed key turns out not to be, it is settled false and the evaluation reruns.
+  // A false result stays false under fewer assumptions (the classification is
+  // monotone in its callees' flags), so every false result settles at once.
+  const settled = new Map<string, boolean>();
+  let semantic: Map<string, RegisterDescriptor[]> | undefined;
+  const resultIncidental = (root: string): boolean => {
+    const incidental = options.incidental;
+    if (!incidental) return false;
+    if (!semantic) {
+      // Only semantic demand of loaded callers (roots included): a caller that
+      // forwards the result to its own exit is circular evidence.
+      semantic = new Map();
+      const record = (dependency: NativeDependency): void => {
+        if (!dependency.return_demand_semantic?.length) return;
+        const key = dependencyKey(dependency);
+        semantic!.set(key, [...(semantic!.get(key) ?? []), ...dependency.return_demand_semantic]);
+      };
+      for (const dependency of options.root_dependencies ?? []) record(dependency);
+      for (const unit of units.values())
+        for (const dependency of unit.dependencies) {
+          context.checkpoint(1);
+          record(dependency);
+        }
+    }
+    for (;;) {
+      const trial = new Map<string, boolean>(),
+        pending = new Set<string>(),
+        assumed = new Set<string>();
+      const visit = (key: string): boolean => {
+        context.checkpoint(1);
+        const known = settled.get(key) ?? trial.get(key);
+        if (known !== undefined) return known;
+        if (pending.has(key)) {
+          assumed.add(key);
+          return true;
+        }
+        const unit = units.get(key),
+          summary = summaries.get(key);
+        // The body itself must be complete: its own graph, stack and call analysis
+        // (no own reason, budget cut, fallback or refinement limit) and a closed
+        // parameter state. Gaps deeper in its callees bear on their own results,
+        // which reach this body only through proven written results and their flags.
+        if (
+          !unit ||
+          !summary ||
+          unit.reasons.length ||
+          unit.budget_truncated ||
+          fallbackReasons.has(key) ||
+          refinementLimits.has(key) ||
+          summary.observed.parameter_state === 'ambiguous'
+        ) {
+          trial.set(key, false);
+          return false;
+        }
+        pending.add(key);
+        const calls = new Map(unit.dependencies.map((item) => [item.call_id, item]));
+        const value = incidental(
+          unit,
+          summary.observed,
+          dependenciesOf(unit, new Set()),
+          semantic!.get(key) ?? [],
+          (call) => {
+            const dependency = calls.get(call);
+            return dependency !== undefined && visit(dependencyKey(dependency));
+          },
+          context,
+        );
+        pending.delete(key);
+        trial.set(key, value);
+        return value;
+      };
+      visit(root);
+      for (const [key, value] of trial) if (!value) settled.set(key, false);
+      if (![...assumed].some((key) => trial.get(key) === false)) {
+        for (const [key, value] of trial) settled.set(key, value);
+        return settled.get(root)!;
+      }
+    }
+  };
   return {
     units,
     summaries,
     context_keys: contextKeys,
     remaining,
     complete: [...summaries.values()].every((summary) => summary.complete),
+    result_incidental: resultIncidental,
   };
 }
