@@ -925,7 +925,7 @@ Files that several items touch:
 
 ### L2: Restate do-while tests over the copy source and loop-invariant bounds
 
-- [ ] **Problem.** 16 do-while candidates fail because `rebase` fails (`source-control.ts:1533`):
+- [x] **Problem.** 16 do-while candidates fail because `rebase` fails (`source-control.ts:1533`): _Done (`wt/rm4-l2`): lane `od-rm4-l2` vs `od-main-307644d`: 8 texts change, exactly `adler32_z` and `matrix_callback` `-O2` on ELF and PE (symbols and llvm stripped), now `} while ((uint32_t)value44 != 0x15b0);` and `} while (index != arg2);`; `while (true)` 212 → 204, `do {` 191 → 199, `break;` 393 → 385, gotos and `for` unchanged; states unchanged; checked view identical; Mach-O `adler32_z` already printed its do-while there, Mach-O `matrix_callback` keeps `while (true)` (one `ccmp` conjunction test)._
   - `(uint32_t)value45 + 16 == 0x15b0` after `value45 = value45 + 16` (`adler32_z` `-O2` ×4 cells);
   - `(uint64_t)arg2 - 1 == index` after `index = 1 + index` (`matrix_callback` `-O2` ×4).
   - **Root cause:** `restateTest` (`renderer.ts:8031-8186`) requires a constant bound (`:8056-8059`) and a non-inline leaf (`:8074-8080`).

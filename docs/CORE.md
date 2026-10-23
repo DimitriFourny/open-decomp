@@ -538,12 +538,23 @@ copies right after the loop when that edge is the only one from inside the loop
 to its continuation; outer-loop exit flags are tested before them, and a
 do/while's repeat copies (moved before its test) must not be read by them
 (`loop_exit_copies`). The bottom test is found through nested lexical
-sequences. `loop_test_restatement` also restates an unsigned range test
+sequences. A C do/while test that reads a variable its repeat copy writes prints
+restated over that copy's result (`loop_test_restatement`). After `x = x + c`
+(through casts and constant steps no narrower than `x`), an equality
+`L ==/!= B` whose `L` is `x` or its low `w` bits plus a constant `k` becomes
+`x ==/!= B + c - k` (mod 2^w, roadmap 4 L2), the low bits printed as
+`(uint32_t)x`. `B` is a constant (a zero-extended `L` tests its narrower
+value when `B` fits it), or an expression without inline loads or calls over
+variables the repeat copies do not write; `B + d` folds into `B = y ± m`, so
+`(uint64_t)n - 1 == i` after `i = 1 + i` prints `while (i != n)` and a test on
+the copy's own source (`(uint32_t)x + 16 == K` after `x = x + 16`) prints
+`(uint32_t)x != K`. An unsigned range test
 `x < 2^c` (or `x <= 2^c - 1`, or a negation) after a repeat copy `x = x >> c`
-(logical or arithmetic, `0 < c < width`) as `x ==/!= 0`. Restatements are exact
+(logical or arithmetic, `0 < c < width`) becomes `x ==/!= 0`; other ordered
+compares are not restated. Restatements are exact
 derivations over the IR; while the shared allowance remains, the bit-vector
-checker re-proves them and may veto. Python-like keeps `while True` for bottom
-tests.
+checker re-proves them over the copy's source value and may veto. Python-like
+keeps `while True` for bottom tests.
 
 Return-tail copies remain owned by the edge that enters them. When all incoming
 edges use copies and a tail's original home is removed, its copied continuation
