@@ -31,6 +31,7 @@ import type { LibraryContracts } from '../../metadata/library-contracts/index.js
 import type { InferredCallee } from '../../reconstruction/source-model.js';
 import { sourceConstantValues } from '../../reconstruction/source-data.js';
 import { loadFunctionGraph } from '../queries/scope.js';
+import type { QueryFunctionGraph } from '../queries/graphs.js';
 import type { AnalysisScope } from './index.js';
 import {
   applyEnvironmentWriters,
@@ -206,9 +207,9 @@ export function nativeDependencies(
   return result;
 }
 
-/** The graph and lift of one body (`liftNativeUnit`). No limit of its own is set from
- * the allowance, so it is the same value, with the same work and reads, under every
- * allowance and capacity that affords it. */
+/** The lift of one loaded graph (`liftNativeUnit`). No limit of its own is set from the
+ * allowance, so for one graph it is the same value, with the same work and reads, under
+ * every allowance and capacity that affords it. */
 export interface NativeLift {
   readonly base: Pick<
     PreparedNativeUnit,
@@ -236,26 +237,38 @@ export interface NativeSSALimit {
   readonly limit: number;
   readonly required_nodes: number;
 }
-/** The allowance-independent prefix of `prepareNativeUnit`: graph, lift, entry prefix
- * and SSA. Only the SSA limit derives from the allowance, and a limit only stops work:
- * an SSA that completed with work W under its limit returns the same IR, with the same
- * work, under every limit of at least W. */
+/** The allowance-independent prefix of `prepareNativeUnit` after the graph load: lift,
+ * entry prefix and SSA. Only the SSA limit derives from the allowance, and a limit only
+ * stops work: an SSA that completed with work W under its limit returns the same IR, with
+ * the same work, under every limit of at least W. */
 export interface NativePrefix {
   readonly lift: NativeLift;
   /** Absent for an empty graph. */
   readonly ssa?: NativeSSA | NativeSSALimit;
 }
 
-/** Load and lift one body. */
-export function liftNativeUnit(
+/** Load one body's graph. Never memoized with the lift: a graph found in the graph
+ * cache (`reconstructFunctionGraph`) skips the per-process index payments (`useBuilt`)
+ * its discovery makes, so a replayed load could charge less than loading it here. */
+export function loadNativeGraph(
   input: NativePreparationInput,
   fn: FunctionRecord,
   context: OperationContext,
+): QueryFunctionGraph {
+  const { image, revision, scope } = input;
+  scope.dependencies?.recordFunction(image.id, fn.id, fn);
+  return loadFunctionGraph({ ...scope, context }, revision, { image, function: fn });
+}
+
+/** Lift one loaded body. */
+export function liftNativeUnit(
+  input: NativePreparationInput,
+  fn: FunctionRecord,
+  graph: QueryFunctionGraph,
+  context: OperationContext,
 ): NativeLift {
-  const { image, revision, components, scope } = input,
+  const { image, components } = input,
     abi = components.abi;
-  input.scope.dependencies?.recordFunction(input.image.id, fn.id, fn);
-  const graph = loadFunctionGraph({ ...scope, context }, revision, { image, function: fn });
   const evidence: readonly Evidence[] = graph.evidence ?? [];
   const base = {
     function: fn,
@@ -365,7 +378,7 @@ export function prepareNativePrefix(
   fn: FunctionRecord,
   context: OperationContext,
 ): NativePrefix {
-  const lift = liftNativeUnit(input, fn, context);
+  const lift = liftNativeUnit(input, fn, loadNativeGraph(input, fn, context), context);
   return lift.lifted ? { lift, ssa: nativeSSA(input, fn, lift.lifted, context) } : { lift };
 }
 

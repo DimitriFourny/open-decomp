@@ -72,6 +72,7 @@ import { environmentWriterCalls, imageEnvironmentWriters, type CallScope } from 
 import { fpEnvironmentRegister } from '../../reconstruction/source-fp.js';
 import {
   liftNativeUnit,
+  loadNativeGraph,
   nativeDependencies,
   nativeSSA,
   nativeSSALimit,
@@ -1365,16 +1366,20 @@ export function nativeUnitLoader(
     let lift: PreparedSegment<NativeLift> | undefined,
       ssa: PreparedSegment<NativeSSA | NativeSSALimit> | undefined;
     const run = () => {
-      // Capacities as for a retained unit: a body that fits stays the same body.
+      const graph = loadNativeGraph(input, fn, measured);
+      // The recorded lift is of an untruncated graph; one loaded untruncated under any
+      // capacity is the same graph. Lifted capacities as for a retained unit.
       const lifted = stored?.lift.value.lifted;
       lift =
         stored &&
-        stored.lift.value.base.instructions < budget.instructions &&
-        Math.max(stored.lift.value.base.blocks, lifted?.ir.blocks.length ?? 0) < budget.blocks &&
+        !graph.gaps.some((gap) => gap.reason === 'budget') &&
+        graph.instructions.length === stored.lift.value.base.instructions &&
+        graph.blocks.length === stored.lift.value.base.blocks &&
+        (lifted?.ir.blocks.length ?? 0) < budget.blocks &&
         (lifted?.nodes ?? 0) < budget.ir_nodes &&
         replay(stored.lift, allowance!)
           ? stored.lift
-          : record(() => liftNativeUnit(input, fn, measured));
+          : record(() => liftNativeUnit(input, fn, graph, measured));
       const body = lift.value.lifted;
       if (!body)
         return prepareNativeUnit(input, fn, measured, libraryContracts, { lift: lift.value });
