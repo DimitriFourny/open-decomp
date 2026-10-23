@@ -31,6 +31,7 @@ import type { LibraryContracts } from '../../metadata/library-contracts/index.js
 import type { InferredCallee } from '../../reconstruction/source-model.js';
 import { sourceConstantValues } from '../../reconstruction/source-data.js';
 import { loadFunctionGraph } from '../queries/scope.js';
+import type { QueryFunctionGraph } from '../queries/graphs.js';
 import type { AnalysisScope } from './index.js';
 import {
   applyEnvironmentWriters,
@@ -206,19 +207,68 @@ export function nativeDependencies(
   return result;
 }
 
-/** Prepare one body once. Optional source type/stack recovery has its own local
- * work allowance, leaving room for useful SSA-backed prefix/return observations
- * and dependency refinement if that expensive optional stage is incomplete. */
-export function prepareNativeUnit(
+/** The lift of one loaded graph (`liftNativeUnit`). No limit of its own is set from the
+ * allowance, so for one graph it is the same value, with the same work and reads, under
+ * every allowance and capacity that affords it. */
+export interface NativeLift {
+  readonly base: Pick<
+    PreparedNativeUnit,
+    'function' | 'instructions' | 'blocks' | 'evidence' | 'evidence_ids' | 'budget_truncated'
+  >;
+  /** The graph's coverage reasons. */
+  readonly reasons: readonly string[];
+  /** Absent for an empty graph. */
+  readonly lifted?: {
+    /** With environment writers applied. */
+    readonly ir: RegisterIR;
+    readonly nodes: number;
+    readonly entry_prefix: NativeInterface;
+  };
+}
+/** The lifted body in SSA, constructed, simplified and verified within its work limit. */
+export interface NativeSSA {
+  readonly ir: SSAForm;
+  readonly nodes: number;
+  /** Peak nodes over the lift and every SSA stage. */
+  readonly required_nodes: number;
+}
+/** SSA stopped at its work limit `limit`, having needed `required_nodes` until then. */
+export interface NativeSSALimit {
+  readonly limit: number;
+  readonly required_nodes: number;
+}
+/** The allowance-independent prefix of `prepareNativeUnit` after the graph load: lift,
+ * entry prefix and SSA. Only the SSA limit derives from the allowance, and a limit only
+ * stops work: an SSA that completed with work W under its limit returns the same IR, with
+ * the same work, under every limit of at least W. */
+export interface NativePrefix {
+  readonly lift: NativeLift;
+  /** Absent for an empty graph. */
+  readonly ssa?: NativeSSA | NativeSSALimit;
+}
+
+/** Load one body's graph. Never memoized with the lift: a graph found in the graph
+ * cache (`reconstructFunctionGraph`) skips the per-process index payments (`useBuilt`)
+ * its discovery makes, so a replayed load could charge less than loading it here. */
+export function loadNativeGraph(
   input: NativePreparationInput,
   fn: FunctionRecord,
   context: OperationContext,
-  libraryContracts: readonly SuppliedCallContract[],
-): PreparedNativeUnit {
-  const { image, revision, components, scope } = input,
+): QueryFunctionGraph {
+  const { image, revision, scope } = input;
+  scope.dependencies?.recordFunction(image.id, fn.id, fn);
+  return loadFunctionGraph({ ...scope, context }, revision, { image, function: fn });
+}
+
+/** Lift one loaded body. */
+export function liftNativeUnit(
+  input: NativePreparationInput,
+  fn: FunctionRecord,
+  graph: QueryFunctionGraph,
+  context: OperationContext,
+): NativeLift {
+  const { image, components } = input,
     abi = components.abi;
-  input.scope.dependencies?.recordFunction(input.image.id, fn.id, fn);
-  const graph = loadFunctionGraph({ ...scope, context }, revision, { image, function: fn });
   const evidence: readonly Evidence[] = graph.evidence ?? [];
   const base = {
     function: fn,
@@ -228,21 +278,10 @@ export function prepareNativeUnit(
     evidence_ids: graph.function.evidence_ids,
     budget_truncated: graph.gaps.some((gap) => gap.reason === 'budget'),
   };
-  if (!graph.instructions.length || !graph.blocks.length)
-    return {
-      ...base,
-      nodes: 0,
-      required_nodes: 0,
-      dependencies: [],
-      ir: null,
-      types: null,
-      analysis: null,
-      observed_calls: [],
-      reasons: graph.coverage.reasons,
-      limited: false,
-    };
+  const reasons = graph.coverage.reasons;
+  if (!graph.instructions.length || !graph.blocks.length) return { base, reasons };
   const lifted = components.lifter.lift(graph, abi, context);
-  const liftedIR = applyEnvironmentWriters(
+  const ir = applyEnvironmentWriters(
     lifted.ir,
     image,
     input.functions,
@@ -250,15 +289,27 @@ export function prepareNativeUnit(
     abi,
     context,
   );
-  const liftedNodes = boundIR(liftedIR, context);
-  const entry_prefix = nativeRegisterPrefix(liftedIR, parameterRegisters(abi), context);
-  let requiredNodes = liftedNodes,
-    ir: SSAForm,
-    nodes: number;
-  const ssaLimit = Math.floor(((context.remainingWork?.() ?? context.budget.work) * 3) / 4);
-  let ssaWork = 0,
-    // Set whenever a preparation limit throws, even where a nested pass catches it.
-    limited = false;
+  const nodes = boundIR(ir, context);
+  const entry_prefix = nativeRegisterPrefix(ir, parameterRegisters(abi), context);
+  return { base, reasons, lifted: { ir, nodes, entry_prefix } };
+}
+
+/** The SSA work limit a preparation sets on `context` after the lift: 3/4 of what remains. */
+export function nativeSSALimit(context: OperationContext): number {
+  return Math.floor(((context.remainingWork?.() ?? context.budget.work) * 3) / 4);
+}
+
+/** SSA of a lifted body under `nativeSSALimit(context)`; reaching that limit is a result. */
+export function nativeSSA(
+  input: NativePreparationInput,
+  fn: FunctionRecord,
+  lifted: NonNullable<NativeLift['lifted']>,
+  context: OperationContext,
+): NativeSSA | NativeSSALimit {
+  const abi = input.components.abi;
+  let requiredNodes = lifted.nodes;
+  const ssaLimit = nativeSSALimit(context);
+  let ssaWork = 0;
   const ssaContext: OperationContext = {
     ...context,
     budget: { ...context.budget, work: ssaLimit },
@@ -268,7 +319,6 @@ export function prepareNativeUnit(
     checkpoint(work) {
       if (ssaWork + work > ssaLimit) {
         context.checkpoint(0);
-        limited = true;
         throw new OperationError({
           code: 'resource_limit',
           severity: 'warning',
@@ -288,7 +338,7 @@ export function prepareNativeUnit(
     checkpoint: (work: number) => ssaContext.checkpoint(work),
   };
   try {
-    const constructed = constructSSA(liftedIR, {
+    const constructed = constructSSA(lifted.ir, {
       ...passOptions,
       observable_register_masks:
         input.observable_register_masks ?? abiObservableRegisterMasks(abi, ssaContext),
@@ -304,9 +354,9 @@ export function prepareNativeUnit(
     requiredNodes = Math.max(requiredNodes, boundIR(constructed.value, ssaContext));
     const simplified = simplifySSA(constructed.value, passOptions);
     requirePass(simplified.state, simplified.diagnostics, ssaContext);
-    ir = simplified.value;
-    nodes = boundIR(ir, ssaContext);
-    requiredNodes = Math.max(requiredNodes, nodes);
+    const ir = simplified.value;
+    const nodes = boundIR(ir, ssaContext);
+    return { ir, nodes, required_nodes: Math.max(requiredNodes, nodes) };
   } catch (error) {
     const details = error instanceof OperationError ? error.diagnostic.details : undefined;
     if (
@@ -318,21 +368,68 @@ export function prepareNativeUnit(
     )
       throw error;
     context.checkpoint(0);
+    return { limit: details.limit, required_nodes: requiredNodes };
+  }
+}
+
+/** Lift one body and build its SSA. */
+export function prepareNativePrefix(
+  input: NativePreparationInput,
+  fn: FunctionRecord,
+  context: OperationContext,
+): NativePrefix {
+  const lift = liftNativeUnit(input, fn, loadNativeGraph(input, fn, context), context);
+  return lift.lifted ? { lift, ssa: nativeSSA(input, fn, lift.lifted, context) } : { lift };
+}
+
+/** Prepare one body once, from its `prefix` when the caller has it. Optional source
+ * type/stack recovery has its own local work allowance, leaving room for useful
+ * SSA-backed prefix/return observations and dependency refinement if that expensive
+ * optional stage is incomplete. */
+export function prepareNativeUnit(
+  input: NativePreparationInput,
+  fn: FunctionRecord,
+  context: OperationContext,
+  libraryContracts: readonly SuppliedCallContract[],
+  prefix: NativePrefix = prepareNativePrefix(input, fn, context),
+): PreparedNativeUnit {
+  const { image, revision, components } = input,
+    abi = components.abi;
+  const { base, reasons: coverageReasons, lifted } = prefix.lift;
+  const ssa = prefix.ssa;
+  if (!lifted || !ssa)
+    return {
+      ...base,
+      nodes: 0,
+      required_nodes: 0,
+      dependencies: [],
+      ir: null,
+      types: null,
+      analysis: null,
+      observed_calls: [],
+      reasons: coverageReasons,
+      limited: false,
+    };
+  const liftedIR = lifted.ir,
+    entry_prefix = lifted.entry_prefix;
+  if (!('ir' in ssa))
     return {
       ...base,
       blocks: Math.max(base.blocks, liftedIR.blocks.length),
-      nodes: liftedNodes,
-      required_nodes: requiredNodes,
+      nodes: lifted.nodes,
+      required_nodes: ssa.required_nodes,
       ir: null,
       types: null,
       analysis: null,
       observed_calls: [],
       entry_prefix,
       dependencies: nativeDependencies(input, liftedIR, context),
-      reasons: [...graph.coverage.reasons, `native SSA preparation work limit (${details.limit})`],
+      reasons: [...coverageReasons, `native SSA preparation work limit (${ssa.limit})`],
       limited: true,
     };
-  }
+  const { ir, nodes, required_nodes: requiredNodes } = ssa;
+  // Set whenever a preparation limit throws, even where a nested pass catches it.
+  let limited = false;
   const calls = resolveCalls(ir, image, input.functions, input.references, false, context);
   const declarations = callDeclarations(
     ir,
@@ -368,7 +465,7 @@ export function prepareNativeUnit(
     },
   };
   let types: TypeRecoveryResult | null = null;
-  const reasons: string[] = [...graph.coverage.reasons];
+  const reasons: string[] = [...coverageReasons];
   try {
     types = recoverTypes(ir, abi, local, {
       image_id: image.id,
@@ -501,7 +598,7 @@ export function prepareNativeUnit(
       // non-tail indirect terminators (other than the lifter's conditional FP
       // environment guard failures) make the observed interface ambiguous, so
       // they never close an argument list.
-      graph.coverage.reasons.every((reason) => reason === 'unresolved control flow') &&
+      coverageReasons.every((reason) => reason === 'unresolved control flow') &&
       analysis?.state === 'complete' &&
       analysis.stack.state === 'complete',
     demand_index,

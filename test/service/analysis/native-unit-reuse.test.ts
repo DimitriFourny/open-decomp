@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import test, { type TestContext } from 'node:test';
 import {
   OperationError,
   createOperationContext,
@@ -147,12 +147,8 @@ const observable = (unit: PreparedNativeUnit) => ({
   evidence_ids: unit.evidence_ids,
 });
 
-// A load's unit, charged work and dependency reads are a function of its allowance alone,
-// whatever earlier loads in this process (or persisted rows) prepared. The allowances
-// straddle the variadic footprint's local limit: under `limited` the footprint stage is
-// cut (no reason, no footprint), which once still counted as a reusable preparation and
-// handed later loads a unit without the callee's `...` at the cut preparation's charge.
-test('a native unit load is independent of load history', async (t) => {
+/** The libcorpus image's native preparation input (without a scope) and one of its functions. */
+async function nativeBase(t: TestContext, name: string) {
   const p = await project(t, 'libcorpus-arm64-symbols.dylib');
   const store = p.state.store;
   const context = createOperationContext();
@@ -167,8 +163,18 @@ test('a native unit load is independent of load history', async (t) => {
     debug: recoverDebugInfo(p.image, context),
     library: recoverLibraryContracts({ image: p.image, abi: components.abi, revision: 2 }, context),
   };
-  const fn = index.functions.find((item) => item.original_name === '_fixture_variadic');
+  const fn = index.functions.find((item) => item.original_name === name);
   assert.ok(fn);
+  return { store, base, fn };
+}
+
+// A load's unit, charged work and dependency reads are a function of its allowance alone,
+// whatever earlier loads in this process (or persisted rows) prepared. The allowances
+// straddle the variadic footprint's local limit: under `limited` the footprint stage is
+// cut (no reason, no footprint), which once still counted as a reusable preparation and
+// handed later loads a unit without the callee's `...` at the cut preparation's charge.
+test('a native unit load is independent of load history', async (t) => {
+  const { store, base, fn } = await nativeBase(t, '_fixture_variadic');
   // Below the SSA and type/stack limits' reach, but short of the footprint; above the
   // footprint, under 4W + 3 of the complete preparation; and far above it.
   const allowances = { limited: 40_000, low: 60_000, high: 200_000 };
@@ -212,4 +218,92 @@ test('a native unit load is independent of load history', async (t) => {
       assert.deepEqual(observable(once.unit), expected.unit, `${label}: unit`);
     }
   }
+});
+
+// A unit that is not retained keeps its preparation prefix (lift, then SSA when SSA
+// completed). A later load replays a segment only where running it could not differ, and
+// otherwise runs it: so every load returns, charges and reads exactly what a cold
+// preparation under its allowance does. `_fixture_check` charges about 25k for its
+// lift, 129k for SSA and 67k for the rest; SSA gets 3/4 of what remains after the lift,
+// the type/stack stage 1/4 of what remains after SSA.
+test('a memoized preparation prefix leaves exactly what a cold preparation would', async (t) => {
+  const { store, base, fn } = await nativeBase(t, '_fixture_check');
+  const allowances = {
+    ssaLimited: 150_000, // SSA reaches its limit
+    belowSSA: 190_000, // SSA reaches its limit, under a limit just below its recorded work
+    typesLimited: 250_000, // SSA completes; the type/stack stage reaches its limit
+    aboveSSA: 210_000, // as above, under an SSA limit just above its recorded work
+    complete: 1_000_000, // nothing is limited: the unit itself is retained
+  };
+  const cold = new Map(
+    Object.values(allowances).map((allowance) => {
+      const once = loadOnce(base, store, fn, allowance, false);
+      return [allowance, { ...once, unit: observable(once.unit) }] as const;
+    }),
+  );
+  const at = (allowance: number) => cold.get(allowance)!;
+  assert.equal(at(allowances.ssaLimited).unit.ir, null);
+  assert.equal(at(allowances.belowSSA).unit.ir, null);
+  for (const allowance of [allowances.ssaLimited, allowances.belowSSA]) {
+    assert.equal(at(allowance).unit.limited, true);
+    assert.match(at(allowance).unit.reasons.at(-1) ?? '', /native SSA preparation work limit/);
+  }
+  for (const allowance of [allowances.aboveSSA, allowances.typesLimited]) {
+    assert.ok(at(allowance).unit.ir);
+    assert.equal(at(allowance).unit.limited, true);
+    assert.match(at(allowance).unit.reasons.join('\n'), /native optional type\/stack work limit/);
+  }
+  assert.equal(at(allowances.complete).unit.limited, false);
+
+  // One process tier for the whole sequence (a new function list is a new cache identity).
+  const fresh = { ...base, functions: [...base.functions] };
+  const prefix = () => {
+    const entry = preparedUnitCache({
+      ...fresh,
+      scope: { store, context: createOperationContext(), job_id: 'native-unit-history' },
+    }).prefixes.get(fn.id);
+    assert.ok(entry);
+    return entry;
+  };
+  const load = (allowance: number, label: string) => {
+    const once = loadOnce(fresh, store, fn, allowance, true),
+      expected = at(allowance);
+    assert.equal(once.work, expected.work, `${label}: charged work`);
+    assert.deepEqual(once.reads, expected.reads, `${label}: reads`);
+    assert.deepEqual(observable(once.unit), expected.unit, `${label}: unit`);
+    return once.unit;
+  };
+
+  // SSA hit its limit: only the lift is kept, and SSA runs again on every load.
+  load(allowances.ssaLimited, 'cold, SSA limited');
+  const lifted = prefix();
+  assert.equal(lifted.ssa, undefined);
+  const again = load(allowances.ssaLimited, 'lift reused, SSA limited again');
+  assert.equal(prefix().lift, lifted.lift, 'the recorded lift was replayed');
+  assert.equal(again.entry_prefix, lifted.lift.value.lifted?.entry_prefix);
+  // Under a larger allowance SSA completes from the replayed lift, and is kept.
+  const completed = load(allowances.typesLimited, 'lift reused, SSA completes');
+  const full = prefix();
+  assert.equal(full.lift, lifted.lift);
+  assert.ok(full.ssa);
+  assert.equal(completed.ir, full.ssa.value.ir);
+
+  // SSA completed: it is replayed under every SSA limit of at least its work (at the
+  // recorded allowance and just above the work), and runs again below it, where it
+  // reaches its limit and leaves the recorded SSA in place.
+  for (const [allowance, label] of [
+    [allowances.typesLimited, 'SSA reused at the recorded allowance'],
+    [allowances.aboveSSA, 'SSA reused under a limit just above its work'],
+  ] as const) {
+    const unit = load(allowance, label);
+    assert.equal(unit.ir, full.ssa.value.ir, `${label}: the recorded SSA was replayed`);
+    assert.equal(prefix().ssa, full.ssa);
+  }
+  const below = load(allowances.belowSSA, 'SSA runs again under a limit below its work');
+  assert.equal(below.ir, null);
+  assert.equal(prefix().ssa, full.ssa);
+  // A complete preparation is retained as a unit; it still starts from the prefix.
+  const complete = load(allowances.complete, 'complete from the prefix');
+  assert.equal(complete.ir, full.ssa.value.ir);
+  load(allowances.complete, 'complete unit reused');
 });
