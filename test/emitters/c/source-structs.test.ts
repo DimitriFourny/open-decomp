@@ -355,16 +355,93 @@ test('external structures leave typedefs and bodies out of the text and return t
     [name, name],
   );
   assert.equal(declarations[0]!.declaration, `typedef struct ${name} ${name};`);
-  // The declarations are exactly the lines the inline text carries.
-  for (const line of declarations[1]!.declaration.split('\n'))
-    assert.ok(inline.text.includes(line), line);
+  // Every member of the inline text is in the declarations; only the pads differ.
+  assert.match(inline.text, /uint8_t field_0x4;/);
+  assert.match(inline.text, /uint32_t field_0x18;/);
   assert.match(declarations[1]!.declaration, /uint8_t field_0x4;/);
+  assert.match(declarations[1]!.declaration, /uint32_t field_0x18;/);
+  assert.doesNotMatch(inline.text, /\bpad_0x/);
+  assert.match(declarations[1]!.declaration, /uint8_t pad_0x5\[19\];/);
   // Python-like has no structure preamble: the option changes nothing there.
   assert.equal(
     emit(ssa, extra, 'python-like', 'source', { structures: 'external' }).emission.structures,
     undefined,
   );
 });
+
+/** `return (uint32_t)p->at4 + p->at20`: a gap of 15 bytes before the word at 0x14,
+ * which natural alignment alone would place at 8. */
+function gapped(name: string) {
+  const b = builder(name),
+    block = b.block('entry');
+  const pointer = block.readRegister(register('rdi', 64, 0, 'replace_root', 'x86_64:rdi'));
+  const first = block.cast(
+    'zero_extend',
+    integer(32),
+    block.load(integer(8), block.int('add', pointer, block.constant(integer(64), 4n))),
+  );
+  const second = block.load(
+    integer(32),
+    block.int('add', pointer, block.constant(integer(64), 0x14n)),
+  );
+  block.return([block.int('add', first, second)]);
+  const ssa = constructSSA(b.finish(block, [integer(32)])).value as SSAForm;
+  const types = recoverTypes(ssa, sysvAMD64Abi, createOperationContext(), {
+    slice_id: slice,
+    image_id: image,
+    revision: 1,
+  });
+  return { ssa, extra: { types, source: { abi: sysvAMD64Abi, callees: [], addresses: [] } } };
+}
+
+test('inline struct bodies omit pad members and record the omitted gaps; external text keeps them', () => {
+  const { ssa, extra } = gapped('source-compact-struct');
+  const inline = emit(ssa, extra).emission,
+    external = emit(ssa, extra, 'c-like', 'source', { structures: 'external' }).emission;
+  assert.match(inline.text, /uint8_t field_0x4; uint32_t field_0x14;/);
+  assert.doesNotMatch(inline.text, /\bpad_0x/);
+  const record = inline.local_validation?.find((item) => item.rule === 'compact_struct_members');
+  assert.ok(record, 'the omitted gaps are a presentation record');
+  assert.equal(record.status, 'verified');
+  assert.match(record.reason ?? '', /0x5\+15/);
+  const body = (external.structures ?? []).find((item) => /^struct \w+ \{/m.test(item.declaration));
+  assert.ok(body);
+  assert.match(body.declaration, /uint8_t field_0x4; uint8_t pad_0x5\[15\]; uint32_t field_0x14;/);
+  assert.equal(
+    external.local_validation?.some((item) => item.rule === 'compact_struct_members') ?? false,
+    false,
+  );
+});
+
+for (const language of ['c-like', 'python-like'] as const)
+  test(`${language} reads the member at 0x14 across an omitted gap with the same result`, () => {
+    const { ssa, extra } = gapped(`source-compact-run-${language}`);
+    const { emission } = emit(ssa, extra, language);
+    if (language === 'c-like') assert.match(emission.text, /->field_0x14\b/);
+    else assert.match(emission.text, /memory\.u32\[/);
+    const id = ssa.register_states
+      .find((state) => state.block === ssa.entry)!
+      .entry.find((binding) => binding.register.root === 'x86_64:rdi')!.value.id;
+    const mapping = expandEmission(emission).mappings.find((item) =>
+      item.semantic_ids.includes(id),
+    )!;
+    // 0x1004 = 17, 0x1014 = 25; the bytes at the natural-alignment slot 0x1008 differ.
+    const memory = new Map<bigint, number>([
+      [0x1004n, 17],
+      [0x1008n, 99],
+      [0x1014n, 25],
+      [0x1015n, 0],
+      [0x1016n, 0],
+      [0x1017n, 0],
+    ]);
+    const observed = execute(
+      emission,
+      new Map(mapping.semantic_ids.map((subject) => [subject, 0x1000n])),
+      memory,
+    );
+    assert.deepEqual(observed.values, [42n]);
+    assert.deepEqual(observed.events, ['load', 'load']);
+  });
 
 for (const indexed of [false, true, 'shared', 'array'] as const)
   test(`observed ${indexed === false ? 'fixed' : indexed === true ? 'strided' : indexed} members compile and execute with exact offsets and ordered loads`, () => {

@@ -4,6 +4,14 @@ import { OperationError, createOperationContext } from '../../src/core/index.js'
 import { MachOLoader } from '../../src/loaders/macho/index.js';
 import { PELoader } from '../../src/loaders/pe/index.js';
 import { buildStringIndex, searchStrings } from '../../src/analysis/strings/index.js';
+import { constructSSA } from '../../src/analysis/ssa/index.js';
+import { recoverDataAddress } from '../../src/analysis/strings/source-data.js';
+import type { LoadedImage } from '../../src/core/index.js';
+import { integer, type SSAForm } from '../../src/ir/index.js';
+import { sourceConstantValues } from '../../src/reconstruction/source-data.js';
+import { constantCandidates } from '../../src/service/analysis/source-variadic.js';
+import { registerConstantCandidates } from '../../src/service/analysis/source-literal-candidates.js';
+import { builder, register } from '../ir/support.js';
 import { loadNavigationFixture, navigationBytes } from './navigation-fixture.js';
 
 for (const name of [
@@ -163,4 +171,96 @@ test('search output bytes are bounded without silently dropping or truncating re
     () => searchStrings(largeIndex, {}, createOperationContext({ budget: { output_bytes: 2048 } })),
     (error: unknown) => error instanceof OperationError && error.code === 'resource_limit',
   );
+});
+
+/** `x1` is two 32-bit cells. Arm A writes the constant `0x2010` to them, arm B a loaded value;
+ * the join exits through an `indirect` terminator (a tail call), so the cells reach it as phis. */
+function partlyConstantTail(armB: 'load' | 'constant', first = 0x2010n, second = 0x2020n) {
+  const b = builder(`partly-constant-${armB}`);
+  const low = register('x1lo', 32, 0, 'preserve_other_bits', 'test:x1'),
+    high = register('x1hi', 32, 32, 'preserve_other_bits', 'test:x1'),
+    rdi = register('rdi', 64, 0, 'replace_root', 'test:rdi');
+  const entry = b.block('entry'),
+    constant = b.block('constant'),
+    other = b.block('other'),
+    join = b.block('join');
+  const pointer = entry.readRegister(rdi);
+  entry.branch(
+    entry.compare('eq', pointer, entry.constant(integer(64), 0n)),
+    entry.edge(constant),
+    entry.edge(other),
+  );
+  constant.writeRegister(low, constant.constant(integer(32), first));
+  constant.writeRegister(high, constant.constant(integer(32), 0n));
+  constant.jump(join);
+  if (armB === 'load') {
+    other.writeRegister(low, other.load(integer(32), other.readRegister(rdi)));
+    other.writeRegister(high, other.constant(integer(32), 0n));
+  } else {
+    other.writeRegister(low, other.constant(integer(32), second));
+    other.writeRegister(high, other.constant(integer(32), 0n));
+  }
+  other.jump(join);
+  join.terminate({
+    kind: 'indirect',
+    target: join.readRegister(register('tail', 64, 0, 'replace_root', 'test:tail')),
+    reason: 'tail call',
+    tail_call: true,
+  });
+  return constructSSA(b.finish(entry, [integer(64)])).value as SSAForm;
+}
+
+function candidatesOf(ir: SSAForm, image: LoadedImage): bigint[] {
+  const context = createOperationContext();
+  const expressions = new Map(
+    ir.blocks.flatMap((block) =>
+      block.instructions.flatMap((node) =>
+        node.kind === 'assign' ? [[node.result.id, node.expression] as const] : [],
+      ),
+    ),
+  );
+  return registerConstantCandidates({
+    ir,
+    image,
+    expressions,
+    constant: sourceConstantValues(expressions, context, image.id),
+    candidates: constantCandidates(ir, null, context),
+    context,
+  })
+    .map((address) => address.value)
+    .sort((left, right) => (left < right ? -1 : 1));
+}
+
+test('a tail exit and a phi of register cells make each constant edge a string candidate', () => {
+  const image = navigationBytes(Uint8Array.of(0xc3), Buffer.from('alpha\0beta\0'));
+  // One constant edge among unknown ones still contributes its own whole value.
+  assert.deepEqual(candidatesOf(partlyConstantTail('load'), image), [0x2010n]);
+  // Every edge of the same join is its own candidate.
+  assert.deepEqual(candidatesOf(partlyConstantTail('constant'), image), [0x2010n, 0x2020n]);
+});
+
+test('a candidate only allows a fact: the bytes must be an immutable terminated string', () => {
+  const writable = navigationBytes(Uint8Array.of(0xc3), Buffer.from('alpha\0beta\0'));
+  const readOnly = {
+    ...writable,
+    mappings: writable.mappings.map((mapping) => ({ ...mapping, permissions: ['read'] as const })),
+    sections: writable.sections.map((section) => ({ ...section, permissions: ['read'] as const })),
+  };
+  const ir = partlyConstantTail('constant', 0x2000n, 0x2006n);
+  const recovered = (image: LoadedImage) =>
+    candidatesOf(ir, image).map((value) =>
+      recoverDataAddress(
+        image,
+        { image_id: image.id, space: 'va', value },
+        createOperationContext(),
+      ),
+    );
+  assert.deepEqual(
+    recovered(readOnly).map((item) => [item?.string, item?.object?.mutable]),
+    [
+      ['alpha', false],
+      ['beta', false],
+    ],
+  );
+  assert.ok(recovered(writable).every((item) => item?.object?.mutable !== false));
 });

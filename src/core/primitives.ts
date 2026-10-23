@@ -16,8 +16,8 @@ export type Internal<T> = T extends HexU64
       : T;
 export const revisionSchema = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 export const digestSchema = z.string().regex(/^[0-9a-f]{64}$/);
-const id = <P extends string>(prefix: P) =>
-  z.string().regex(new RegExp(`^${prefix}_[0-9a-f]{64}$`));
+const idPattern = (prefix: string): RegExp => new RegExp(`^${prefix}_[0-9a-f]{64}$`);
+const id = <P extends string>(prefix: P) => z.string().regex(idPattern(prefix));
 export const projectIdSchema = id('project');
 export const imageIdSchema = id('image');
 export const sliceIdSchema = id('slice');
@@ -26,6 +26,14 @@ export const evidenceIdSchema = id('evidence');
 export const annotationIdSchema = id('annotation');
 export const jobIdSchema = id('job');
 export const artifactIdSchema = id('artifact');
+const entityIdPattern = idPattern('entity');
+const evidenceIdPattern = idPattern('evidence');
+/** Same acceptance set as `entityIdSchema`, without building a zod parse result per id. */
+export const isEntityId = (value: unknown): value is EntityId =>
+  typeof value === 'string' && entityIdPattern.test(value);
+/** Same acceptance set as `evidenceIdSchema`, without building a zod parse result per id. */
+export const isEvidenceId = (value: unknown): value is z.infer<typeof evidenceIdSchema> =>
+  typeof value === 'string' && evidenceIdPattern.test(value);
 export type ProjectId = z.infer<typeof projectIdSchema>;
 export type ImageId = z.infer<typeof imageIdSchema>;
 export type EntityId = z.infer<typeof entityIdSchema>;
