@@ -9645,28 +9645,37 @@ export class Renderer {
         }
       }
     };
-    // Source view: the FP-environment assumption trails the signature, naming
-    // its requirement by an unambiguous ID prefix.
-    const ids = (this.program.source?.requirements ?? []).map((requirement) => requirement.id);
-    const reference = (id: string): string => {
-      for (let length = 'requirement_'.length + 12; length < id.length; length += 4) {
-        const prefix = id.slice(0, length);
-        if (ids.every((other) => other === id || !other.startsWith(prefix))) return `${prefix}…`;
-      }
-      return id;
-    };
-    const note =
+    // Source view: the FP-environment assumption is a language premise (C11
+    // 7.6.1p2: code compiled with FENV_ACCESS off, the default, runs under the
+    // default modes), recorded instead of printed. The checked view prints it.
+    const environmentOmitted =
       this.sourceView &&
       environment.length > 0 &&
       this.localValidation.presentation(
         'requirement_note',
         this.input.function.id,
-        'the FP-environment assumption is a trailing signature comment naming each requirement by an unambiguous ID prefix; full ID, explanation and sites remain in requirements metadata',
+        'the FP-environment assumption prints no comment: emitted source without #pragma STDC FENV_ACCESS ON presumes nearest-even rounding and masked FP traps (C11 7.6.1p2), recorded as the fp_default_environment ABI requirement; full ID, explanation and sites remain in requirements metadata',
         environment.map((requirement) => requirement.id),
-      )
-        ? `assumes nearest-even rounding and masked FP traps (${environment.map((requirement) => reference(requirement.id)).join(', ')})`
-        : undefined;
-    if (!note)
+      );
+    // The premise is function-wide; its provenance is the FP-environment site
+    // the fp_environment requirement already lists whose origin cites the
+    // fewest instructions (the first on ties). The function origin would
+    // repeat every instruction of the function, and a larger site every
+    // instruction it covers.
+    let premiseSite: Requirement['sites'][number] | undefined;
+    if (environmentOmitted) {
+      let fewest = Infinity;
+      for (const requirement of environment)
+        for (const site of requirement.sites) {
+          this.context.checkpoint(1);
+          const origin = this.origins.get(site.subject_ids[0]!);
+          if (origin && origin.provenance.instruction_ids.length < fewest) {
+            fewest = origin.provenance.instruction_ids.length;
+            premiseSite = site;
+          }
+        }
+    }
+    if (!environmentOmitted)
       for (const requirement of environment) {
         this.context.checkpoint(1);
         const start = w.offset;
@@ -9882,15 +9891,6 @@ export class Renderer {
     if (methodName && method?.kind === 'class' && this.language === 'python-like')
       w.line(0, '@classmethod');
     this.headerStart = w.offset;
-    let noteSpan: { start: number; end: number } | undefined;
-    const closing = (text: string): void => {
-      if (!note) return w.line(0, text);
-      const separator = this.language === 'c-like' ? ' ' : '  ',
-        comment = this.language === 'c-like' ? `/* ${note} */` : `# ${note}`,
-        start = w.offset + text.length + separator.length;
-      w.line(0, `${text}${separator}${comment}`);
-      noteSpan = { start, end: start + comment.length };
-    };
     // Source view: a callee-side variadic interface ends its formals with `...`.
     const ellipsis = this.sourceView && this.program.source?.variadic !== undefined;
     if (this.program.source && parameters.length <= 4) {
@@ -9899,7 +9899,8 @@ export class Renderer {
       );
       const prefix =
         this.language === 'c-like' ? `${returnShown} ${headerName}(` : `def ${headerName}(`;
-      closing(
+      w.line(
+        0,
         `${prefix}${this.writer.join(ellipsis ? [...declarations, '...'] : declarations)}${this.language === 'c-like' ? ') {' : `) -> ${returnShown}:`}`,
       );
       let offset = this.headerStart + prefix.length;
@@ -9941,9 +9942,10 @@ export class Renderer {
         this.inferenceSites.set(parameter.value.id, { start, end: w.offset });
       }
       if (ellipsis) w.line(1, '...');
-      closing(this.language === 'c-like' ? ') {' : `) -> ${returnShown}:`);
+      w.line(0, this.language === 'c-like' ? ') {' : `) -> ${returnShown}:`);
     } else
-      closing(
+      w.line(
+        0,
         this.language === 'c-like'
           ? `${returnShown} ${headerName}() {`
           : `def ${headerName}() -> ${returnShown}:`,
@@ -9956,8 +9958,9 @@ export class Renderer {
       proof ? [...proof.ids] : [],
       proof ? [proof.evidence] : [],
     );
-    if (noteSpan)
-      for (const requirement of environment) mapSites(requirement, noteSpan.start, noteSpan.end);
+    if (environmentOmitted)
+      for (const requirement of environment)
+        mapSites(requirement, this.headerStart, this.headerEnd);
     const formals = new Set(parameters.map((parameter) => parameter.value.id));
     const stack = this.program.source?.stack;
     if (stack?.kind === 'private') {
@@ -10281,18 +10284,46 @@ export class Renderer {
       );
     } else {
       try {
-        requirements = sourceRequirementProofs(
-          this.program,
-          w.mappings,
-          { ids: w.ids.items, ranges: w.ranges.items },
-          this.context,
-          abiConformanceRequirements(
-            this.input.function.id,
-            this.localValidation.abiConformance,
-            (id) => this.origins.get(id),
+        const publish = (): readonly Requirement[] =>
+          sourceRequirementProofs(
+            this.program,
+            w.mappings,
+            { ids: w.ids.items, ranges: w.ranges.items },
             this.context,
-          ),
-        ).map((record) =>
+            abiConformanceRequirements(
+              this.input.function.id,
+              this.localValidation.abiConformance,
+              (id) => this.origins.get(id),
+              this.context,
+            ),
+          );
+        const premise = (record: Requirement): boolean =>
+          record.kind === 'abi_conformance' &&
+          record.sites.some((site) => site.state_epoch === 'fp_default_environment');
+        const explanation =
+          'Floating-point operations assume the default environment, nearest-even rounding with FP traps masked, as C11 7.6.1p2 presumes for code compiled with FENV_ACCESS off.';
+        if (environmentOmitted)
+          this.localValidation.requireAbi(
+            'fp_default_environment',
+            [premiseSite?.subject_ids[0] ?? this.input.function.id],
+            explanation,
+          );
+        let proofs = publish();
+        // A premise site that prints nowhere publishes nothing: anchor the
+        // premise at the function, which the signature always maps.
+        if (
+          environmentOmitted &&
+          proofs.some((record) => record.kind === 'fp_environment') &&
+          !proofs.some(premise)
+        ) {
+          this.localValidation.requireAbi(
+            'fp_default_environment',
+            [this.input.function.id],
+            explanation,
+          );
+          proofs = publish();
+        }
+        requirements = proofs.map((record) =>
           w.requirement(
             this.fpPresentation.guards.size && record.kind === 'fp_environment'
               ? { ...record, explanation: SOURCE_FP_ENVIRONMENT }

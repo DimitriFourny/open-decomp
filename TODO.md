@@ -564,7 +564,7 @@ Files that several items touch:
 
 ### F3: The source view drops the FP-environment note; the premise is recorded
 
-- [ ] **Problem.** 55 functions print `/* assumes nearest-even rounding and masked FP traps (requirement_…) */` (4,730 comment bytes). 12 of them have no FP operation at all, only a callee that requires it (`sqlite3_finalize`, `fts3DestroyMethod`, …). The note causes 3–4 wrong claims ("source has no such comment") and appears in 14 noise reasons. The FP requirement propagates through callee summaries (`source-requirements.ts:338-340`, `source-facts.ts:623-628, 1437-1441`), so fuller summaries spread the note further: +40 texts at 10× budget.
+- [x] **Problem.** 55 functions print `/* assumes nearest-even rounding and masked FP traps (requirement_…) */` (4,730 comment bytes). 12 of them have no FP operation at all, only a callee that requires it (`sqlite3_finalize`, `fts3DestroyMethod`, …). The note causes 3–4 wrong claims ("source has no such comment") and appears in 14 noise reasons. The FP requirement propagates through callee summaries (`source-requirements.ts:338-340`, `source-facts.ts:623-628, 1437-1441`), so fuller summaries spread the note further: +40 texts at 10× budget.
   - **Change** (`renderer.ts:8823-8843`, source view):
     - Print no note. Record `validation.requireAbi('fp_default_environment', [function id], …)` whenever an `fp_environment` requirement exists.
     - Map omitted-guard provenance (`mapSites`, `:8797-8811`) to the signature span.
@@ -579,6 +579,7 @@ Files that several items touch:
     - checked view byte-identical.
   - **Acceptance:** the 55 texts lose exactly the trailing signature comment. No other change.
   - **Expected effect:** Claude tokens geomean about −0.03 [estimate]; wrong claims −3 to −4; noise on about 13 functions. Lexical tokens are unchanged.
+  - **Evidence (rm4-f3):** OD lane `od-rm4-f3` vs a lane of `main` 307644d (`od-rm4-f3-base`): exactly the 57 texts carrying the note at that base changed (55 at `od-rm3-final`), each only by the trailing signature comment; coverage and failures identical; checked view byte-identical on 4 functions in both dialects. The premise's provenance is the listed FP-environment site citing the fewest instructions (the function origin only as fallback): work Δ ≤ +157 everywhere (`isDate` +157, brotli `main` +37, `sqlite3Fts3Incrmerge` +39).
 
 ### F4: Native FP where NaN-freedom is provable; value-preserving conversion spelling
 

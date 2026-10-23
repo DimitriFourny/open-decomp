@@ -394,8 +394,9 @@ enumerated-outcome fold (integer relations; IEEE less/equal/greater/unordered),
 e.g. `!(x < 0 || x > 0) && !isunordered(x, 0)` is `x == 0`, using only leaves
 the merged tests already read. Header notes: the ABI scratch comment is printed
 only when a scratch register name occurs in the text (`abi_scratch_note`), and
-the FP-environment assumption trails the signature with an unambiguous
-requirement ID prefix (`requirement_note`); full records stay in metadata.
+the source view prints no FP-environment note (`requirement_note`): the
+assumption is the recorded `fp_default_environment` ABI requirement, and full
+records stay in metadata.
 
 `else_if` prints an `else` arm that is exactly one `if` statement (no statement,
 definition, label, note or edge copy before or after it; the arm's own `else`
@@ -581,7 +582,7 @@ A type inference record carries every `association_ids` member whose assertion d
 
 Parameter roles distinguish observed source inputs, physical-register inputs and explicit entry-storage environment inputs; an entry-SP formal is not evidence of authored arity. Interpretation widths describe reconstructed IR, not necessarily a decoder operand or source declaration. Call constants expose exact unsigned bit patterns with explicit widths, without inventing signedness. Partial fields retain unknown bounds and observed callback targets; local checks retain their bounded scope and counterexamples. Metadata uses the same operation/output budget and cancellation as rendering, and omits evidence IDs when evidence was not requested. Five focused regressions and 12 public both-dialect observations cover these boundaries; they do not establish whole-function equivalence.
 
-Optional `emission.requirements` localize assumptions, unresolved values/effects/calls/control and conflicts at original subjects and instruction-backed output spans. One function-level `fp_environment` explanation names every affected guard/operation and its original state epoch. Source-only `fp_environment_guard` presentation selects the supported edge of an exact lifter guard when its state is the entry value, unchanged or carried through phis and bitcasts, there are no explicit environment writes, and the unsupported arm is exclusively owned. Transport acceptance is coinductive (a greatest fixpoint over the phi/bitcast web, so loop cycles qualify): a member is accepted when each input is the entry epoch or an accepted member; one input of any other kind rejects the guards of the whole function. Each guard record lists the accepted transports its epoch passes through. This is conditional on the recorded requirement at **each** epoch. Omitted guard/failure provenance maps to the top requirement comment; checked guards and ordered effects remain intact. Computed, loaded, known unsupported, or opaque-written control state retains explicit guards. An opaque effect that is the last statement of a block ending in an unresolved exit changes no recorded epoch (no modeled operation follows it) and does not retain them (`fp_terminal_effect`); an opaque effect elsewhere, such as an unsupported encoding inside the function, still does.
+Optional `emission.requirements` localize assumptions, unresolved values/effects/calls/control and conflicts at original subjects and instruction-backed output spans. One function-level `fp_environment` explanation names every affected guard/operation and its original state epoch. Source-only `fp_environment_guard` presentation selects the supported edge of an exact lifter guard when its state is the entry value, unchanged or carried through phis and bitcasts, there are no explicit environment writes, and the unsupported arm is exclusively owned. Transport acceptance is coinductive (a greatest fixpoint over the phi/bitcast web, so loop cycles qualify): a member is accepted when each input is the entry epoch or an accepted member; one input of any other kind rejects the guards of the whole function. Each guard record lists the accepted transports its epoch passes through. This is conditional on the recorded requirement at **each** epoch. Omitted guard/failure provenance maps to the signature in the source view and to the top requirement comment in the checked view; checked guards and ordered effects remain intact. Computed, loaded, known unsupported, or opaque-written control state retains explicit guards. An opaque effect that is the last statement of a block ending in an unresolved exit changes no recorded epoch (no modeled operation follows it) and does not retain them (`fp_terminal_effect`); an opaque effect elsewhere, such as an unsupported encoding inside the function, still does.
 
 Calls preserve the FP control state on every ABI profile: FPCR is not an ordinary Darwin call clobber (AAPCS64 6.1.2: its control fields change only through support functions), and SysV/Win64 already preserve MXCSR[6:16] and the x87 control word. The exceptions are known environment writers. Before SSA construction, a call whose target is a `fesetround`, `fesetenv`, `feupdateenv`, `feholdexcept`, `fesetexceptflag`, `feenableexcept`, `fedisableexcept`, `_controlfp`, `_control87`, `_controlfp_s`, `__control87_2`, `_set_controlfp`, `_fpreset`, `fpsetround` or `fpsetmask` import (callable stub, import-slot reference or constant target) also clobbers the profile's `environment_writer_clobbers` (FPCR; MXCSR[6:16] and the x87 control word). Its output is no epoch, so the fixpoint keeps the guards. A local callee whose summary shows a changed exit state (`fp_environment_writer`: a writer-import call or tail on a path to an exit, an explicit write that reaches an exit binding, or a writer callee; an opaque effect is no such evidence) keeps every guard of its caller. Omitting a guard records `requireAbi('fp_environment_preserved', [every call of the function])`: unknown, indirect and ordinary callees preserve the control state.
 
@@ -1420,9 +1421,16 @@ Original helper names and contracts stay in metadata.
 Only the helper definitions, `#include` and `#define` lines that the finished
 function text references (directly or through another helper) precede it, in a
 fixed order; the text is scanned outside comments and string literals after
-rendering, so unused or speculative expressions never add one. The FP environment
-requirement appears as one comment line citing its id; its full explanation is in
-the `requirements` metadata, and checked rendering keeps the full text.
+rendering, so unused or speculative expressions never add one. The source view
+prints no comment for the FP environment requirement: emitted C without
+`#pragma STDC FENV_ACCESS ON` presumes the default modes (C11 7.6.1p2, a language
+premise of the same class as `frame_object`), recorded as one
+`fp_default_environment` `abi_conformance` requirement beside the unchanged
+`fp_environment` requirement. Its provenance is the listed FP-environment site
+whose origin cites the fewest instructions (not the function origin, which would
+repeat every instruction of the function; the function anchors it only when
+that site prints nowhere). Omitted guard sites map to the signature. Its full explanation is in the `requirements`
+metadata, and checked rendering keeps the full `/* Requirement … */` line.
 `c_bitcast` uses same-width `memcpy` helpers for integer/IEEE32/IEEE64
 reinterpretation under an explicit native-representation ABI requirement.
 `c_integer_storage` uses ordinary C scalar storage for nonstandard-width integer
