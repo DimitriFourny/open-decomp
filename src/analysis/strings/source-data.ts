@@ -159,7 +159,7 @@ const imageIndexes = new WeakMap<LoadedImage, ImageDataIndex>();
 function symbolIndex(symbols: readonly SymbolRecord[], context: OperationContext): SymbolIndex {
   const cached = symbolIndexes.get(symbols);
   if (cached) return useBuilt(context, cached);
-  const indexed = buildOnce(context, (quiet) => buildSymbolIndex(symbols, quiet));
+  const indexed = buildOnce(context, 'symbol-index', (quiet) => buildSymbolIndex(symbols, quiet));
   symbolIndexes.set(symbols, indexed);
   return indexed;
 }
@@ -194,7 +194,9 @@ function buildSymbolIndex(
 function imageDataIndex(image: LoadedImage, context: OperationContext): ImageDataIndex {
   const cached = imageIndexes.get(image);
   if (cached) return useBuilt(context, cached);
-  const indexed = buildOnce(context, (quiet) => buildImageDataIndex(image, quiet));
+  const indexed = buildOnce(context, 'image-data-index', (quiet) =>
+    buildImageDataIndex(image, quiet),
+  );
   return indexed;
 }
 function buildImageDataIndex(image: LoadedImage, context: OperationContext): ImageDataIndex {

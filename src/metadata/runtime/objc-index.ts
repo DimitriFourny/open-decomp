@@ -50,7 +50,7 @@ export function objcImageIndex(
 ): ObjCImageIndex | null {
   const cached = indexes.get(image);
   if (cached?.revision === revision) return useBuilt(context, cached).index;
-  const built = buildOnce(context, (quiet) => ({
+  const built = buildOnce(context, 'objc-index', (quiet) => ({
     revision,
     index: buildObjCImageIndex(image, revision, quiet),
   }));

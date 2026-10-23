@@ -172,7 +172,7 @@ export function callerSiteIndexDeferred(
     cached.references_complete === referencesComplete
   )
     return cached;
-  const built = buildDeferred(context, (quiet) =>
+  const built = buildDeferred(context, 'caller-site-index', (quiet) =>
     buildCallerSiteIndex(image, functions, references, referencesComplete, quiet),
   );
   indexes.set(image, built);

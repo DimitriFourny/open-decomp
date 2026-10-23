@@ -4,6 +4,9 @@ import {
   buildOnce,
   createOperationContext,
   OperationError,
+  recordBuilds,
+  replayBuilds,
+  unpaidBuildCost,
   useBuilt,
   type OperationContext,
 } from '../../src/core/index.js';
@@ -60,7 +63,7 @@ test('a per-process build costs every operation that uses it the same, once, wit
     return { value: 1 };
   };
   const first = createOperationContext({ budget: { work: 100 } });
-  const built = buildOnce(first, build);
+  const built = buildOnce(first, 'test-index', build);
   assert.equal(first.remainingWork?.(), 70);
   // Further uses by the same operation, through derived contexts, are free.
   assert.equal(useBuilt({ ...first, budget: { ...first.budget, work: 5 } }, built), built);
@@ -76,12 +79,37 @@ test('a per-process build costs every operation that uses it the same, once, wit
   });
 });
 
+test('a recorded structure use replays its payment once per operation, as using it would', () => {
+  const first = createOperationContext({ budget: { work: 100 } });
+  const { value: built, builds } = recordBuilds(first, () =>
+    buildOnce(first, 'test-index', (quiet) => {
+      quiet.checkpoint(30);
+      return {};
+    }),
+  );
+  assert.deepEqual(builds, [{ name: 'test-index', cost: 30 }]);
+  // Replayed where the operation has not paid it: charged once, then claimed by the structure.
+  const second = createOperationContext({ budget: { work: 100 } });
+  assert.equal(unpaidBuildCost(second, builds), 30);
+  replayBuilds(second, builds);
+  replayBuilds({ ...second }, builds);
+  useBuilt(second, built);
+  assert.equal(second.remainingWork?.(), 70);
+  assert.equal(unpaidBuildCost(second, builds), 0);
+  // Where the operation has paid it: free, and recorded again by an enclosing recording.
+  const third = createOperationContext({ budget: { work: 100 } });
+  useBuilt(third, built);
+  const replayed = recordBuilds(third, () => replayBuilds(third, builds));
+  assert.equal(third.remainingWork?.(), 70);
+  assert.deepEqual(replayed.builds, builds);
+});
+
 test('a build is cancellable without being charged during the build', () => {
   const controller = new AbortController();
   const context = createOperationContext({ signal: controller.signal, budget: { work: 5 } });
   assert.throws(
     () =>
-      buildOnce(context, (quiet) => {
+      buildOnce(context, 'test-index', (quiet) => {
         quiet.checkpoint(1_000_000);
         controller.abort();
         quiet.checkpoint(1);

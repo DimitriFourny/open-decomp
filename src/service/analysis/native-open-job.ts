@@ -363,8 +363,8 @@ function prepareForStore(
     unitInput,
     cache,
     nativeLibraryContracts(unitInput),
-    (charge, reads) =>
-      charge <= bounded.remainingWork!() && charge + reads <= context.remainingWork!(),
+    (charge, root) =>
+      charge <= bounded.remainingWork!() && charge + root <= context.remainingWork!(),
   );
   try {
     load(fn, bounded);

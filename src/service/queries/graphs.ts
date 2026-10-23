@@ -1,4 +1,12 @@
-import { buildOnce, fingerprint, useBuilt } from '../../core/index.js';
+import {
+  buildOnce,
+  fingerprint,
+  recordBuilds,
+  replayBuilds,
+  unpaidBuildCost,
+  useBuilt,
+  type BuildUse,
+} from '../../core/index.js';
 import type {
   FunctionGraph,
   FunctionRecord,
@@ -36,6 +44,8 @@ const cache = new Map<
     readonly characters: number;
     /** Work reconstructing it charged: a reuse charges the same. */
     readonly work: number;
+    /** Per-process structures its discovery used, whose payments a reuse makes too. */
+    readonly builds: readonly BuildUse[];
   }
 >();
 let cachedUnits = 0;
@@ -68,7 +78,7 @@ export function reconstructFunctionGraph(
   if (prepared && prepared.revision === revision && prepared.functions === input.functions)
     useBuilt(context, prepared);
   else {
-    prepared = buildOnce(context, (quiet) => ({
+    prepared = buildOnce(context, 'discovery-index', (quiet) => ({
       revision,
       functions: input.functions,
       index: prepareDiscoveryIndex({ image, revision, functions: input.functions }, quiet),
@@ -77,10 +87,17 @@ export function reconstructFunctionGraph(
     indexes.set(image, prepared);
   }
   const cached = cache.get(key);
-  // Reuse charges the build's work in one charge. Where that charge does not fit the
-  // remaining work, a fresh build would charge part of it before failing; rebuild, so the
-  // charge is the same whether this process built the graph before or not.
-  if (cached && cached.work <= (context.remainingWork?.() ?? Infinity)) {
+  // Reuse charges the build's work in one charge, and the root payments of the per-process
+  // structures its discovery used that this operation has not paid. Where that does not fit
+  // the remaining work, a fresh build would charge part of it before failing; rebuild, so
+  // the charge is the same whether this process built the graph before or not.
+  if (
+    cached &&
+    cached.work <= (context.remainingWork?.() ?? Infinity) &&
+    cached.work + unpaidBuildCost(context, cached.builds) <=
+      ((context.root ?? context).remainingWork?.() ?? Infinity)
+  ) {
+    replayBuilds(context, cached.builds);
     context.checkpoint(cached.work);
     // Refresh the bounded graph LRU without retaining its image bytes.
     cache.delete(key);
@@ -99,24 +116,26 @@ export function reconstructFunctionGraph(
     image.target.architecture === 'arm64'
       ? new Arm64Decoder()
       : new X86Decoder({ formatting: input.formatting === true });
-  let discovery;
+  let discovery, builds: readonly BuildUse[];
   const presentations = input.formatting
     ? new Map<string, { mnemonic: string; operands: string }>()
     : undefined;
   let presentationCharacters = 0;
   try {
-    discovery = discoverFunctions(
-      {
-        image,
-        decoder,
-        revision,
-        index: prepared.index,
-        selected_entry: fn.entry,
-        noreturn_calls: prepared.noreturn_calls,
-        preserved_registers: targetAbi(image.target)?.preserved ?? [],
-      },
-      measured,
-    );
+    ({ value: discovery, builds } = recordBuilds(context, () =>
+      discoverFunctions(
+        {
+          image,
+          decoder,
+          revision,
+          index: prepared.index,
+          selected_entry: fn.entry,
+          noreturn_calls: prepared.noreturn_calls,
+          preserved_registers: targetAbi(image.target)?.preserved ?? [],
+        },
+        measured,
+      ),
+    ));
     if (presentations) {
       for (const instruction of discovery.graphs[0]?.instructions ?? []) {
         measured.checkpoint(1);
@@ -218,7 +237,7 @@ export function reconstructFunctionGraph(
       cachedUnits -= removed.units;
       cachedCharacters -= removed.characters;
     }
-    cache.set(key, { graph, units, characters, work });
+    cache.set(key, { graph, units, characters, work, builds });
     cachedUnits += units;
     cachedCharacters += characters;
   }

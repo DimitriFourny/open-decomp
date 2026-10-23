@@ -91,7 +91,7 @@ export function nativeCallIndex(
   const cached = nativeIndexes.get(image);
   if (cached?.functions === functions && cached.references === references)
     return useBuilt(context, cached);
-  const indexed = buildOnce(context, (quiet) =>
+  const indexed = buildOnce(context, 'native-call-index', (quiet) =>
     buildNativeCallIndex(image, functions, references, quiet),
   );
   nativeIndexes.set(image, indexed);

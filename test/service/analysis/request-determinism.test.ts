@@ -429,3 +429,66 @@ test(
     }
   },
 );
+
+// A per-process structure is paid once per request, on its root, by whatever uses it first;
+// that payment is not part of the charge a cached result records. A cached graph or prepared
+// unit whose computation used such a structure must make its payment again where its request
+// has not, or a request that reuses it charges less than one that computes it. Here only
+// `dispatch`'s discovery uses the image data index (its jump table). `leaf0`'s request loads
+// `dispatch`'s graph (its caller), which `dispatch`'s own request cached; `main`'s request
+// reuses the `dispatch` unit `caller`'s request prepared, or the open-time job persisted.
+test(
+  'a reused graph or unit pays the per-process structures its computation used',
+  { skip: nativeOracleSkip(), timeout: 300_000 },
+  async (t) => {
+    const root = await mkdtemp(join(tmpdir(), 'open-decomp-reused-builds-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const binary = join(root, 'jump-table');
+    const compiled = spawnSync(
+      CLANG,
+      [
+        '-target',
+        'arm64-apple-macos13.0',
+        '-O1',
+        '-g0',
+        '-fno-inline',
+        resolve('test/service/analysis/jump-table-reuse-source.c'),
+        '-o',
+        binary,
+      ],
+      { encoding: 'utf8' },
+    );
+    assert.equal(compiled.status, 0, compiled.stderr);
+    let sessions = 0;
+    const last = async (names: readonly string[], openJob = false) => {
+      const session = await openBinary(binary, {
+        cachePath: join(root, `cache-${sessions++}`),
+        ...(openJob ? { openJob: { jobs: 1 } } : {}),
+      });
+      try {
+        let outcome: { text: string; work: unknown } | undefined;
+        for (const name of names) {
+          const result = await session.decompile({ name }, { emitter: 'c-like' });
+          assert.ok('data' in result && result.data.delivery === 'inline', name);
+          outcome = { text: result.data.emission.text, work: result.data.work };
+        }
+        return outcome!;
+      } finally {
+        await session.close();
+      }
+    };
+    for (const [before, name, openJob] of [
+      [['dispatch'], 'leaf0', false],
+      [['caller'], 'main', false],
+      [[], 'main', true],
+    ] as const) {
+      const cold = await last([name]);
+      assert.notEqual(cold.work, undefined);
+      assert.deepEqual(
+        await last([...before, name], openJob),
+        cold,
+        `${name} after ${openJob ? 'the open-time job' : before.join(', ')}`,
+      );
+    }
+  },
+);
