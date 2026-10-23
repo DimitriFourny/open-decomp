@@ -370,7 +370,7 @@ Files that several items touch:
 
 ### K1: Darwin variadic stack arguments across tail calls and joined slots
 
-- [ ] **Problem.** 35 Darwin variadic sites with a literal format, plus at least 8 with a variable format, print their anonymous arguments as frame stores: `frame.local_70 = (uintptr_t)address_3; sqlite3ErrorMsg(address, "no such trigger: %S");`. Those slots keep 17 frame structs alive. The callee's S8 footprint is present even when the CLI says "cut by budget", so budget is not the blocker (measured at 4× and 10×).
+- [x] **Problem.** 35 Darwin variadic sites with a literal format, plus at least 8 with a variable format, print their anonymous arguments as frame stores: `frame.local_70 = (uintptr_t)address_3; sqlite3ErrorMsg(address, "no such trigger: %S");`. Those slots keep 17 frame structs alive. The callee's S8 footprint is present even when the CLI says "cut by budget", so budget is not the blocker (measured at 4× and 10×).
   - **Root cause** (instrumented `planVariadicStackArguments`, `src/reconstruction/source-variadic.ts:30-293`):
     - (R1a) every indirect tail exit counts as a boundary that reads the slot (`:175-181`, `:253-262`), although at a tail call SP is back at the entry SP;
     - (R1c) a slot written on several branches has no single owner (`:220-237`);
@@ -388,6 +388,7 @@ Files that several items touch:
     - Part 1 measured: `sqlite3DropTrigger` prints `sqlite3ErrorMsg(address, "no such trigger: %S", address_3);` and loses its frame struct. `sqlite3RowidConstraint` prints `sqlite3MPrintf(address_2, "%s.%s", …)` without a frame. `parserDoubleLinkSelect` loses its frame. `sqlite3CreateForeignKey` binds 2/2 sites.
     - Part 2: `verifyDbFile` (needs K7 as well), `selectInnerLoop`, `generateSortTail`.
     - Every other text is byte-identical. Checked view unchanged.
+  - **Done (K1, reconstruction 88):** tail boundaries with SP at or above a slot no longer observe it; a slot written on every incoming edge binds through the existing join value or a source-only join parameter (`variadic_stack_join`). OD lane: exactly `sqlite3DropTrigger`, `sqlite3RowidConstraint`, `parserDoubleLinkSelect` (frames gone) and `sqlite3CreateForeignKey` (2/2 sites) change; checked view identical. Part 2 fires on no full-tier text yet: `generateSortTail` (`sqlite3VdbeExplain`, two branches) is blocked by R1d (the next ambiguous `sqlite3VdbeAddOp3` sees the slot); `verifyDbFile` and `selectInnerLoop` abort on an escaped frame address (K7). With that abort lifted, `verifyDbFile` binds its 4-edge join (`sqlite3_log(28, value5, value4)`), while `selectInnerLoop`'s slot at both `sqlite3VdbeComment` calls is an unowned unknown fact in the escaped/aliased snapshot, so K7 must also keep store facts below its floor.
 
 ### K2: Consume outgoing stores that a bound stack argument already shows
 

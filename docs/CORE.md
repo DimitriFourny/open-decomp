@@ -829,7 +829,13 @@ Darwin variadic stack arguments stored in different predecessors of one shared
 call resolve when, on every incoming edge, the owning store wrote the same SSA
 value (it dominates the join) or a value — through identity moves, concat
 components, or an equal rematerialized constant — that the edge copies into one
-block parameter of the join.
+block parameter of the join. Outgoing variadic slots (`variadic_stack_arguments`)
+use the same proof; when no SSA value carries the stored values to the join, each
+predecessor's store (in that predecessor block, unobserved by any other boundary
+or load, the call block writing nothing before the call) instead feeds a
+source-only block parameter assigned on every edge (`variadic_stack_join`), and
+the stores print as those assignments. A tail call (SP back at the entry SP)
+does not observe an outgoing slot below its SP.
 Discovery-established tails to uniquely resolved imported callable entries may
 use complete nonvariadic register-only library contracts. Their interfaces
 propagate through the same bounded native dependency worklist as source-only
