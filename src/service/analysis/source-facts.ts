@@ -1119,7 +1119,7 @@ function sourceAddresses(
  * depend on what earlier requests in this process (or a persisted row) prepared.
  *
  * Prefix reuse. A unit that is not retained keeps its preparation prefix
- * (`prepareNativePrefix`) in the same LRU, as a `PreparedPrefixEntry`: the lift
+ * (`prepareNativePrefix`) in its own bounded LRU, as a `PreparedPrefixEntry`: the lift
  * segment (lift, entry prefix) and, when SSA completed within its limit, the SSA
  * segment, each with the work it charged and the reads it made. The graph is loaded
  * afresh every time (`loadNativeGraph`). The lift segment sets no limit from the
@@ -1134,11 +1134,17 @@ type PreparedUnitCache = {
   readonly identity: string;
   readonly functions: readonly FunctionRecord[];
   readonly references: readonly ReferenceRecord[];
-  /** Least recently used first; prefix entries are keyed `prefixKey(fn.id)`. */
-  readonly entries: Map<string, PreparedUnitEntry | PreparedPrefixEntry>;
+  /** Least recently used first. */
+  readonly entries: Map<string, PreparedUnitEntry>;
   /** The persisted tier behind `entries`; absent when the store offers none. */
   readonly persistence?: NativeUnitPersistence;
   size: number;
+  /** Prefixes of units that were not retained, by function ID, least recently used first.
+   * Bounded apart from `entries`, so prefixes never evict a retained unit (an evicted unit
+   * would be served from its persisted row or prepared again, which changes which reuse
+   * path a request takes). */
+  readonly prefixes: Map<string, PreparedPrefixEntry>;
+  prefix_size: number;
 };
 /** A recorded preparation segment: its value, the work it charged on the worklist
  * context and the reads it made (absent without a dependency collector). */
@@ -1154,7 +1160,6 @@ interface PreparedPrefixEntry {
   readonly ssa?: PreparedSegment<NativeSSA>;
   readonly size: number;
 }
-const prefixKey = (id: string): string => `prefix:${id}`;
 const prefixSize = (prefix: Omit<PreparedPrefixEntry, 'size'>): number =>
   prefix.lift.value.base.instructions +
   prefix.lift.value.base.evidence.length +
@@ -1168,6 +1173,10 @@ const preparedUnits = new WeakMap<LoadedImage, PreparedUnitCache>();
 /** Retained prepared size (instructions + IR nodes + evidence + traced reads) per
  * image. Measured on SQLite at roughly 1 KiB of heap per unit, so ~256 MiB. */
 const MAX_PREPARED_UNIT_SIZE = 1 << 18;
+/** Retained prefix size (instructions + IR nodes + evidence + traced reads) per image: a
+ * quarter of the unit tier, enough for the few hub bodies that reach a limit (SQLite's
+ * `sqlite3_str_vappendf`, `sqlite3_config`, `sqlite3VdbeHalt`, ...). */
+const MAX_PREPARED_PREFIX_SIZE = 1 << 16;
 /** Retention (in process and persisted): the preparation hit no limit, so its result is
  * independent of the allowance. Its `reasons` may be anything that is not a limit (for
  * example "unresolved control flow" from an indirect call): they are facts of the body,
@@ -1236,6 +1245,8 @@ export function preparedUnitCache(input: NativePreparationInput): PreparedUnitCa
       references: input.references,
       entries: new Map(),
       size: 0,
+      prefixes: new Map(),
+      prefix_size: 0,
     };
   const { components, image, revision } = input,
     abi = components.abi;
@@ -1264,6 +1275,8 @@ export function preparedUnitCache(input: NativePreparationInput): PreparedUnitCa
       entries: new Map(),
       ...(persistence ? { persistence } : {}),
       size: 0,
+      prefixes: new Map(),
+      prefix_size: 0,
     };
     preparedUnits.set(image, prepared);
   }
@@ -1288,7 +1301,7 @@ export function nativeUnitLoader(
     return (fn, boundedContext) => prepareNativeUnit(input, fn, boundedContext, libraryContracts);
   const { persistence } = cache;
   /** Keep `entry` in the process tier, evicting least recently used entries to fit. */
-  const retain = (id: string, entry: PreparedUnitEntry | PreparedPrefixEntry): boolean => {
+  const retain = (id: string, entry: PreparedUnitEntry): boolean => {
     if (entry.size > MAX_PREPARED_UNIT_SIZE) return false;
     for (const [other, old] of cache.entries) {
       if (cache.size + entry.size <= MAX_PREPARED_UNIT_SIZE) break;
@@ -1300,8 +1313,7 @@ export function nativeUnitLoader(
     return true;
   };
   const reuse = (fn: FunctionRecord, boundedContext: OperationContext) => {
-    const cached = cache.entries.get(fn.id);
-    let entry = cached && 'unit' in cached ? cached : undefined;
+    let entry = cache.entries.get(fn.id);
     // A unit this process has not prepared may be one an earlier process persisted. It is
     // used exactly as if it had been prepared here, so the checks below are the same.
     if (!entry && persistence) {
@@ -1347,9 +1359,7 @@ export function nativeUnitLoader(
         work += amount;
       },
     };
-    const key = prefixKey(fn.id);
-    const cached = cache.entries.get(key);
-    const stored = allowance !== undefined && cached && 'lift' in cached ? cached : undefined;
+    const stored = allowance !== undefined ? cache.prefixes.get(fn.id) : undefined;
     const { budget } = boundedContext;
     /** Run `compute` on `measured`, recording the work it charges and the reads it makes. */
     const record = <T>(compute: () => T): PreparedSegment<T> => {
@@ -1408,8 +1418,7 @@ export function nativeUnitLoader(
       ? scope.dependencies.traced(run)
       : { value: run(), trace: undefined };
     if (allowance !== undefined && retainablePreparation(unit)) {
-      const old = cache.entries.get(fn.id);
-      const prior = old && 'unit' in old ? old : undefined;
+      const prior = cache.entries.get(fn.id);
       if (prior) {
         cache.entries.delete(fn.id);
         cache.size -= prior.size;
@@ -1430,11 +1439,20 @@ export function nativeUnitLoader(
       // completed (a limited SSA run under a smaller limit leaves the recorded one).
       const completed = ssa && completedSSA(ssa) ? ssa : stored?.ssa;
       if (stored) {
-        cache.entries.delete(key);
-        cache.size -= stored.size;
+        cache.prefixes.delete(fn.id);
+        cache.prefix_size -= stored.size;
       }
       const prefix = { lift, ...(completed ? { ssa: completed } : {}) };
-      retain(key, { ...prefix, size: prefixSize(prefix) });
+      const size = prefixSize(prefix);
+      if (size <= MAX_PREPARED_PREFIX_SIZE) {
+        for (const [other, old] of cache.prefixes) {
+          if (cache.prefix_size + size <= MAX_PREPARED_PREFIX_SIZE) break;
+          cache.prefixes.delete(other);
+          cache.prefix_size -= old.size;
+        }
+        cache.prefixes.set(fn.id, { ...prefix, size });
+        cache.prefix_size += size;
+      }
     }
     return unit;
   };

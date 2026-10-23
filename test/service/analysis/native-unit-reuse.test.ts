@@ -265,8 +265,8 @@ test('a memoized preparation prefix leaves exactly what a cold preparation would
     const entry = preparedUnitCache({
       ...fresh,
       scope: { store, context: createOperationContext(), job_id: 'native-unit-history' },
-    }).entries.get(`prefix:${fn.id}`);
-    assert.ok(entry && 'lift' in entry);
+    }).prefixes.get(fn.id);
+    assert.ok(entry);
     return entry;
   };
   const load = (allowance: number, label: string) => {
