@@ -1,7 +1,7 @@
 import type { OperationContext, RegisterDescriptor } from '../core/index.js';
 import { bitWidth, expressionOperands, type Expression, type Value } from '../ir/index.js';
 import type { ControlArm, Region } from '../presentation/index.js';
-import type { Reconstruction } from './model.js';
+import type { BoundaryProjection, Reconstruction } from './model.js';
 import { sourceRequirementPredicates } from './source-requirements.js';
 
 export const SOURCE_FP_ENVIRONMENT =
@@ -22,9 +22,21 @@ export interface SourceFpPresentation {
   readonly expressions: ReadonlySet<Expression>;
 }
 
+/** FP control state: FPCR, and MXCSR bits overlapping [6:16] (DAZ, exception
+ * masks, rounding control, FTZ). */
+export function fpEnvironmentRegister(register: RegisterDescriptor): boolean {
+  return (
+    register.root === 'arm64:fpcr' ||
+    (register.root === 'x86_64:mxcsr' &&
+      register.offset_bits < 16 &&
+      register.offset_bits + register.width_bits > 6)
+  );
+}
+
 /** A default environment is a precondition at each recorded epoch, not a fact
- * about arbitrary writes. Only entry state, call clobbers and their unchanged
- * transports qualify. A computed/loaded control state retains explicit guards. */
+ * about arbitrary writes. Only entry state and its unchanged transports qualify;
+ * calls preserve it except environment writers. A computed/loaded control
+ * state or a writer call retains explicit guards. */
 export function sourceFpPresentation(
   program: Reconstruction,
   context: OperationContext,
@@ -92,11 +104,11 @@ export function sourceFpPresentation(
   const guardSubjects = new Set<string>();
   for (const { site } of predicates.values())
     for (const id of site.subject_ids) guardSubjects.add(id);
-  const environment = (register: RegisterDescriptor): boolean =>
-    register.root === 'arm64:fpcr' ||
-    (register.root === 'x86_64:mxcsr' &&
-      register.offset_bits < 16 &&
-      register.offset_bits + register.width_bits > 6);
+  // Calls preserve the control state (`fp_environment_preserved`): only the
+  // calls of environment writers define it, and their outputs are no epochs,
+  // so the fixpoint keeps every guard they reach. A local writer callee (its
+  // summary) has no output in this body: its guards stay as a whole.
+  const writers = program.source.fp_environment_writers;
   const epochs = new Set<string>();
   const incoming = new Map<string, string[]>();
   const predecessors = new Map<string, number>();
@@ -109,7 +121,7 @@ export function sourceFpPresentation(
         : [];
   };
   for (const binding of program.blocks.get(program.function.entry)!.register_entry)
-    if (environment(binding.register)) epochs.add(binding.value.id);
+    if (fpEnvironmentRegister(binding.register)) epochs.add(binding.value.id);
   // The last effect of a block that ends in an unresolved exit cannot change the
   // environment of any recorded operation: no modeled code executes after it.
   const terminalEffects = new Set<string>(),
@@ -117,12 +129,12 @@ export function sourceFpPresentation(
   for (const block of program.blocks.values()) {
     context.checkpoint(1);
     for (const [index, node] of block.statements.entries()) {
-      if (node.kind === 'write_register' && environment(node.register)) return unchanged;
+      if (node.kind === 'write_register' && fpEnvironmentRegister(node.register)) return unchanged;
       // Opaque instructions can write control state. Recognized guard failures
       // are the only opaque effects removed by the conditional presentation.
       if (
         node.kind === 'unknown_effect' &&
-        node.register_outputs.some((binding) => environment(binding.register)) &&
+        node.register_outputs.some((binding) => fpEnvironmentRegister(binding.register)) &&
         !guardSubjects.has(node.id)
       ) {
         if (block.control.kind !== 'unknown' || index !== block.statements.length - 1)
@@ -130,9 +142,7 @@ export function sourceFpPresentation(
         terminalEffects.add(node.id);
         terminalBlocks.add(block.id);
       }
-      if (node.kind === 'call')
-        for (const binding of node.register_outputs)
-          if (environment(binding.register)) epochs.add(binding.value.id);
+      if (node.kind === 'call' && writers?.has(node.id)) return unchanged;
     }
     for (const transfer of block.control.kind === 'jump'
       ? [block.control.transfer]
@@ -147,14 +157,14 @@ export function sourceFpPresentation(
   }
   // Coinductive acceptance (a greatest fixpoint) over the bitcast/phi transport
   // web: a bitcast or phi only transports its inputs' values, so a member whose
-  // parents are all entry/call-clobber epochs or accepted members holds one of
+  // parents are all entry epochs or accepted members holds one of
   // those epochs on every execution, around loop cycles too. A member with no
   // parent or with any other parent is rejected, and so is every member it reaches.
   const roots = [...predicates.values()].map(({ site }) => site.state_epoch);
   for (const block of program.blocks.values())
     for (const binding of block.register_exit)
       if (
-        environment(binding.register) &&
+        fpEnvironmentRegister(binding.register) &&
         !guardSubjects.has(block.control.id) &&
         !terminalBlocks.has(block.id)
       )
@@ -241,8 +251,8 @@ export function sourceFpPresentation(
         'fp_environment_guard',
         control.id,
         requirement.site.supported_predicate_value
-          ? 'exact lifter environment guard; unknown entry/call epoch, directly or through the listed accepted phi/bitcast transports, no explicit environment writer; unsupported arm is exclusively owned; supported edge and copies unchanged'
-          : 'exact lifter x86 MXCSR[6:16] guard (all exceptions masked, DAZ off, round to nearest, FTZ off); unknown entry/call epoch, directly or through the listed accepted phi/bitcast transports, no explicit MXCSR control writer (exception-status MXCSR[0:6] writes are disjoint); unsupported arm is exclusively owned; supported edge and copies unchanged',
+          ? 'exact lifter environment guard; unknown entry epoch, directly or through the listed accepted phi/bitcast transports, preserved by every call (no environment-writer call), no explicit environment writer; unsupported arm is exclusively owned; supported edge and copies unchanged'
+          : 'exact lifter x86 MXCSR[6:16] guard (all exceptions masked, DAZ off, round to nearest, FTZ off); unknown entry epoch, directly or through the listed accepted phi/bitcast transports, preserved by every call (no environment-writer call), no explicit MXCSR control writer (exception-status MXCSR[0:6] writes are disjoint); unsupported arm is exclusively owned; supported edge and copies unchanged',
         [...requirement.site.subject_ids, ...transported(requirement.site.state_epoch)],
         `Conditional on ${requirement.requirement.id} at ${requirement.site.id}, epoch ${requirement.site.state_epoch}; original guard and failure remain in checked view and requirement metadata`,
       )
@@ -251,6 +261,14 @@ export function sourceFpPresentation(
     guards.add(control.id);
     omitted.add(no.transfer.target);
   }
+  // The omitted guards rest on every call of this body preserving the control
+  // state: none is a known environment writer (those keep every guard above).
+  if (guards.size && program.calls.size)
+    validation.requireAbi(
+      'fp_environment_preserved',
+      [...program.calls.keys()],
+      'Calls to targets that are not known FP environment writers (unknown, indirect or ordinary callees) preserve the FP control state: FPCR control fields (AAPCS64 6.1.2), MXCSR[6:16] and the x87 control word (SysV psABI, Microsoft x64 nonvolatile state). fenv.h, MSVC _controlfp-family and BSD fpset* imports and local callees that write it keep their guards.',
+    );
   // An omitted guard no longer reads its condition. Mark pass over the web its
   // conditions reach (operands, phi copy sources): a member with a demand from
   // outside the web (its use count exceeds its uses inside the web) is observed,
@@ -381,13 +399,32 @@ export function sourceFpPresentation(
   // Any escape of arithmetic bits makes NaN payload canonicalization observable.
   // Propagate that restriction backwards through all pure computations and phi
   // transports. Float results and FP comparisons observe values, not payloads.
+  // Floating values stored to memory or passed to a call (directly or through
+  // a same-width bitcast that only transports them) are not escapes: NaN
+  // payloads are unspecified (premise fp_nan_payload_unobserved). Such roots
+  // are kept in `relaxed` so the premise is recorded only where it matters.
   const sensitive = new Set<string>(),
-    pending: string[] = [];
+    pending: string[] = [],
+    relaxed: string[] = [];
   const mark = (id: string): void => {
     if (!sensitive.has(id)) {
       sensitive.add(id);
       pending.push(id);
     }
+  };
+  const isFloatTransport = (value: Value): boolean => {
+    if (value.type.kind === 'float') return true;
+    const expression = program.expressions.get(value.id);
+    return (
+      expression?.kind === 'cast' &&
+      expression.op === 'bitcast' &&
+      expression.value.type.kind === 'float' &&
+      bitWidth(expression.value.type) === bitWidth(value.type)
+    );
+  };
+  const markOrRelax = (value: Value): void => {
+    if (isFloatTransport(value)) relaxed.push(value.id);
+    else mark(value.id);
   };
   // A promoted local slot is private storage: its stores are as observable as
   // the loads that read it back, no more.
@@ -402,18 +439,22 @@ export function sourceFpPresentation(
         row.push(node.value.id);
         slotStores.set(local.id, row);
       } else if (local && node.kind === 'load') slotOfLoad.set(node.result.id, local.id);
-      else if (node.kind === 'store' || node.kind === 'write_register') mark(node.value.id);
+      else if (node.kind === 'store') markOrRelax(node.value);
+      else if (node.kind === 'write_register') mark(node.value.id);
     }
   }
   for (const bindings of [...program.physical_inputs.values(), ...program.physical_exits.values()])
     for (const binding of bindings) mark(binding.value.id);
-  for (const boundary of [
+  const callBoundaries = new Set<BoundaryProjection>([
     ...program.calls.values(),
-    ...program.returns.values(),
     ...[...program.tails.values()].map((tail) => tail.boundary),
-  ]) {
-    for (const value of boundary.arguments) mark(value.id);
-    for (const binding of [...boundary.inputs, ...boundary.outputs]) mark(binding.value.id);
+  ]);
+  for (const boundary of [...callBoundaries, ...program.returns.values()]) {
+    const call = callBoundaries.has(boundary);
+    const operand = call ? markOrRelax : (value: Value): void => mark(value.id);
+    for (const value of boundary.arguments) operand(value);
+    for (const binding of boundary.inputs) operand(binding.value);
+    for (const binding of boundary.outputs) mark(binding.value.id);
     for (const value of boundary.results) if (value.type.kind !== 'float') mark(value.id);
   }
   // Comparisons yield one bit of the value order and float-to-integer
@@ -437,16 +478,36 @@ export function sourceFpPresentation(
       )
     )
       for (const value of expressionOperands(expression)) mark(value.id);
-  for (let i = 0; i < pending.length; i++) {
-    context.checkpoint(1);
-    const id = pending[i]!;
-    const expression = program.expressions.get(id);
-    if (expression && !payloadFree(expression))
-      for (const value of expressionOperands(expression)) mark(value.id);
-    for (const parent of incoming.get(id) ?? []) mark(parent);
-    const slot = slotOfLoad.get(id);
-    if (slot) for (const stored of slotStores.get(slot) ?? []) mark(stored);
-  }
+  const spread = (set: Set<string>, queue: string[]): void => {
+    const add = (id: string): void => {
+      if (!set.has(id)) {
+        set.add(id);
+        queue.push(id);
+      }
+    };
+    for (let i = 0; i < queue.length; i++) {
+      context.checkpoint(1);
+      const id = queue[i]!;
+      const expression = program.expressions.get(id);
+      if (expression && !payloadFree(expression))
+        for (const value of expressionOperands(expression)) add(value.id);
+      for (const parent of incoming.get(id) ?? []) add(parent);
+      const slot = slotOfLoad.get(id);
+      if (slot) for (const stored of slotStores.get(slot) ?? []) add(stored);
+    }
+  };
+  spread(sensitive, pending);
+  // The values that would be payload-sensitive without the relaxation.
+  let strictSensitive: Set<string> | undefined;
+  const strict = (): Set<string> => {
+    if (!strictSensitive) {
+      strictSensitive = new Set(sensitive);
+      const queue = relaxed.filter((id) => !strictSensitive!.has(id));
+      for (const id of queue) strictSensitive.add(id);
+      spread(strictSensitive, queue);
+    }
+    return strictSensitive;
+  };
   const sites = new Set(
     program.source.requirements
       ?.filter((item) => item.kind === 'fp_environment')
@@ -570,7 +631,8 @@ export function sourceFpPresentation(
     return divisor !== undefined && divisor !== 0 ? operands : undefined;
   };
   const candidates: [string, Expression][] = [],
-    nanFreeSubjects: [string, number[]][] = [];
+    nanFreeSubjects: [string, number[]][] = [],
+    payloadSubjects: string[] = [];
   for (const [id, expression] of program.expressions) {
     context.checkpoint(1);
     if (
@@ -609,9 +671,16 @@ export function sourceFpPresentation(
       // Negation and absolute value only change the sign bit, payload included.
       (expression.kind === 'float_unary' && expression.op !== 'sqrt') ||
       (!sensitive.has(id) && arithmetic)
-    )
-      candidates.push([id, expression]);
-    else if (arithmetic) {
+    ) {
+      // An operation that is payload-sensitive only through stores and call
+      // arguments stays native on the premise, unless it never produces a NaN.
+      const operands = arithmetic && !sensitive.has(id) && strict().has(id) && nanFree(expression);
+      if (operands) nanFreeSubjects.push([id, operands]);
+      else {
+        candidates.push([id, expression]);
+        if (arithmetic && !sensitive.has(id) && strict().has(id)) payloadSubjects.push(id);
+      }
+    } else if (arithmetic) {
       // A payload-sensitive consumer cannot tell an operation that never
       // produces a NaN from its native C spelling.
       const operands = nanFree(expression);
@@ -636,15 +705,21 @@ export function sourceFpPresentation(
     validation.presentation(
       'fp_native_operations',
       program.function.id,
-      'typed IEEE scalar operations (arithmetic, negation, absolute value, square root, comparisons, integer/float conversions) and exact finite literals under recorded per-site default environment; no payload-sensitive arithmetic consumers except of operations that never produce a NaN (fp_nan_free); an integer-to-float conversion of a zero-extended unsigned or sign-extended signed narrower integer spells that narrower operand (the same mathematical integer); fused and exceptional-dialect operations, vector operations and Python binary32/division/square-root/float-to-integer retain helpers',
+      'typed IEEE scalar operations (arithmetic, negation, absolute value, square root, comparisons, integer/float conversions) and exact finite literals under recorded per-site default environment; no payload-sensitive arithmetic consumers except of operations that never produce a NaN (fp_nan_free) or whose payload only reaches stores and call arguments (fp_nan_payload_unobserved); an integer-to-float conversion of a zero-extended unsigned or sign-extended signed narrower integer spells that narrower operand (the same mathematical integer); fused and exceptional-dialect operations, vector operations and Python binary32/division/square-root/float-to-integer retain helpers',
       candidates.map(([id]) => id).slice(0, 64),
     )
   ) {
     validation.requireAbi(
       'fp_native_operations',
       [program.function.id],
-      'Native C arithmetic follows IEC 60559, including infinities and NaNs, in IEEE binary32/binary64 with no excess precision, no fast-math and FP contraction disabled (-ffp-contract=off). Negation and absolute value change only the sign bit; float-to-integer conversion truncates toward zero and, as in the IR, is undefined for NaN, infinities and out-of-range values. Source floating results are consumed as values, not inspected for arithmetic NaN payloads; local payload-sensitive consumers retain helpers unless the operation never produces a NaN. The recorded fp_environment requirement applies at every operation, including after calls.',
+      'Native C arithmetic follows IEC 60559, including infinities and NaNs, in IEEE binary32/binary64 with no excess precision, no fast-math and FP contraction disabled (-ffp-contract=off). Negation and absolute value change only the sign bit; float-to-integer conversion truncates toward zero and, as in the IR, is undefined for NaN, infinities and out-of-range values. Source floating results are consumed as values, not inspected for arithmetic NaN payloads; local payload-sensitive consumers (integer arithmetic or comparisons of the bits) retain helpers unless the operation never produces a NaN; a floating value stored to memory or passed to a call is not such a consumer (fp_nan_payload_unobserved). The recorded fp_environment requirement applies at every operation, including after calls.',
     );
+    if (payloadSubjects.length)
+      validation.requireAbi(
+        'fp_nan_payload_unobserved',
+        payloadSubjects,
+        'NaN payloads are unspecified: IEEE 754 only recommends payload propagation and C Annex F does not define it, and the IR canonical NaN is not hardware-exact (ARM FPCR.DN=0 propagates the operand payload, x86 produces 0xfff8... for invalid operations). A floating result stored to memory or passed to a call is consumed as a value; its NaN payload is not part of the program. Integer consumers of the bits (bitcasts to integer used by integer operations or compared) stay payload-sensitive. The anchored operations print natively because their only payload-observing consumers are stores and call arguments.',
+      );
     for (const [, expression] of candidates) expressions.add(expression);
   }
   return { body, rewrite, guards, omitted, unobserved, expressions };

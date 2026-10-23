@@ -568,13 +568,27 @@ test('preservation boundaries are disjoint from conservative call clobbers inclu
     'arm64:x30',
     'arm64:v0',
     'arm64:v31',
-    'arm64:fpcr',
   ]) {
     assert.ok(
       abi.unknown_call_clobbers.registers.some((register) => register.id === id),
       id,
     );
   }
+  // AAPCS64 6.1.2: only support functions change the FPCR control fields, so
+  // ordinary calls preserve FPCR and only environment-writer calls clobber it.
+  assert.ok(
+    !abi.unknown_call_clobbers.registers.some((register) => register.root === 'arm64:fpcr'),
+  );
+  assert.deepEqual(
+    abi.environment_writer_clobbers.map((register) => [
+      register.id,
+      register.bank,
+      register.offset_bits,
+      register.width_bits,
+    ]),
+    [['arm64:fpcr', 'control', 0, 32]],
+  );
+  for (const register of abi.environment_writer_clobbers) registerSchema.parse(register);
   assert.deepEqual(
     abi.unknown_call_clobbers.flags.map((register) => register.id),
     ['arm64:nzcv', 'arm64:fpsr'],
