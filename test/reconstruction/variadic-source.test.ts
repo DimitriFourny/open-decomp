@@ -791,3 +791,140 @@ for (const variant of ['tail', 'later_call', 'joined', 'carried', 'one_edge'] as
       ),
     );
   });
+
+/** Darwin arm64 `printf("%d %d", a, b)` closed by its format rule: the two
+ * anonymous ints sit in 8-byte outgoing slots at SP+0 (a 32-bit store of `a`)
+ * and SP+8 (a 64-bit store of `b`, whose upper half is ABI padding). An
+ * open-arity call follows (so the slots are not private spills), and its
+ * snapshot still holds both stored values: it sees them only through printf.
+ * - `closed`: nothing else touches the slots;
+ * - `reread`: the function returns the SP+0 slot reloaded (volatile, so it
+ *   stays memory) after the calls. */
+function darwinFormatCaller(variant: 'closed' | 'reread') {
+  const abi = darwinArm64Abi;
+  const [x0, x1, x2] = [0, 1, 2].map((index) => location(abi, index)) as [
+    RegisterDescriptor,
+    RegisterDescriptor,
+    RegisterDescriptor,
+  ];
+  const direct = (value: bigint) => ({
+    kind: 'direct' as const,
+    address: { image_id: image, space: 'va' as const, value },
+  });
+  const b = builder(`darwin-format-caller-${variant}`),
+    entry = b.block('entry');
+  const sp = entry.readRegister(abi.stack_pointer),
+    a = entry.readRegister(x1),
+    second = entry.readRegister(x2);
+  const outgoing = entry.int('sub', sp, entry.constant(u64, 16n));
+  entry.writeRegister(abi.stack_pointer, outgoing);
+  entry.store(outgoing, entry.extract(a, 0, 32));
+  entry.store(entry.int('add', outgoing, entry.constant(u64, 8n)), second);
+  entry.writeRegister(x0, entry.constant(u64, 0x3000n));
+  entry.call(direct(0x2000n), [], [], abi.unknown_call_clobbers);
+  entry.call(direct(0x4000n), [], [], {
+    registers: [x0],
+    flags: [],
+    memory: 'unknown_read_write',
+  });
+  // A volatile reload: the slot stays memory (no source-stack forwarding).
+  const reread =
+    variant === 'reread'
+      ? entry.load(integer(32), outgoing, { endian: 'little', alignment: 1, volatile: true })
+      : null;
+  entry.writeRegister(abi.stack_pointer, sp);
+  if (reread) {
+    entry.writeRegister(x0, entry.cast('zext', u64, reread));
+    entry.return([reread]);
+  } else entry.return([]);
+  const ir = constructSSA(b.finish(entry, reread ? [integer(32)] : [])).value as SSAForm;
+  const call = ir.blocks
+    .flatMap((block) => block.instructions)
+    .find(
+      (node) =>
+        node.kind === 'call' &&
+        node.target.kind === 'direct' &&
+        node.target.address.value === 0x2000n,
+    )!;
+  const types = recoverTypes(ir, abi, createOperationContext(), {
+    image_id: image,
+    slice_id: slice,
+    revision: 0,
+  });
+  const signature = {
+    returns: { kind: 'integer' as const, bits: 32, signed: true },
+    parameters: [
+      { kind: 'pointer' as const },
+      { kind: 'integer' as const, bits: 32, signed: true },
+      { kind: 'integer' as const, bits: 32, signed: true },
+    ],
+    variadic: true,
+    fixed_parameter_count: 1,
+    argument_list_complete: true,
+  };
+  const source = {
+    abi,
+    callees: [],
+    addresses: [],
+    call_argument_signatures: new Map([[call.id, signature]]),
+  };
+  return { ir, extra: { types, source } };
+}
+
+for (const variant of ['closed', 'reread'] as const)
+  test(`darwin-arm64 ${variant}: stores of format-closed printf arguments ${variant === 'reread' ? 'stay when a slot is read back' : 'print only as the arguments'} and execute like the oracle`, () => {
+    const fixture = darwinFormatCaller(variant);
+    // The formals are 32-bit: only the argument bits are read.
+    const a = 0x9abcdef0n,
+      b = 0x76543210n;
+    for (const language of ['c-like', 'python-like'] as const) {
+      const { emission } = emit(fixture.ir, fixture.extra, language);
+      const records = (emission.local_validation ?? []).filter(
+        (record) => record.rule === 'stack_argument_store',
+      );
+      assert.equal(records.length, 1, emission.text);
+      // The call and both stores, except the slot read back after the call.
+      assert.equal(records[0]!.subject_ids?.length, variant === 'reread' ? 2 : 3, emission.text);
+      // The later open call sees the stores only through printf.
+      assert.ok(
+        emission.requirements?.some(
+          (item) =>
+            item.kind === 'abi_conformance' && item.explanation.includes('callee-owned area'),
+        ),
+        emission.text,
+      );
+      const formals = emittedFormals(emission);
+      assert.equal(formals.length, 2, emission.text);
+      const observed = execute(
+        emission,
+        new Map(formals.map((formal, index) => [formal.statement_id, [a, b][index]!])),
+        new Map(),
+        0n,
+        new Map(),
+        new Map(),
+        new Map([
+          ['sub_2000', () => 7n],
+          ['sub_4000', () => 0n],
+        ]),
+      );
+      assert.deepEqual(
+        (observed.source_calls ?? []).filter((call) => call.name === 'sub_2000'),
+        [{ name: 'sub_2000', arguments: [0x3000n, a, b] }],
+        `${language}\n${emission.text}`,
+      );
+      // A consumed store prints nothing; the slot read back keeps its store.
+      assert.equal(
+        observed.events.includes('store'),
+        variant === 'reread',
+        `${language}\n${emission.text}`,
+      );
+      if (variant === 'reread') assert.deepEqual(observed.values, [a]);
+      assert.equal(
+        (observed.source_calls ?? []).filter((call) => call.name === 'sub_4000').length,
+        1,
+      );
+    }
+    // The checked view keeps the physical stores.
+    const checked = emit(fixture.ir, fixture.extra, 'c-like', 'checked').emission;
+    assert.ok(!checked.local_validation?.some((record) => record.rule === 'stack_argument_store'));
+  });
