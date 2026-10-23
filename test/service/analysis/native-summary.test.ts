@@ -340,11 +340,12 @@ test(
       { encoding: 'utf8' },
     );
     assert.equal(compiled.status, 0, compiled.stderr);
-    session = await openBinary(binary, { cachePath: join(root, 'cache') });
+    const opened = await openBinary(binary, { cachePath: join(root, 'cache') });
+    session = opened;
     const leaf = (value: bigint): bigint => u64(value * 3n + 7n);
     for (const emitter of ['c-like', 'python-like'] as const)
       for (const name of ['tail_void', 'tail_value'] as const) {
-        const result = await session.decompile({ name: `_${name}` }, { emitter, view: 'source' });
+        const result = await opened.decompile({ name: `_${name}` }, { emitter, view: 'source' });
         assert.ok('data' in result && result.data.delivery === 'inline');
         const emission = result.data.emission;
         const voidLike = name === 'tail_void';
