@@ -364,7 +364,7 @@ export class ProjectWorker {
   }
 
   /** Run the open-time job in the owning child over the current revision (docs/internals/
-   * project-cache.md §5a). Its failure or cancellation (`signal`, or closing the project with
+   * project-cache.md §4a). Its failure or cancellation (`signal`, or closing the project with
    * `cancel`) is a reported state, never an error of the open. */
   async prepareUnits(
     options: { readonly jobs?: number; readonly work?: number } = {},

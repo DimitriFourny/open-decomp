@@ -79,7 +79,7 @@ export interface WorkerHandler {
       readonly revision: number;
     },
   ): Promise<PreparedImport>;
-  /** The open-time job over the current revision (docs/internals/project-cache.md §5a). It
+  /** The open-time job over the current revision (docs/internals/project-cache.md §4a). It
    * never throws: failure and cancellation are reported states. */
   prepareUnits?(
     store: ProjectStore,

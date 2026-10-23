@@ -125,7 +125,7 @@ export const commandSchema = z.discriminatedUnion('kind', [
     args: artifactReadArgsSchema,
   }),
   z.strictObject({ kind: z.literal('close'), id: jobIdSchema }),
-  /** Run the open-time job (docs/internals/project-cache.md §5a) over the current revision. */
+  /** Run the open-time job (docs/internals/project-cache.md §4a) over the current revision. */
   z.strictObject({
     kind: z.literal('prepare_units'),
     id: jobIdSchema,

@@ -27,7 +27,7 @@ import {
   preparedUnitIdentity,
 } from './source-facts.js';
 
-/** The open-time job (docs/internals/project-cache.md §5a): prepare the generic native unit
+/** The open-time job (docs/internals/project-cache.md §4a): prepare the generic native unit
  * of every indexed function, callees first, in helper processes over private copies of the
  * project, and import the retained units into the project's persisted unit store. It is not
  * a request: it runs under its own work budget, and a request that reuses one of its units

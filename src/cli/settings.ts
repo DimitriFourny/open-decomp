@@ -12,7 +12,8 @@ source of its value (default or file). The file is optional JSON:
     "version": 1,
     "cache_root": "/absolute/cache",   same meaning as --cache
     "analysis_cache": true,            false = --no-analysis-cache
-    "decompile": { "language": "c-like" | "python-like", "view": "source" | "checked" },
+    "decompile": { "language": "c-like" | "python-like", "view": "source" | "checked",
+                   "inference": "proven" | "likely" },
     "export": { "language": "c-like" | "python-like", "jobs": 1..32 }
   }
 

@@ -39,7 +39,7 @@ Those directories must already exist. Authorize only the narrow input/project di
 
 ## Install a packaged release offline
 
-Obtain the produced `.tgz` **and its sibling `<tgz filename>.release.json`**, for example `open-decomp-0.1.0.tgz` and `open-decomp-0.1.0.tgz.release.json`. Keep them together. The schema-version-2 manifest binds archive SHA256, byte size, SHA1 shasum and SHA512 integrity, the `bun.lock` digest, Node/Bun versions, original source package metadata and archive inventory to the archive. Its `bun_pack` inventory records each file's path, size, mode and SHA256, plus bundled package names. A worktree-derived build is not necessarily a clean Git commit; no bit-identical cross-host build is promised.
+Obtain the produced `.tgz` (about 9 MB; roughly 50 MB installed with its production dependencies) **and its sibling `<tgz filename>.release.json`**, for example `open-decomp-0.1.0.tgz` and `open-decomp-0.1.0.tgz.release.json`. Keep them together. The schema-version-2 manifest binds archive SHA256, byte size, SHA1 shasum and SHA512 integrity, the `bun.lock` digest, Node/Bun versions, original source package metadata and archive inventory to the archive. Its `bun_pack` inventory records each file's path, size, mode and SHA256, plus bundled package names. A worktree-derived build is not necessarily a clean Git commit; no bit-identical cross-host build is promised.
 
 With Node and Bun available, install in a separate application directory outside the source checkout. Substitute the actual archive path:
 

@@ -31,7 +31,7 @@ export interface QueryCallOptions {
   readonly auto_wait_ms?: number;
 }
 export const DEFAULT_AUTO_WAIT_MS = 10_000;
-/** Options of the open-time job (docs/internals/project-cache.md §5a). */
+/** Options of the open-time job (docs/internals/project-cache.md §4a). */
 export interface OpenJobOptions {
   /** Helper processes; default half the cores, at most 8. */
   readonly jobs?: number;

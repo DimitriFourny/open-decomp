@@ -19,7 +19,8 @@ Turns an immutable `LoadedImage` plus an architecture decoder into per-function 
 flowchart LR
   L["LoadedImage"] --> P["prepare index"]
   P --> W["global worklist decode"]
-  W --> X["per-seed extraction + table revalidation"]
+  W --> J["tail-jump promotion, sweep"]
+  J --> X["per-seed extraction + table revalidation"]
   X --> R["IDs, overlaps, control refs"]
   R --> T["targets, references, strings"]
   T --> S["import-stub classification"]
@@ -43,6 +44,15 @@ One gate; no ordering among sources, only merged evidence.
 
 Data regions (data hints, sized object symbols) veto _candidate_ seeds and stop decoding. No prologue scan.
 
+### 2. Global worklist
+
+- Queue = seeds sorted by VA; successors append in flow order; each address decoded once.
+- Pop: data region → `data` gap + warning; no executable backing → `unmapped`; instruction budget hit → `budget`, mark exhausted, keep draining; else decode one window (≤15 B x86, 4 B ARM64, clipped to backing/data).
+- Valid direct call: seed target (established), enqueue; intraprocedural successor is only the continuation — none if the callee is a library-contract `noreturn` import (stops a trailing `bl ___stack_chk_fail` from flowing into the next function).
+- One shared successor rule serves traversal and CFG building, so they cannot drift.
+- Non-conditional indirect branch → jump-table prover on its current chain; targets become edges and queue entries. Heuristic _candidates_ (x86 scaled index, ARM64 indexed load into branch register) carry no extent.
+- **Re-proof on settled chains.** A proof is a function of its chain alone (`jumpTableChain`), and a chain changes only when a member gains a decoded predecessor or becomes a root (or its first member gains its first predecessor). Each branch records the chain it was last proved on; after every drain (seeded, each continuation root, each sweep-rooted candidate) the branches whose chain changed are re-proved in VA order: the table entry is replaced or dropped, new targets are queued, and draining repeats until no chain changes. Predecessor edges are never removed (a dropped or replaced table keeps its old edges, which only shorten chains), so every address's predecessor count only grows and the loop terminates. Example: a case body branching back to the loop header that holds the guard gives the header its second predecessor only after the first proof, whose chain still ran from the entry; the re-proof starts at the header (SQLite `selectInnerLoop`: the 13-target table at `0x1000bc590` now proves, its graph grows from 253 to 639 instructions and its selected discovery work from 32,486 to 35,514; image-wide proved tables 21 → 22). A stale first proof is dropped before extraction instead of being rejected there: selected discovery of `sqlite3_str_vappendf` and `jsonTranslateTextToBlob` builds the same graphs with less work (90,560 → 85,692 and 39,588 → 37,676); `whereLoopAddBtreeIndex`, `sqlite3VdbeExec`, `do_meta_command` and brotli `main` keep theirs.
+
 ### 2a. Tail-jump targets (image-wide and continuation mode)
 
 After the seeded worklist drains, and before the sweep, a target T of a decoded unconditional direct jump becomes a **candidate** root (rule `unconditional jump at entry stack depth to code outside the root body`, citing each jump's flow evidence and its roots' seed evidence) when:
@@ -63,15 +73,6 @@ After the seeded worklist drains, a sweep walks every executable byte in VA orde
 ### 2c. Resumable continuation
 
 When the limit stops image-wide discovery it returns a **frontier** (cut or unreached roots with their evidence and established flag, plus the first unexplained sweep VA), persisted per revision (`discovery_frontiers`, store schema 7). `functions_discover` continues it: published roots not pending are final (boundaries whose ranges are explained; a call into their interior roots nothing), pending roots are traversed one at a time with calls deferred, then the sweep resumes. Only traversed roots, their references and cited evidence are republished at the next revision. A step whose frontier is unchanged (a root larger than the instruction limit) reports no progress and commits nothing, so a driver stops instead of looping. Steps are deterministic in (image, published records, frontier, budget).
-
-### 2. Global worklist
-
-- Queue = seeds sorted by VA; successors append in flow order; each address decoded once.
-- Pop: data region → `data` gap + warning; no executable backing → `unmapped`; instruction budget hit → `budget`, mark exhausted, keep draining; else decode one window (≤15 B x86, 4 B ARM64, clipped to backing/data).
-- Valid direct call: seed target (established), enqueue; intraprocedural successor is only the continuation — none if the callee is a library-contract `noreturn` import (stops a trailing `bl ___stack_chk_fail` from flowing into the next function).
-- One shared successor rule serves traversal and CFG building, so they cannot drift.
-- Non-conditional indirect branch → jump-table prover on its current chain; targets become edges and queue entries. Heuristic _candidates_ (x86 scaled index, ARM64 indexed load into branch register) carry no extent.
-- **Re-proof on settled chains.** A proof is a function of its chain alone (`jumpTableChain`), and a chain changes only when a member gains a decoded predecessor or becomes a root (or its first member gains its first predecessor). Each branch records the chain it was last proved on; after every drain (seeded, each continuation root, each sweep-rooted candidate) the branches whose chain changed are re-proved in VA order: the table entry is replaced or dropped, new targets are queued, and draining repeats until no chain changes. Predecessor edges are never removed (a dropped or replaced table keeps its old edges, which only shorten chains), so every address's predecessor count only grows and the loop terminates. Example: a case body branching back to the loop header that holds the guard gives the header its second predecessor only after the first proof, whose chain still ran from the entry; the re-proof starts at the header (SQLite `selectInnerLoop`: the 13-target table at `0x1000bc590` now proves, its graph grows from 253 to 639 instructions and its selected discovery work from 32,486 to 35,514; image-wide proved tables 21 → 22). A stale first proof is dropped before extraction instead of being rejected there: selected discovery of `sqlite3_str_vappendf` and `jsonTranslateTextToBlob` builds the same graphs with less work (90,560 → 85,692 and 39,588 → 37,676); `whereLoopAddBtreeIndex`, `sqlite3VdbeExec`, `do_meta_command` and brotli `main` keep theirs.
 
 ### 3. Per-seed extraction: boundary decision
 

@@ -1,8 +1,8 @@
 # Open Decomp internals
 
-How the decompiler works: architecture, algorithms, data flow, design decisions and known limits. Written so a human or an LLM can reason about the implementation (and about improving it) without reading the ~100k lines under `src/`. Symbol-level detail is deliberately left out; each page names the directories to open when you need it.
+How the decompiler works: architecture, algorithms, data flow, design decisions and known limits. Written so a human or an LLM can reason about the implementation (and about improving it) without reading the ~120k lines under `src/`. Symbol-level detail is deliberately left out; each page names the directories to open when you need it.
 
-**Code version:** HEAD `e8fed43` (2026-10-20). To refresh: `git diff --stat e8fed43..HEAD -- src`, update the pages owning the changed directories (module map below), move this hash.
+**Code version:** HEAD `5392ed0` (2026-10-23). To refresh: `git diff --stat 5392ed0..HEAD -- src`, update the pages owning the changed directories (module map below), move this hash.
 
 ## What it is
 
@@ -63,7 +63,7 @@ Ordering details worth knowing:
 
 - Types run twice when user annotations assert a type or signature: baseline recovery → annotation lookup over the subjects it found → re-recovery with the assertions.
 - Structuring runs before reconstruction. Reconstruction then refines types again: memory shapes from recovered memory transfers, image-wide types from callee summaries, then pointer evidence propagated over all of them.
-- Callee summaries (other functions' analysed IR) are computed on demand, in call-graph SCC order, and cached per process.
+- Callee summaries (other functions' prepared IR units) are computed on demand, in call-graph SCC order. They are reused in process (size-bounded LRU) and persisted in the project (`native_summaries`, 256 MiB cap by default); after `project_open` an open-time job prepares and persists every function's callee units in helper processes, callees first. See [project-cache](project-cache.md#4-callee-unit-reuse).
 
 ## Process architecture
 
@@ -73,36 +73,40 @@ flowchart LR
   MCPs["MCP stdio"] --> QS
   MCPh["MCP HTTP (auth, quotas)"] --> QS
   API["JS/TS API"] --> QS
-  QS["QueryService (schema validation, admission)"] --> Pool["Worker pool: one child process per project"]
-  Pool --> H["Child: dispatch → queries / analysis"]
+  QS["QueryService (schema validation, admission)"] --> Pool["Worker pool: one owner child process per project"]
+  Pool --> H["Owner: dispatch → queries / analysis"]
   H --> Store[("ProjectStore: SQLite")]
+  H --> RW["Request workers (optional, N): parallel function_decompile"]
+  RW -. "read-only snapshot" .-> Store
+  H --> OJ["Open-time job helpers: prepare callee units"]
 ```
 
-- **One tool vocabulary** (14 operations: `project_open`, `function_decompile`, `xrefs_get`, `memory_read`, `annotations_apply`, `analysis_status`, …) declared once with Zod schemas; every surface speaks it. Validated on the host (fail early) and again in the child (trust boundary).
-- **One child process per project**, owning its SQLite store. IPC = length-prefixed JSON frames. Pool bounds workers and queue.
+- **One tool vocabulary** (15 operations: `project_open`, `function_decompile`, `functions_discover`, `xrefs_get`, `memory_read`, `annotations_apply`, `analysis_status`, …) declared once with Zod schemas; every surface speaks it. Validated on the host (fail early) and again in the child (trust boundary).
+- **One owner child process per project**, the only writer of its SQLite store. IPC = length-prefixed JSON frames. Pool bounds owners and queue.
+- **Optional request workers** (`openBinary({ requestWorkers })`, `export --jobs N`): N processes decompile in parallel over a read-only clone of the project; the owner republishes their artifacts and summaries, so output and per-function work are identical for any N. **Open-time job helpers** prepare every function's callee units after `project_open` and hand them to the owner. See [project-cache](project-cache.md#4a-open-time-job).
 - **Durable facts vs derived results.** Images, native records (functions, symbols, strings, references…), evidence, annotations and jobs live in revision-checked store transactions. Recovered types and decompilations live only in published artifacts keyed by a full cache identity; reuse at a newer revision is validated against a recorded dependency readset.
 
 ## Module map
 
-Lines are physical `.ts` lines at the code version above (total ≈103k).
+Lines are physical `.ts` lines at the code version above (total ≈122k).
 
 | Directory                       | Lines | Role                                                                                    | Page                                            |
 | ------------------------------- | ----: | --------------------------------------------------------------------------------------- | ----------------------------------------------- |
-| `core`                          |  4.6k | Wire schemas, `LoadedImage`, component contracts, identity, addresses, budgets, errors  | this page                                       |
+| `core`                          |  4.9k | Wire schemas, `LoadedImage`, component contracts, identity, addresses, budgets, errors  | this page                                       |
 | `loaders`                       |  4.7k | Mach-O / PE / ELF → `LoadedImage`                                                       | [loaders](loaders.md)                           |
 | `decoders`                      |  1.9k | AArch64 (vendored a64js) and x86-64 (iced-x86) decoding                                 | [lifting-ir](lifting-ir.md)                     |
-| `lifters`                       |  2.4k | Instructions → `RegisterIR`                                                             | [lifting-ir](lifting-ir.md)                     |
+| `lifters`                       |  2.8k | Instructions → `RegisterIR`                                                             | [lifting-ir](lifting-ir.md)                     |
 | `ir`                            |  2.8k | Register-form and SSA IR, builder, validator                                            | [lifting-ir](lifting-ir.md)                     |
 | `abi`                           |  1.4k | Data layouts, call classification for the three ABIs                                    | [calls-abi](calls-abi.md)                       |
-| `analysis`                      | 13.0k | discovery, cfg, targets, references, strings, ssa, values, effects, stack, calls, types | per sub-area                                    |
+| `analysis`                      | 16.3k | discovery, cfg, targets, references, strings, ssa, values, effects, stack, calls, types | per sub-area                                    |
 | `metadata`                      | 14.2k | DWARF, CodeView, symbols, ObjC runtime, library contracts (≈7.5k generated data)        | [types-metadata](types-metadata.md)             |
-| `presentation`                  |  1.5k | Control-flow structuring                                                                | [structuring-emission](structuring-emission.md) |
-| `reconstruction`                | 17.8k | SSA → source model; proof-carrying rewrites with local validation                       | [reconstruction](reconstruction.md)             |
-| `emitters`                      | 16.2k | Shared renderer + C-like / Python-like dialects                                         | [structuring-emission](structuring-emission.md) |
-| `service`                       | 12.6k | Analysis orchestration (composition root), query handlers, import preparation           | [project-cache](project-cache.md)               |
-| `project`                       |  4.2k | SQLite store, annotations, analysis cache                                               | [project-cache](project-cache.md)               |
-| `workers`                       |  1.4k | Child-process pool, framed IPC, job admission/recovery                                  | [project-cache](project-cache.md)               |
-| `api`, `cli`, `mcp`, `settings` |  4.7k | Surfaces and settings                                                                   | this page                                       |
+| `presentation`                  |  1.8k | Control-flow structuring                                                                | [structuring-emission](structuring-emission.md) |
+| `reconstruction`                | 23.4k | SSA → source model; proof-carrying rewrites with local validation                       | [reconstruction](reconstruction.md)             |
+| `emitters`                      | 20.0k | Shared renderer + C-like / Python-like dialects                                         | [structuring-emission](structuring-emission.md) |
+| `service`                       | 15.7k | Analysis orchestration (composition root), query handlers, import preparation           | [project-cache](project-cache.md)               |
+| `project`                       |  4.5k | SQLite store, annotations, analysis cache                                               | [project-cache](project-cache.md)               |
+| `workers`                       |  2.5k | Owner pool, request workers, framed IPC, job admission/recovery                         | [project-cache](project-cache.md)               |
+| `api`, `cli`, `mcp`, `settings` |  4.9k | Surfaces and settings                                                                   | this page                                       |
 
 Dependency shape: `core` is a sink and is semantics-free (declares `Lifter<RegisterIR>` / `Emitter<…>` generically). `service` is the composition root importing almost everything. Backward edges (e.g. reconstruction → emitters) are type-only, so there are no runtime cycles between stages. Component selection is a frozen table keyed by target triple in `src/service/analysis/versions.ts` — not a plugin registry.
 
@@ -134,18 +138,18 @@ Seams are interfaces in `src/core/contracts.ts`: `Loader` (format), `Decoder` + 
 
 ## Global limits and improvement levers
 
-Measured state (docs/PERFORMANCE.md, TODO.md): the R1–R5 readability roadmap landed; blind preference vs Ghidra is now favourable on reviewed pairs of the third held-out suite, but the correctness gate is not met and many cells produce no text (work limit, selector/discovery failures on stripped binaries). Where quality is lost, by pipeline position:
+Measured state (docs/PERFORMANCE.md "Roadmap 4: round result", TODO.md; odbench full tier, a development set): 235 of 237 functions get text; a blind LLM judge prefers the output to Ghidra 12.1.4's (0.878, 180 wins / 46 ties / 6 losses), LLM comprehension is level with Ghidra's, wrong claims per function stay slightly higher (2.34 vs 2.22). Decompiling after open takes 0.52× Ghidra's whole run with 4 request workers, but a function costs ~0.3 s against Ghidra's ~23 ms once its whole-program analysis is done. Where quality and speed are lost, by pipeline position:
 
-| Lever                                                                                         | Symptom                                                                          | Owning stage                                    |
-| --------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- | ----------------------------------------------- |
-| Whole-image discovery is bounded/seeded                                                       | Real images stay `partial (incomplete_index)`; stripped ELF/PE selector failures | [discovery](discovery.md)                       |
-| Unsupported instructions become whole-state `unknown_effect`; both lifters continue past them | Lost argument/return facts, `partial` functions                                  | [lifting-ir](lifting-ir.md)                     |
-| Escaped-object extent unknown                                                                 | Optimized frames stay memory: frame-object members (`frame.local_N`), not locals | [reconstruction](reconstruction.md)             |
-| Open call arities (`...`) only closed by proof                                                | Indirect calls, hub functions keep `...`                                         | [calls-abi](calls-abi.md)                       |
-| Pointer-ness needs positive evidence; O0 callee spills not followed                           | Integer-typed pointers, casts                                                    | [types-metadata](types-metadata.md)             |
-| Acyclic gotos need reaching-condition structuring                                             | ~200 gotos on the SQLite/brotli sample                                           | [structuring-emission](structuring-emission.md) |
-| Work-limit margins are thin on large functions                                                | Large functions fail with no text                                                | [project-cache](project-cache.md)               |
-| Expensive callee summaries are not persisted                                                  | Repeated cost across processes                                                   | [project-cache](project-cache.md)               |
+| Lever                                                                                         | Symptom                                                                                                                                                | Owning stage                                    |
+| --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------- |
+| Whole-image discovery is bounded/seeded                                                       | Real images stay `partial (incomplete_index)`; stripped ELF/PE selector failures                                                                       | [discovery](discovery.md)                       |
+| Unsupported instructions become whole-state `unknown_effect`; both lifters continue past them | Lost argument/return facts, `partial` functions                                                                                                        | [lifting-ir](lifting-ir.md)                     |
+| Escaped-object extent unknown                                                                 | Optimized frames stay memory: frame-object members (`frame.local_N`), not locals                                                                       | [reconstruction](reconstruction.md)             |
+| Open call arities (`...`) only closed by proof                                                | Indirect calls, hub functions keep `...`                                                                                                               | [calls-abi](calls-abi.md)                       |
+| Pointer-ness needs positive evidence; O0 callee spills not followed                           | Integer-typed pointers, casts                                                                                                                          | [types-metadata](types-metadata.md)             |
+| Acyclic gotos need reaching-condition structuring                                             | 717 `goto` over 232 odbench functions (Ghidra 781)                                                                                                     | [structuring-emission](structuring-emission.md) |
+| Evidence (statement → instruction provenance) grows faster than the text                      | `sqlite3Select`, `sqlite3Pragma` fail with no text; at 100M work they stop at the IR-node budget, the proof catalog bound or the 16 MiB artifact bound | [project-cache](project-cache.md)               |
+| Per-function cost is high (callee preparation dominates)                                      | 7 odbench functions above 80% of the 10M work limit; whole-program export not yet measured against Ghidra                                              | [project-cache](project-cache.md)               |
 
 ## Glossary
 
