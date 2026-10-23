@@ -381,9 +381,9 @@ export class Renderer {
   /** The reader printing held calls, until its first code line is checked. */
   private openReader: { readonly start: number; readonly held: InlineCallSite[] } | null = null;
   private liveness: VariableLiveness | null = null;
-  /** Rotated loop headers (loop_copy_rotation): phi id -> the pseudo value every
-   * edge into the header writes instead of the phi. */
-  private readonly rotatedPhis = new Map<string, Map<string, Value>>();
+  /** Rotated loop headers (loop_copy_rotation): phi id -> its rotation (the
+   * pseudo value every edge into the header writes instead of the phi). */
+  private readonly rotatedPhis = new Map<string, Map<string, LoopCopyRotation>>();
   /** Do-while tests restated over the values written by their repeat copies. */
   private readonly rebased = new Map<string, Extract<Expression, { kind: 'compare' }>>();
   private readonly synthetic = new Map<string, Expression>();
@@ -5862,7 +5862,7 @@ export class Renderer {
             transfer.effect.destination.id,
             transfer.copies.flatMap((copy) => {
               this.localValidation.allowance.charge();
-              const destination = rotated?.get(copy.destination.id) ?? copy.destination;
+              const destination = rotated?.get(copy.destination.id)?.pseudo ?? copy.destination;
               return this.program.live.has(copy.destination.id) &&
                 !this.inline.has(copy.destination.id) &&
                 !this.forwardedCopies.get(transfer)?.has(copy.destination.id)
@@ -8040,9 +8040,10 @@ export class Renderer {
     // copy prints exactly as the repeat edge copy it replaces.
     const roles = new Map(this.sourceRoleNames);
     this.context.checkpoint(roles.size);
-    for (const { header, phi, source, pseudo } of rotations) {
-      const phis = this.rotatedPhis.get(header) ?? new Map<string, Value>();
-      phis.set(phi.id, pseudo);
+    for (const rotation of rotations) {
+      const { header, phi, source, pseudo } = rotation;
+      const phis = this.rotatedPhis.get(header) ?? new Map<string, LoopCopyRotation>();
+      phis.set(phi.id, rotation);
       this.rotatedPhis.set(header, phis);
       const type =
         this.sourceValueTypes.get(source.id) ??
@@ -9553,13 +9554,23 @@ export class Renderer {
         expression = definition.expression;
       this.emitNotes(anchor, depth);
       const start = this.writer.offset;
-      // A rotated phi's header-start copy prints like the edge copy it replaces.
-      const pseudo = this.rotatedPhis.get(anchor)?.get(value.id);
+      // A rotated phi's header-start copy prints like the edge copy it
+      // replaces: from the repeat source's variable when the pseudo value
+      // shares it (the same storage, so the same text).
+      const rotation = this.rotatedPhis.get(anchor)?.get(value.id);
+      const shared =
+        rotation &&
+        this.variables.get(rotation.pseudo.id)?.id === this.variables.get(rotation.source.id)?.id;
       this.writer.statement(
         depth,
         `${this.local(value)} = ${
-          pseudo
-            ? this.copied(value, pseudo)
+          rotation
+            ? this.copied(
+                value,
+                shared && this.variables.has(rotation.pseudo.id)
+                  ? rotation.source
+                  : rotation.pseudo,
+              )
             : this.assigned(value, this.expression(expression, value.type))
         }`,
       );

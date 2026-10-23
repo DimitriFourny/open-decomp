@@ -808,6 +808,18 @@ export function loopCopyRotations(
     }
     return into;
   };
+  // Incoming edges of every block, counted once on first use.
+  let incoming: Map<string, number> | undefined;
+  const entries = (): ReadonlyMap<string, number> => {
+    if (incoming) return incoming;
+    incoming = new Map();
+    for (const block of program.blocks.values())
+      for (const transfer of controlTransfers(block.control)) {
+        context.checkpoint(1);
+        incoming.set(transfer.target, (incoming.get(transfer.target) ?? 0) + 1);
+      }
+    return incoming;
+  };
   const consider = (loop: Extract<Region, { kind: 'loop' }>): void => {
     let last: Region | undefined = loop.body;
     while (last?.kind === 'sequence') {
@@ -832,6 +844,8 @@ export function loopCopyRotations(
     )
       return;
     const inside = blocksOf(loop.body);
+    // The repeat edge is the only edge back, and one edge enters from outside
+    // (a do-while is entered only by falling into it).
     if (
       leave.transfer.target === loop.header ||
       inside.some((block) => block.id === leave.transfer.target) ||
@@ -839,7 +853,8 @@ export function loopCopyRotations(
         controlTransfers(block.control).some(
           (transfer) => transfer !== again.transfer && transfer.target === loop.header,
         ),
-      )
+      ) ||
+      entries().get(loop.header) !== 2
     )
       return;
     const exit = liveness.live(leave.transfer.target),
