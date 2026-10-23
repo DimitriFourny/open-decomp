@@ -114,7 +114,7 @@ export function loadFunctionGraph(
     rereadScopes(scope, revision, image.id, ['symbol', 'import', 'export', 'function']);
   } else {
     // Materialized once per image; every operation pays its recorded cost once.
-    indexed = buildOnce(scope.context, (quiet) => {
+    indexed = buildOnce(scope.context, 'records', (quiet) => {
       const read = { store: scope.store, context: quiet };
       return {
         project_id: scope.store.project_id,
@@ -166,6 +166,7 @@ export function loadFunctionIndex(
   } else
     indexed.references = buildOnce(
       scope.context,
+      'references',
       (quiet) =>
         records({ store: scope.store, context: quiet }, revision, image.id, 'reference').items,
     );

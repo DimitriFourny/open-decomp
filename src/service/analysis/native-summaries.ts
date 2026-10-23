@@ -2,6 +2,7 @@ import { z } from 'zod';
 import {
   fingerprint,
   type AbiProfile,
+  type BuildUse,
   type FunctionRecord,
   type OperationContext,
   type ProjectStore,
@@ -14,7 +15,7 @@ import type { NativePreparationInput, PreparedNativeUnit } from './native-prepar
 import type { NativeDependency } from './native-worklist.js';
 
 /** Bump when the stored shape of a prepared unit changes. */
-const NATIVE_SUMMARY_FORMAT = 7;
+const NATIVE_SUMMARY_FORMAT = 8;
 
 /** A prepared callee body kept for reuse, with exactly what reusing it must replay. */
 export interface PreparedUnitEntry {
@@ -22,6 +23,9 @@ export interface PreparedUnitEntry {
   readonly unit: PreparedNativeUnit;
   /** Work the preparation charged to its worklist context. */
   readonly work: number;
+  /** Per-process structures the preparation used. Their payments are charged on the
+   * request's root, not in `work`; a reuse makes those its request has not made. */
+  readonly builds: readonly BuildUse[];
   /** Reads the preparation made; absent when it ran without a dependency collector. */
   readonly trace?: readonly TracedRead[];
   /** Smallest worklist allowance under which preparation provably returns this unit. */
@@ -64,6 +68,7 @@ interface StoredSummary {
   /** `analysis` is the very object of `types.calls` (stored once). */
   readonly analysis_in_types: boolean;
   readonly dependencies: readonly StoredDependency[];
+  readonly builds: readonly BuildUse[];
   readonly trace: unknown;
 }
 
@@ -77,6 +82,7 @@ const storedSummarySchema = z.object({
   revision: count,
   analysis_in_types: z.boolean(),
   dependencies: z.array(z.looseObject({ target_id: z.string() })),
+  builds: z.array(z.object({ name: z.string(), cost: count })),
   trace: z.unknown(),
   unit: z.looseObject({
     instructions: count,
@@ -185,6 +191,7 @@ export function createNativeUnitPersistence(
     return {
       unit: prepared,
       work,
+      builds: stored.builds,
       trace,
       allowance,
       size: preparedSize(prepared, trace),
@@ -215,6 +222,7 @@ export function createNativeUnitPersistence(
         ...others,
         target_id: target.id,
       })),
+      builds: entry.builds,
       trace: entry.trace,
     };
     if (

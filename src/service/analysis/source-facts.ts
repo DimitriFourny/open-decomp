@@ -15,8 +15,12 @@ import {
   buildOnce,
   fingerprint,
   OperationError,
+  recordBuilds,
+  replayBuilds,
   U64_LIMIT,
+  unpaidBuildCost,
   useBuilt,
+  type BuildUse,
   type CanonicalValue,
 } from '../../core/index.js';
 import type { CallAnalysisResult, SuppliedCallContract } from '../../analysis/calls/index.js';
@@ -1148,10 +1152,12 @@ type PreparedUnitCache = {
   prefix_size: number;
 };
 /** A recorded preparation segment: its value, the work it charged on the worklist
- * context and the reads it made (absent without a dependency collector). */
+ * context, the per-process structures it used (whose root payments are not in `work`)
+ * and the reads it made (absent without a dependency collector). */
 interface PreparedSegment<T> {
   readonly value: T;
   readonly work: number;
+  readonly builds: readonly BuildUse[];
   readonly trace?: readonly TracedRead[];
 }
 /** The memoized prefix of a unit that was not retained (see `PreparedUnitCache`). */
@@ -1300,14 +1306,15 @@ export function preparedUnitCache(input: NativePreparationInput): PreparedUnitCa
 }
 
 /** Load one native body: reuse a prepared unit only where preparing it here would
- * provably return it (charging its work and replaying its reads), else prepare it, from
- * its memoized prefix where that is provably what preparing would compute.
- * `fits(work, reads)` states whether that charge fits every enclosing allowance. */
+ * provably return it (charging its work, the payments of the per-process structures it
+ * used and its reads), else prepare it, from its memoized prefix where that is provably
+ * what preparing would compute. `fits(work, root)` states whether `work` on the worklist
+ * context plus `root` more on the request fits every enclosing allowance. */
 export function nativeUnitLoader(
   input: NativePreparationInput,
   cache: PreparedUnitCache,
   libraryContracts: readonly SuppliedCallContract[],
-  fits: (work: number, reads: number) => boolean,
+  fits: (work: number, root: number) => boolean,
 ): (fn: FunctionRecord, boundedContext: OperationContext) => PreparedNativeUnit {
   const { scope } = input,
     abi = input.components.abi;
@@ -1350,8 +1357,13 @@ export function nativeUnitLoader(
     const reads = scope.dependencies ? scope.dependencies.traceCharges(entry.trace!) : 0;
     // Charges that fit every enclosing allowance cannot fail, so neither can the
     // interleaved charges of a fresh preparation; otherwise prepare for real.
-    if (reads === undefined || !fits(entry.work, reads)) return undefined;
+    if (
+      reads === undefined ||
+      !fits(entry.work, reads + unpaidBuildCost(boundedContext, entry.builds))
+    )
+      return undefined;
     scope.dependencies?.replayTrace(entry.trace!);
+    replayBuilds(boundedContext, entry.builds);
     boundedContext.checkpoint(entry.work);
     cache.entries.delete(fn.id);
     cache.entries.set(fn.id, entry);
@@ -1377,13 +1389,19 @@ export function nativeUnitLoader(
     };
     const stored = allowance !== undefined ? cache.prefixes.get(fn.id) : undefined;
     const { budget } = boundedContext;
-    /** Run `compute` on `measured`, recording the work it charges and the reads it makes. */
+    /** Run `compute` on `measured`, recording the work it charges, the per-process
+     * structures it uses and the reads it makes. */
     const record = <T>(compute: () => T): PreparedSegment<T> => {
       const before = work;
-      const { value, trace } = scope.dependencies
-        ? scope.dependencies.traced(compute)
-        : { value: compute(), trace: undefined };
-      return { value, work: work - before, ...(trace ? { trace } : {}) };
+      const { value: recorded, trace } = scope.dependencies
+        ? scope.dependencies.traced(() => recordBuilds(measured, compute))
+        : { value: recordBuilds(measured, compute), trace: undefined };
+      return {
+        value: recorded.value,
+        work: work - before,
+        builds: recorded.builds,
+        ...(trace ? { trace } : {}),
+      };
     };
     /** Charge `segment` as running it here would, but only where running it could not
      * have failed: its work is within `limit` and its charge fits every enclosing
@@ -1392,8 +1410,13 @@ export function nativeUnitLoader(
       if (segment.work > limit || (scope.dependencies !== undefined && !segment.trace))
         return false;
       const reads = scope.dependencies ? scope.dependencies.traceCharges(segment.trace!) : 0;
-      if (reads === undefined || !fits(segment.work, reads)) return false;
+      if (
+        reads === undefined ||
+        !fits(segment.work, reads + unpaidBuildCost(measured, segment.builds))
+      )
+        return false;
       scope.dependencies?.replayTrace(segment.trace!);
+      replayBuilds(measured, segment.builds);
       measured.checkpoint(segment.work);
       return true;
     };
@@ -1430,9 +1453,12 @@ export function nativeUnitLoader(
         ssa: ssa.value,
       });
     };
-    const { value: unit, trace } = scope.dependencies
-      ? scope.dependencies.traced(run)
-      : { value: run(), trace: undefined };
+    const {
+      value: { value: unit, builds },
+      trace,
+    } = scope.dependencies
+      ? scope.dependencies.traced(() => recordBuilds(measured, run))
+      : { value: recordBuilds(measured, run), trace: undefined };
     if (allowance !== undefined && retainablePreparation(unit)) {
       const prior = cache.entries.get(fn.id);
       if (prior) {
@@ -1442,6 +1468,7 @@ export function nativeUnitLoader(
       const entry: PreparedUnitEntry = {
         unit,
         work,
+        builds,
         ...(trace ? { trace } : {}),
         allowance: Math.min(allowance, 4 * work + 3, prior?.allowance ?? allowance),
         size: preparedSize(unit, trace),
@@ -1564,7 +1591,7 @@ function environmentWriter(
     return useBuilt(context, cached).writer;
   // The interface structure is already built for this body's observation.
   const prepared = index?.preparation(ir, context);
-  const built = buildOnce(context, (quiet) => ({
+  const built = buildOnce(context, `fp-environment-writer:${ir.id}`, (quiet) => ({
     functions: input.functions,
     references: input.references,
     writer: localEnvironmentWriter(input, ir, prepared, quiet),
@@ -2057,9 +2084,9 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
     input,
     cache,
     libraryContracts,
-    (work, reads) =>
+    (work, root) =>
       work <= (summaryContext.remainingWork?.() ?? 0) &&
-      work + reads <= (context.remainingWork?.() ?? 0),
+      work + root <= (context.remainingWork?.() ?? 0),
   );
   const likelyMode = input.identity?.options.inference === 'likely';
   const calleeReadsCalls = new Set<string>();

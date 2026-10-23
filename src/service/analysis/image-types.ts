@@ -81,9 +81,9 @@ function unitLoader(input: NativePreparationInput, context: OperationContext) {
     input,
     preparedUnitCache(input),
     nativeLibraryContracts(input),
-    (work, reads) =>
+    (work, root) =>
       work <= (context.remainingWork?.() ?? 0) &&
-      work + reads <= (input.scope.context.remainingWork?.() ?? 0),
+      work + root <= (input.scope.context.remainingWork?.() ?? 0),
   );
   return (fn: FunctionRecord) => load(fn, context);
 }
