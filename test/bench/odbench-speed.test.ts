@@ -273,6 +273,7 @@ test('--jobs above 1 is refused until parallel requests exist', async () => {
       inference: 'proven',
       only: null,
       jobs: 4,
+      openJob: true,
     }),
     /--jobs 4 is not supported yet.*T9/,
   );

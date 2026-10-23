@@ -5,7 +5,8 @@ import { OperationError, decodeDiagnostic, sliceIdSchema } from '../core/index.j
 import type { ToolInput, ToolResult, WireJob } from '../core/index.js';
 import { QueryService } from '../service/queries/index.js';
 import { hashInput, projectDirectoryName } from '../service/queries/input-identity.js';
-import type { QueryCallOptions } from '../service/queries/index.js';
+import type { OpenJobOptions, QueryCallOptions } from '../service/queries/index.js';
+import type { OpenJobReport } from '../workers/index.js';
 import { materializeDecompilation } from '../service/queries/materialize.js';
 import { FunctionSelectionError, selectFunction } from '../service/queries/selector.js';
 export { FunctionSelectionError } from '../service/queries/selector.js';
@@ -23,7 +24,8 @@ export type {
   ExpandedRequirement,
   ExpandedSourceMapping,
 } from '../core/index.js';
-export type { QueryCallOptions } from '../service/queries/index.js';
+export type { OpenJobOptions, QueryCallOptions } from '../service/queries/index.js';
+export type { OpenJobReport } from '../workers/index.js';
 export type BinaryImage = NonNullable<
   Extract<ToolResult<'project_open'>, { data: unknown }>['data']['image']
 >;
@@ -57,6 +59,12 @@ export interface OpenBinaryOptions {
   readonly budget?: ToolInput<'project_open'>['budget'];
   readonly signal?: AbortSignal;
   readonly onProgress?: (job: WireJob) => void;
+  /** The open-time job (default on, `{}`): after import, the generic native unit of every
+   * indexed function is prepared (callees first, in helper processes) and persisted, so
+   * decompiles reuse them. `false` skips it; output and per-request work are identical
+   * either way. Cancel it with `signal`; it never fails the open. Skipped when
+   * `analysisCache` is false. Its own `signal` cancels the job alone. */
+  readonly openJob?: (OpenJobOptions & { readonly signal?: AbortSignal }) | false;
 }
 export interface DecompileOptions {
   readonly emitter?: 'c-like' | 'python-like';
@@ -124,6 +132,8 @@ const selectorSchema = z.union([
 export class BinarySession {
   readonly image: BinaryImage;
   readonly projectId: string;
+  /** What the open-time job did; null when it did not run. */
+  openJob: OpenJobReport | null = null;
   /** Advances only when this session commits a whole-image discovery step. */
   revision: number;
   #closing: Promise<void> | undefined;
@@ -195,10 +205,48 @@ export class BinarySession {
         );
       }
       options.signal?.throwIfAborted();
+      if (options.openJob !== false && options.analysisCache !== false)
+        session.openJob = await session.#runOpenJob(options.openJob ?? {}, options);
       return session;
     } catch (error) {
       await service.close('cancel');
       throw error;
+    }
+  }
+
+  /** The job at the revision the open left. It does not complete discovery: that would
+   * change the function index decompiles see (a decompile completes it on demand only when
+   * its selection needs it, and the job's units then belong to an older revision). */
+  async #runOpenJob(
+    job: OpenJobOptions & { readonly signal?: AbortSignal },
+    options: OpenBinaryOptions,
+  ): Promise<OpenJobReport> {
+    const started = performance.now();
+    const signal =
+      job.signal && options.signal
+        ? AbortSignal.any([job.signal, options.signal])
+        : (job.signal ?? options.signal);
+    try {
+      return await this.service.prepareUnits(
+        this.projectId,
+        {
+          ...(job.jobs === undefined ? {} : { jobs: job.jobs }),
+          ...(job.work === undefined ? {} : { work: job.work }),
+        },
+        signal ? { signal } : {},
+      );
+    } catch (error) {
+      options.signal?.throwIfAborted();
+      return {
+        state: 'failed',
+        ms: performance.now() - started,
+        work: 0,
+        jobs: 0,
+        prepared: 0,
+        retained: 0,
+        stored: 0,
+        message: error instanceof Error ? error.message : String(error),
+      };
     }
   }
 

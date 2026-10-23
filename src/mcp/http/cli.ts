@@ -11,16 +11,21 @@ export async function runHttpCli(
 ): Promise<void> {
   if (args.length === 1 && args[0] === '--help') {
     process.stderr.write(
-      'Usage: open-decomp mcp start --transport http --config ABSOLUTE_JSON_PATH [--analysis-cache|--no-analysis-cache] [--settings PATH]\n--no-analysis-cache: server-wide, read and write no derived analysis (see mcp start --help).\n--analysis-cache: server-wide, keep analysis caching on even if the settings file disables it.\n--settings PATH: user settings file (default $XDG_CONFIG_HOME/open-decomp/settings.json). Loaded once; analysis_cache and decompile.language/view/inference are server-wide defaults (a request argument wins). cache_root does not apply: each principal keeps its projects under its configured project_root.\nMandatory private hashed-bearer configuration; default 127.0.0.1:3000/mcp. Native TLS is required off loopback. See docs/REMOTE.md.\n',
+      'Usage: open-decomp mcp start --transport http --config ABSOLUTE_JSON_PATH [--analysis-cache|--no-analysis-cache] [--no-open-job] [--settings PATH]\n--no-analysis-cache: server-wide, read and write no derived analysis (see mcp start --help).\n--no-open-job: server-wide, project_open does not run the open-time job (see mcp start --help).\n--analysis-cache: server-wide, keep analysis caching on even if the settings file disables it.\n--settings PATH: user settings file (default $XDG_CONFIG_HOME/open-decomp/settings.json). Loaded once; analysis_cache and decompile.language/view/inference are server-wide defaults (a request argument wins). cache_root does not apply: each principal keeps its projects under its configured project_root.\nMandatory private hashed-bearer configuration; default 127.0.0.1:3000/mcp. Native TLS is required off loopback. See docs/REMOTE.md.\n',
     );
     return;
   }
   const enabled = args.filter((argument) => argument === '--analysis-cache').length;
   const disabled = args.filter((argument) => argument === '--no-analysis-cache').length;
+  const noOpenJob = args.filter((argument) => argument === '--no-open-job').length;
   const rest = args.filter(
-    (argument) => argument !== '--analysis-cache' && argument !== '--no-analysis-cache',
+    (argument) =>
+      argument !== '--analysis-cache' &&
+      argument !== '--no-analysis-cache' &&
+      argument !== '--no-open-job',
   );
   if (
+    noOpenJob > 1 ||
     enabled > 1 ||
     disabled > 1 ||
     (enabled > 0 && disabled > 0) ||
@@ -38,7 +43,7 @@ export async function runHttpCli(
     );
   const server = await startHttpServer(
     await loadHttpConfig(rest[1]),
-    analysisCache ? {} : { analysis_cache: false },
+    { ...(analysisCache ? {} : { analysis_cache: false }), open_job: noOpenJob > 0 ? false : {} },
     {
       decompile: {
         language: settings.decompile.language,

@@ -732,6 +732,8 @@ export async function exportBinary(
               cachePath,
               ...(options.sliceId === undefined ? {} : { sliceId: options.sliceId }),
               ...(options.analysisCache === false ? { analysisCache: false } : {}),
+              // A copy of the primary, whose open already ran the open-time job.
+              openJob: false,
               signal,
             }),
           );

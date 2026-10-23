@@ -1212,6 +1212,15 @@ export function optionalWorkPool(ir: SSAForm, remaining: number, share: number):
   return Math.min(share, Math.max(0, remaining - TAIL_WORK_PER_NODE * nativeSelectedNodes(ir)));
 }
 
+/** The largest allowance a native worklist load can receive under a request work limit of
+ * `work`: the summary pool is at most half of what remains (`optionalWorkPool`), the
+ * worklist three quarters of the pool, and one load step a quarter of what the worklist has
+ * left (`shareContext` in `nativeDependencyWorklist`). The open-time job prepares units
+ * under it, so a retained unit's allowance never exceeds what such a load can offer. */
+export function nativeLoadAllowanceBound(work: number): number {
+  return Math.max(1, Math.floor(Math.floor((Math.floor(work / 2) * 3) / 4) / 4));
+}
+
 /** Dependency capacity left after the selected body; part of the cache identity. */
 function nativeCapacity(input: SourceFactsInput, context: OperationContext): NativeSummaryCapacity {
   return {
@@ -1236,6 +1245,23 @@ export function nativeLibraryContracts(
     }));
 }
 
+/** What a prepared unit is a function of besides its function: the image revision and
+ * slice, target, component versions, ABI/lifter and supplied native types. */
+export function preparedUnitIdentity(input: NativePreparationInput): string {
+  const { components, image, revision } = input,
+    abi = components.abi;
+  return fingerprint({
+    revision,
+    image: image.sha256,
+    slice: image.selected_slice_id,
+    target: image.target,
+    versions: pipelineVersions(image.target, 'c-like'),
+    lifter: `${components.lifter.name}/${components.lifter.version}`,
+    abi: `${abi.id}/${abi.version}`,
+    native_types: input.native_types,
+  } as unknown as CanonicalValue);
+}
+
 /** The process-wide prepared-unit cache of this image revision and component identity. */
 export function preparedUnitCache(input: NativePreparationInput): PreparedUnitCache {
   // Disabled caching neither reads nor leaves a process-wide cache behind.
@@ -1249,19 +1275,8 @@ export function preparedUnitCache(input: NativePreparationInput): PreparedUnitCa
       prefixes: new Map(),
       prefix_size: 0,
     };
-  const { components, image, revision } = input,
-    abi = components.abi;
-  const identity = fingerprint({
-    revision,
-    image: image.sha256,
-    slice: image.selected_slice_id,
-    target: image.target,
-    versions: pipelineVersions(image.target, 'c-like'),
-    lifter: `${components.lifter.name}/${components.lifter.version}`,
-    abi: `${abi.id}/${abi.version}`,
-    native_types: input.native_types,
-  } as unknown as CanonicalValue);
-  let prepared = preparedUnits.get(image);
+  const identity = preparedUnitIdentity(input);
+  let prepared = preparedUnits.get(input.image);
   if (
     !prepared ||
     prepared.identity !== identity ||
@@ -1279,7 +1294,7 @@ export function preparedUnitCache(input: NativePreparationInput): PreparedUnitCa
       prefixes: new Map(),
       prefix_size: 0,
     };
-    preparedUnits.set(image, prepared);
+    preparedUnits.set(input.image, prepared);
   }
   return prepared;
 }

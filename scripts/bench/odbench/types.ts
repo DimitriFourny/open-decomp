@@ -105,8 +105,10 @@ export interface BinaryTiming {
   readonly decompile_ms_total: number;
   /** Open Decomp: `openBinary` wall time (median over repeats; once an open-time job exists, it includes the job). Absent on lanes recorded before roadmap 4 M2 and on other tools. */
   readonly open_ms?: number | null;
-  /** Open Decomp: the open-time job's own share of `open_ms`. Recorded only when such a job exists (none today). */
+  /** Open Decomp: the open-time job's own share of `open_ms` (roadmap 4 T8). Recorded only when the job ran. */
   readonly open_job_ms?: number | null;
+  /** Open Decomp: the work the open-time job charged under its own budget (not request work). */
+  readonly open_job_work?: number | null;
   /** Open Decomp: wall time from `openBinary` returning to the 10th corpus function's result, in corpus order (median over repeats); null for a binary with fewer than 10 corpus functions or without that result. */
   readonly first10_ms?: number | null;
   /** Open Decomp: peak resident set size of every process the binary's run used (largest over repeats); absent on lanes recorded before roadmap 4 M2. */

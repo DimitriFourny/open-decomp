@@ -24,6 +24,7 @@ Commands:
   inputs                       verify every corpus binary/source hash in the data store
   select [--check]             rebuild corpus.json (--check: verify the committed one reproduces)
   run od --label L [--repo PATH] [--tier quick|full] [--repeat N] [--jobs 1] [--inference proven|likely] [--only BINARY,...]
+                               [--no-open-job]
   run ghidra [--tier] [--install DIR] [--java-home DIR] [--force] [--only BINARY,...]
   run source [--tier]
   judge --lanes A,B,... [--pairs A:B,...] [--tier] [--tasks tokens,readability,comprehension,qa]
@@ -39,7 +40,7 @@ Commands:
 
 Defaults: --tier quick, --model ${DEFAULT_MODEL}, --backend anthropic if ANTHROPIC_API_KEY is set else omp,
 --concurrency 8, --qa-samples 3, --comprehension-samples 1, --repeat 1, --inference proven,
---repo this checkout, --reference ghidra.
+--repo this checkout, --reference ghidra. --no-open-job opens without the open-time job (T8).
 Lanes: od-<label>, ghidra (reference), source (calibration anchor). Data store: $OPEN_DECOMP_BENCH_DIR or .odbench/.
 `;
 
@@ -71,6 +72,7 @@ const FLAG_TYPES = {
   check: 'boolean',
   'dry-run': 'boolean',
   'no-judge': 'boolean',
+  'no-open-job': 'boolean',
   help: 'boolean',
 } as const;
 type FlagName = keyof typeof FLAG_TYPES;
@@ -92,6 +94,7 @@ const OD_FLAGS: readonly FlagName[] = [
   'jobs',
   'inference',
   'only',
+  'no-open-job',
 ];
 const GHIDRA_FLAGS: readonly FlagName[] = ['tier', 'install', 'java-home', 'force', 'only'];
 
@@ -248,6 +251,7 @@ async function runOd(flags: Flags, loaded: Loaded): Promise<LaneRun> {
     jobs: integer(flags, 'jobs', 1),
     inference: choice(flags, 'inference', ['proven', 'likely'], 'proven'),
     only: list(flags, 'only'),
+    openJob: flags['no-open-job'] !== true,
   });
   console.log(summarizeLane(run));
   return run;

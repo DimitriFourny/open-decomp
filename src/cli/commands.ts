@@ -15,6 +15,8 @@ interface Arguments {
   sliceId?: string;
   /** Explicit `--analysis-cache` / `--no-analysis-cache`; absent means the settings decide. */
   analysisCache?: boolean;
+  /** `--no-open-job`: open without the open-time job. */
+  noOpenJob: boolean;
   settingsPath?: string;
   name?: string;
   selector?: FunctionSelector;
@@ -34,7 +36,8 @@ type AnalysisResult =
   | ToolResult<'binary_info'>;
 
 const settingsOption = '[--settings PATH]';
-const cacheOptions = '[--cache PATH] [--slice ID] [--analysis-cache|--no-analysis-cache]';
+const cacheOptions =
+  '[--cache PATH] [--slice ID] [--analysis-cache|--no-analysis-cache] [--no-open-job]';
 const usage = {
   functions: `open-decomp functions BINARY [--name TEXT] [--json] ${cacheOptions} ${settingsOption}`,
   decompile: `open-decomp decompile BINARY (--function NAME | --id ID | --address va:0x.../rva:0x.../file:0x...) [--language c-like|python-like] [--view source|checked] [--inference proven|likely] [--json] ${cacheOptions} ${settingsOption}`,
@@ -135,6 +138,7 @@ function parse(args: readonly string[]): ParsedArguments {
   let json = false,
     enableCache = false,
     disableCache = false,
+    noOpenJob = false,
     positionalOnly = false;
   for (let index = 1; index < args.length; index++) {
     const argument = args[index]!;
@@ -149,6 +153,11 @@ function parse(args: readonly string[]): ParsedArguments {
     if (argument === '--json') {
       if (json) throw new UsageError('Duplicate option --json');
       json = true;
+      continue;
+    }
+    if (argument === '--no-open-job') {
+      if (noOpenJob) throw new UsageError('Duplicate option --no-open-job');
+      noOpenJob = true;
       continue;
     }
     if (argument === '--analysis-cache' || argument === '--no-analysis-cache') {
@@ -171,7 +180,7 @@ function parse(args: readonly string[]): ParsedArguments {
   }
   if (positional.length !== 1 || !positional[0])
     throw new UsageError('Expected exactly one BINARY path');
-  const result: Arguments = { command, binary: positional[0], json };
+  const result: Arguments = { command, binary: positional[0], json, noOpenJob };
   if (enableCache) result.analysisCache = true;
   if (disableCache) result.analysisCache = false;
   const cache = values.get('--cache'),
@@ -248,7 +257,7 @@ function help(command: Command): void {
           : command === 'decompile'
             ? 'Decompile one exact, unambiguous function name, entity ID or address.\nText stdout contains only pseudocode; JSON preserves the result envelope.\n--inference proven|likely  proven (default) closes only established interfaces; likely also closes open argument lists by gated heuristics (each guess is marked `likely_arity(...)` and recorded as a guess inference; may be wrong).'
             : 'Print the image-wide merged structure types as C declarations (the names decompile uses).\nAnalyzes function bodies within the default budget; a partial result exits 2.'
-    }\n\n--cache PATH  Override the sidecar cache root (default: BINARY.open-decomp).\n--slice ID    Select a binary slice.\n--analysis-cache     Force analysis caching on (overrides analysis_cache: false in a settings file).\n--no-analysis-cache  Read and write no derived analysis: no published results, reuse candidates or persisted callee summaries, and no in-process summary reuse. Import and indexes still persist. Output is identical; repeated and cross-process runs are slower.\n--settings PATH  Read settings from PATH instead of $XDG_CONFIG_HOME/open-decomp/settings.json (default ~/.config/open-decomp/settings.json). A flag beats the file; the file beats built-in defaults. See: open-decomp settings --help.\n${command === 'export' ? '' : '--json        Write {project_path,reused,result} JSON to stdout.\n'}--help        Show this help.\nProgress, project reuse and diagnostics go to stderr. Work stays in the foreground.\nExit: ${command === 'export' ? '0 all files written (even if some functions are partial/failed); 1 error/cancelled' : '0 complete/empty; 2 semantic partial; 1 error/unsupported/cancelled'}; 130 SIGINT; 143 SIGTERM.\n`,
+    }\n\n--cache PATH  Override the sidecar cache root (default: BINARY.open-decomp).\n--slice ID    Select a binary slice.\n--analysis-cache     Force analysis caching on (overrides analysis_cache: false in a settings file).\n--no-open-job  Open without the open-time job: no whole-image discovery and callee-unit preparation at open (each decompile prepares what it needs). Output is identical; on a fresh project the first decompiles are slower.\n--no-analysis-cache  Read and write no derived analysis: no published results, reuse candidates or persisted callee summaries, and no in-process summary reuse. Import and indexes still persist. Output is identical; repeated and cross-process runs are slower.\n--settings PATH  Read settings from PATH instead of $XDG_CONFIG_HOME/open-decomp/settings.json (default ~/.config/open-decomp/settings.json). A flag beats the file; the file beats built-in defaults. See: open-decomp settings --help.\n${command === 'export' ? '' : '--json        Write {project_path,reused,result} JSON to stdout.\n'}--help        Show this help.\nProgress, project reuse and diagnostics go to stderr. Work stays in the foreground.\nExit: ${command === 'export' ? '0 all files written (even if some functions are partial/failed); 1 error/cancelled' : '0 complete/empty; 2 semantic partial; 1 error/unsupported/cancelled'}; 130 SIGINT; 143 SIGTERM.\n`,
   );
 }
 
@@ -372,9 +381,14 @@ export async function runAnalysisCli(args: readonly string[]): Promise<void> {
       ...(cachePath === undefined ? {} : { cachePath }),
       ...(parsed.sliceId === undefined ? {} : { sliceId: parsed.sliceId }),
       ...(analysisCache ? {} : { analysisCache: false }),
+      ...(parsed.noOpenJob ? { openJob: false } : {}),
       signal: controller.signal,
       onProgress,
     });
+    if (session.openJob && session.openJob.state !== 'skipped')
+      process.stderr.write(
+        `open-time job: ${session.openJob.state}, ${session.openJob.retained}/${session.openJob.prepared} callee units kept, ${Math.round(session.openJob.ms)} ms${session.openJob.message ? ` (${terminal(session.openJob.message)})` : ''}\n`,
+      );
     process.stderr.write(
       `${session.reused ? 'Reusing' : 'Created'} project: ${terminal(session.projectPath, 32768)}\n`,
     );

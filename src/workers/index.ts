@@ -24,6 +24,7 @@ import {
   type ArtifactReadInput,
   type ArtifactReadResult,
   type Command,
+  type OpenJobReport,
   type WorkRequest,
   type WorkerEvent,
   type WorkerOperation,
@@ -36,6 +37,7 @@ export type {
   WorkRequest,
   ImportRequest,
   ExecuteRequest,
+  OpenJobReport,
   WorkerOperation,
   WorkerSnapshot,
 } from './protocol.js';
@@ -207,6 +209,8 @@ export class ProjectWorker {
   #reserved = 0;
   readonly #jobs = new Map<string, PendingJob>();
   readonly #requests = new Map<string, Deferred<WorkerEvent>>();
+  /** The open-time job running in the child, if any. */
+  #unitsJob: string | undefined;
   constructor(
     pool: ProjectWorkerPool,
     path: string,
@@ -334,6 +338,45 @@ export class ProjectWorker {
       }
     });
     return result.promise;
+  }
+
+  /** A command that has no reply of its own. */
+  #notify(command: Command): void {
+    const child = this.#child;
+    if (!child || child.exitCode !== null || child.signalCode !== null) return;
+    child.stdin.write(frame(commandSchema.parse(command)));
+  }
+
+  /** Run the open-time job in the owning child over the current revision (docs/internals/
+   * project-cache.md §5a). Its failure or cancellation (`signal`, or closing the project with
+   * `cancel`) is a reported state, never an error of the open. */
+  async prepareUnits(
+    options: { readonly jobs?: number; readonly work?: number } = {},
+    call: { readonly signal?: AbortSignal } = {},
+  ): Promise<OpenJobReport> {
+    if (this.#closed || this.#closing || this.#recovering)
+      throw failure('invalid_input', 'Project is closing or recovering');
+    const id = newIdentity('job');
+    const cancel = (): void =>
+      this.#notify({ kind: 'cancel_units', id: newIdentity('job'), target: id });
+    this.#unitsJob = id;
+    call.signal?.addEventListener('abort', cancel, { once: true });
+    try {
+      const reply = this.#rpc({
+        kind: 'prepare_units',
+        id,
+        ...(options.jobs === undefined ? {} : { jobs: options.jobs }),
+        ...(options.work === undefined ? {} : { work: options.work }),
+      });
+      if (call.signal?.aborted) cancel();
+      const event = await reply;
+      if (event.kind !== 'units')
+        throw failure('worker_failed', 'Invalid open-time job acknowledgement');
+      return event.report;
+    } finally {
+      if (this.#unitsJob === id) this.#unitsJob = undefined;
+      call.signal?.removeEventListener('abort', cancel);
+    }
   }
 
   async submit(
@@ -596,6 +639,8 @@ export class ProjectWorker {
   }
 
   async #closeOwned(policy: 'wait' | 'cancel' | 'reject'): Promise<void> {
+    if (policy === 'cancel' && this.#unitsJob !== undefined)
+      this.#notify({ kind: 'cancel_units', id: newIdentity('job'), target: this.#unitsJob });
     if (policy === 'cancel')
       await Promise.all([...this.#jobs.keys()].map((id) => this.#interrupt(id, 'cancelled')));
     await Promise.allSettled([...this.#jobs.values()].map((job) => job.outcome.promise));

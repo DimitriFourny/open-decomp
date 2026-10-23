@@ -43,6 +43,10 @@ export interface NativeUnitPersistence {
   load(fn: FunctionRecord, context: OperationContext): PreparedUnitEntry | undefined;
   /** Queue `entry` for the request's next batched write. */
   save(fn: FunctionRecord, entry: PreparedUnitEntry): void;
+  /** Queue a marker row for `fn`: the open-time job prepared it and kept nothing (the unit is
+   * not retained), so a later open need not prepare it again. A marker is never a unit (every
+   * load misses it) and any saved unit replaces it. */
+  skip(fn: FunctionRecord): void;
 }
 
 type StoredUnit = Omit<PreparedNativeUnit, 'function' | 'dependencies' | 'analysis'> & {
@@ -91,6 +95,13 @@ const storedSummarySchema = z.object({
   }),
 });
 
+/** The persisted rows' scope of one `preparedUnitIdentity`. */
+export const nativeSummaryScope = (identity: string): string =>
+  fingerprint(['native-summary', NATIVE_SUMMARY_FORMAT, identity]);
+
+/** A marker row's allowance: above every load's, so a stored unit always replaces it. */
+export const NATIVE_SUMMARY_MARKER_ALLOWANCE = Number.MAX_SAFE_INTEGER;
+
 /** Reads and writes prepared units of one image revision in the project store. Identity
  * (`scope`) names the revision, image slice, target, component versions, ABI/lifter and the
  * supplied native types, so a stored unit is only ever offered for exactly the state it was
@@ -108,7 +119,7 @@ export function createNativeUnitPersistence(
     typeof store.queueNativeSummary !== 'function'
   )
     return undefined;
-  const key = fingerprint(['native-summary', NATIVE_SUMMARY_FORMAT, identity]);
+  const key = nativeSummaryScope(identity);
   const abi: AbiProfile = input.components.abi;
   const missing = new Set<string>();
   let byId: ReadonlyMap<string, FunctionRecord> | undefined;
@@ -222,5 +233,16 @@ export function createNativeUnitPersistence(
     }
   };
 
-  return { load, save };
+  const skip = (fn: FunctionRecord): void => {
+    store.queueNativeSummary({
+      scope: key,
+      function_id: fn.id,
+      revision,
+      allowance: NATIVE_SUMMARY_MARKER_ALLOWANCE,
+      work: 0,
+      value: { format: NATIVE_SUMMARY_FORMAT, scope: key, function: fn.id, marker: true },
+    });
+  };
+
+  return { load, save, skip };
 }
