@@ -43,7 +43,7 @@ changed-state overlay is not a zero-argument call.
 
 The lifter models `ORR_asimdsame_only` from its canonical `Rd`, `Rn`, `Rm` and `Q` fields, including the compiler's `MOV` alias (`Rn == Rm`) when the decoder exposes only opaque display operands. It preserves the entire selected bit pattern without interpreting FP payloads or lane text. The 64-bit form clears the high half of the 128-bit root; the 128-bit form replaces the whole root. This is the specific register-move family exercised by mixed integer/FP call preservation, not general support for opaque SIMD operands or lane-indexed moves.
 
-Scalar SIMD `SCVTF_asisdmisc_R` / `UCVTF_asisdmisc_R` support same-width 32/64-bit integer-to-FP conversion from canonical register fields. The destination replaces its scalar and clears the rest of Vd, preserving NZCV. Existing FPCR guards and unknown exception-status effects remain. Packed and FP16 variants are not implied; the measured-family source/rounding evidence is recorded in `PERFORMANCE.md`.
+Scalar SIMD `SCVTF_asisdmisc_R` / `UCVTF_asisdmisc_R` support same-width 32/64-bit integer-to-FP conversion from canonical register fields. The destination replaces its scalar and clears the rest of Vd, preserving NZCV. Existing FPCR guards and unknown exception-status effects remain. Packed and FP16 variants are not implied.
 
 ## Float-to-integer, fixed-point and canonical-field vector operations
 
@@ -76,4 +76,4 @@ node --import tsx --test test/decoders/arm64/decoder.test.ts
 node --import tsx test/decoders/arm64/smoke.ts
 ```
 
-The smoke script is source-only (`tsconfig.build.json` compiles `src`, `vendor` and the release/smoke/benchmark drivers that run from `dist`, not `test/`). It loads the real Mach-O image and exercises the adapter's missing-EOR completion through actual loader/address-map output. No sibling checkout, external decoder, Arm XML or target execution is needed.
+The smoke script is source-only (`tsconfig.build.json` compiles `src`, `vendor` and the release/smoke drivers that run from `dist`, not `test/`). It loads the real Mach-O image and exercises the adapter's missing-EOR completion through actual loader/address-map output. No sibling checkout, external decoder, Arm XML or target execution is needed.

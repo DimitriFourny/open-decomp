@@ -367,7 +367,7 @@ async function packageRelease(): Promise<void> {
       'docs/ARM64.md',
       'docs/X86_64.md',
       'docs/FIXTURES.md',
-      'docs/PERFORMANCE.md',
+      'docs/BENCHMARK.md',
       'docs/THIRD-PARTY-NOTICES.md',
       'dist/vendor/a64js/src/decode.js',
     ])

@@ -6,13 +6,7 @@
     "vendor/**/*.js",
     "scripts/smoke.ts",
     "scripts/mcp-smoke.ts",
-    "scripts/release-acceptance.ts",
-    "scripts/bench/pipeline.ts",
-    "scripts/bench/worker.ts",
-    "scripts/bench/resources.ts",
-    "scripts/bench/resources-worker.ts",
-    "scripts/bench/incremental-controlled.ts",
-    "scripts/bench/incremental-controlled-worker.ts"
+    "scripts/release-acceptance.ts"
   ],
   "exclude": ["node_modules", "dist", "test", "vendor/**/test", "vendor/**/tools"]
 }

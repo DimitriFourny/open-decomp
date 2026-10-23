@@ -33,11 +33,6 @@ export interface Backend {
   countInput?(request: AskRequest): Promise<AskReply>;
 }
 
-/** `anthropic` iff ANTHROPIC_API_KEY is set, else `omp`. */
-export function defaultBackend(): 'omp' | 'anthropic' {
-  return process.env['ANTHROPIC_API_KEY'] ? 'anthropic' : 'omp';
-}
-
 export function createBackend(name: BackendName, command?: string): Backend {
   switch (name) {
     case 'omp':

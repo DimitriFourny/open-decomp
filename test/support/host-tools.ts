@@ -1,5 +1,4 @@
 import { spawnSync } from 'node:child_process';
-import { evidencePath, MissingEvidenceError } from '../../scripts/bench/evidence.js';
 
 /** Absolute compiler path used by every native source oracle (never the target under analysis). */
 export const CLANG = '/usr/bin/clang';
@@ -36,15 +35,4 @@ export function nativeAndPythonOracleSkip(): string | false {
   if (native) return native;
   if (!hasPython3()) return 'python3 is unavailable or not runnable';
   return false;
-}
-
-/** Optional retained evidence skips only when absent; corrupt evidence remains a failure. */
-export function evidenceArchiveSkip(repoRelativePath: string): string | false {
-  try {
-    evidencePath(repoRelativePath);
-    return false;
-  } catch (error) {
-    if (error instanceof MissingEvidenceError) return error.message;
-    throw error;
-  }
 }

@@ -10,10 +10,8 @@ licenses/
 /scripts/fixtures/
 /test/**/fixtures/
 
-# Frozen, hash-referenced benchmark evidence and inputs (byte identity matters).
+# Frozen, hash-referenced benchmark corpus (byte identity matters).
 /scripts/bench/odbench/corpus.json
-/scripts/bench/*.json
-/scripts/bench/quality-evidence/
 
 # Generated header interface data (byte identity matters; see scripts/generate-library-prototypes.ts).
 /src/metadata/library-contracts/generated/data/

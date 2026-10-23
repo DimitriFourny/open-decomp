@@ -106,7 +106,7 @@ export type LikelyHeuristic = z.infer<typeof likelyHeuristicSchema>;
 export const LIKELY_PRECISION_GATE = 0.95;
 
 /** Which heuristics currently pass the gate. This table is data from a measurement run:
- * each entry must cite its harness result in docs/PERFORMANCE.md and is changed only with
+ * each entry must cite its harness result in docs/BENCHMARK.md and is changed only with
  * a new run. A heuristic that fails keeps firing and is recorded in provenance
  * (`applied: false`), so the harness can keep measuring it, but it never prints. */
 export const LIKELY_GATE: Readonly<Record<LikelyHeuristic, boolean>> = {

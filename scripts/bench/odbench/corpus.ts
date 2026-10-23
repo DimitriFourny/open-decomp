@@ -1,11 +1,21 @@
-/** Frozen corpus (`corpus.json`): loading, tier selection and input paths. */
+/** Corpus (`corpus.json`): loading, tier selection and input paths. */
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { CORPUS_PATH, paths, sha256 } from './types.js';
+import { corpusPath, paths, sha256 } from './types.js';
 import type { Corpus, CorpusBinary, CorpusFunction, CorpusSource, Tier } from './types.js';
 
-export async function loadCorpus(path = CORPUS_PATH): Promise<Corpus> {
-  const corpus = JSON.parse(await readFile(path, 'utf8')) as Corpus;
+export async function loadCorpus(path = corpusPath()): Promise<Corpus> {
+  let text: string;
+  try {
+    text = await readFile(path, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT')
+      throw new Error(
+        `${path} does not exist; build it from ${paths.manifest()} with bench select`,
+      );
+    throw error;
+  }
+  const corpus = JSON.parse(text) as Corpus;
   if (corpus.schema !== 'odbench-corpus/1') throw new Error(`${path}: unknown corpus schema`);
   const binaries = new Set(corpus.binaries.map((binary) => binary.id));
   const sources = new Set(corpus.sources.map((source) => source.id));
@@ -23,7 +33,7 @@ export async function loadCorpus(path = CORPUS_PATH): Promise<Corpus> {
 }
 
 /** sha256 of corpus.json bytes: lanes record it so mixed-corpus comparisons are refused. */
-export async function corpusSha256(path = CORPUS_PATH): Promise<string> {
+export async function corpusSha256(path = corpusPath()): Promise<string> {
   return sha256(await readFile(path));
 }
 

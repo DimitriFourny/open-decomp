@@ -5,6 +5,7 @@ The complete Cartesian product is recorded, including failed cells. Compiler
 and linker subprocesses are trusted development tools, not analyzed inputs.
 """
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -12,10 +13,6 @@ import shutil
 import subprocess
 import tarfile
 import sys
-
-sys.dont_write_bytecode = True
-import quality
-from evidence import evidence_path
 
 HERE = Path(__file__).resolve().parent
 ZLIB_SHA256 = '9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23'
@@ -40,6 +37,20 @@ TARGETS = {
 }
 
 
+def save(path, value):
+    path.write_text(json.dumps(value, indent=2, sort_keys=True) + '\n')
+
+
+def digest(path):
+    with path.open('rb') as stream:
+        return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+
+def require(condition, message):
+    if not condition:
+        raise RuntimeError(message)
+
+
 def execute(command, directory):
     result = subprocess.run(command, cwd=directory, capture_output=True, text=True,
                             env=dict(os.environ, LC_ALL='C', SOURCE_DATE_EPOCH='0'))
@@ -51,14 +62,14 @@ def execute(command, directory):
 
 
 def identify(path):
-    return {'path': str(path), 'bytes': path.stat().st_size, 'sha256': quality.digest(path)}
+    return {'path': str(path), 'bytes': path.stat().st_size, 'sha256': digest(path)}
 
 
 def build(args):
     args.output = args.output.resolve()
-    quality.require(not args.output.exists(), 'Choose a new build output directory')
-    archive_path = evidence_path('scripts/bench/quality-matrix-zlib-1.3.1.tar.gz')
-    quality.require(quality.digest(archive_path) == ZLIB_SHA256, 'Reviewed zlib archive hash mismatch')
+    require(not args.output.exists(), 'Choose a new build output directory')
+    archive_path = args.zlib_archive.resolve()
+    require(digest(archive_path) == ZLIB_SHA256, 'Reviewed zlib archive hash mismatch')
     args.output.mkdir(parents=True)
     source = args.output / 'source'
     source.mkdir()
@@ -67,18 +78,18 @@ def build(args):
         needed = ['adler32.c', 'crc32.c', 'crc32.h', 'zutil.h', 'zlib.h', 'zconf.h', 'LICENSE']
         for name in needed:
             member = archive.extractfile(f'zlib-1.3.1/{name}')
-            quality.require(member is not None, f'Missing reviewed upstream file {name}')
+            require(member is not None, f'Missing reviewed upstream file {name}')
             (source / name).write_bytes(member.read())
     shutil.copyfile(HERE / 'quality-matrix-corpus.c', source / 'quality-matrix-corpus.c')
     shutil.copyfile(HERE.parent.parent / 'LICENSE', source / 'corpus-LICENSE')
     compilers = {'apple-clang21': str(args.apple_clang.resolve()),
                  'llvm-clang23': str(args.llvm_clang.resolve())}
-    tools = {name: {'path': command, 'sha256': quality.digest(Path(command)),
+    tools = {name: {'path': command, 'sha256': digest(Path(command)),
                     'version': execute([command, '--version'], args.output)['stdout'].strip()}
              for name, command in compilers.items()}
     for name in ('ld.lld', 'lld-link', 'llvm-objcopy', 'llvm-nm', 'llvm-readobj', 'llvm-objdump'):
         path = (args.lld_bin if name in ('ld.lld', 'lld-link') else args.llvm_bin) / name
-        tools[name] = {'path': str(path), 'sha256': quality.digest(path),
+        tools[name] = {'path': str(path), 'sha256': digest(path),
                        'version': execute([str(path), '--version'], args.output)['stdout'].strip()}
     sdk_discovery = execute(['/usr/bin/xcrun', '--show-sdk-path'], args.output)
     sdk = sdk_discovery['stdout'].strip()
@@ -103,7 +114,7 @@ def build(args):
             'entry': 'matrix_entry is an analysis root, not platform process startup. No analyzed binary is executed.',
             'oracle_limits': 'Source known; no behavioral-equivalence or undefined-input/exceptional FP environment claim.'},
         'cells': []}
-    quality.save(args.output / 'build-manifest.json', plan)
+    save(args.output / 'build-manifest.json', plan)
     for target, triple in TARGETS.items():
         for compiler, command in compilers.items():
             for optimization in ('O0', 'O2'):
@@ -154,7 +165,7 @@ def build(args):
                             addresses[fields[0].removeprefix('_')] = '0x' + fields[2]
                     for function in functions:
                         name = function['name']
-                        quality.require(name in addresses, f'Compiler output has no selected symbol {name}')
+                        require(name in addresses, f'Compiler output has no selected symbol {name}')
                         function['address'] = addresses[name]
                     stripped = directory / ('stripped.exe' if target.startswith('pe') else 'stripped')
                     shutil.copyfile(binary, stripped)
@@ -174,17 +185,17 @@ def build(args):
                         cell.update({'status': 'built', 'input': identify(path),
                                      'text': identify(text), 'metadata': identify(directory / (cell['symbols'] + '.metadata.txt')),
                                      'disassembly': identify(directory / (cell['symbols'] + '.disassembly.txt'))})
-                    quality.require(cell_pair[0]['text']['sha256'] == cell_pair[1]['text']['sha256'],
-                                    'Stripping changed selected code bytes; address pairing invalid')
+                    require(cell_pair[0]['text']['sha256'] == cell_pair[1]['text']['sha256'],
+                            'Stripping changed selected code bytes; address pairing invalid')
                     stripped_nm = execute([str(args.llvm_bin / 'llvm-nm'), '--defined-only', str(stripped)], directory)
                     records.append(stripped_nm)
-                    quality.require(not any(name in stripped_nm['stdout'] for name, _ in FUNCTIONS),
-                                    'Stripped image still exposes selected static symbol names')
+                    require(not any(name in stripped_nm['stdout'] for name, _ in FUNCTIONS),
+                            'Stripped image still exposes selected static symbol names')
                 except Exception as error:
                     for cell in cell_pair:
                         cell['status'] = 'build_failed'
                         cell['error'] = repr(error)
-                quality.save(args.output / 'build-manifest.json', plan)
+                save(args.output / 'build-manifest.json', plan)
                 print(json.dumps({'configuration': base, 'states': [cell['status'] for cell in cell_pair]}), flush=True)
     # Inputs + source + provenance are durable, independently hash-addressed artifacts.
     return 0 if all(cell['status'] == 'built' for cell in plan['cells']) else 1
@@ -193,6 +204,8 @@ def build(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--zlib-archive', type=Path, required=True,
+                        help='zlib 1.3.1 release tarball (https://zlib.net/fossils/zlib-1.3.1.tar.gz)')
     parser.add_argument('--apple-clang', type=Path, default=Path('/usr/bin/clang'))
     parser.add_argument('--llvm-clang', type=Path, default=Path('/opt/homebrew/opt/llvm/bin/clang'))
     parser.add_argument('--llvm-bin', type=Path, default=Path('/opt/homebrew/opt/llvm/bin'))

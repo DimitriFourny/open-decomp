@@ -1,18 +1,22 @@
 /**
- * Corpus selection: builds `corpus.json` (committed, frozen) from the pinned inputs and sources in the
- * data store, the Open Decomp function index of this checkout and the frozen QA questions.
+ * Corpus selection. Without an own-input manifest: builds the committed, frozen `corpus.json` from
+ * the pinned inputs and sources in the data store, the Open Decomp function index of this checkout
+ * and the frozen QA questions. With `<bench dir>/inputs.json` (`InputsManifest`): builds
+ * `<bench dir>/corpus.json` from the binaries and sources it declares.
  *
  * Deterministic: no clock, no randomness except a seeded PRNG. `--check` rebuilds in memory and
- * compares with the committed file.
+ * compares with the written file.
  */
+import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { z } from 'zod';
 import { loadQuestions } from '../llm-tasks/questions.js';
 import { binaryPath } from './corpus.js';
 import { extractDefinitions } from './sources.js';
-import { CORPUS_PATH, ODBENCH_DIR, functionId, paths, sha256, sizeBucket } from './types.js';
+import { ODBENCH_DIR, corpusPath, functionId, paths, sha256, sizeBucket } from './types.js';
 import type {
   Corpus,
   CorpusBinary,
@@ -321,11 +325,30 @@ async function loadSources(): Promise<{ sources: CorpusSource[]; texts: Map<stri
   return { sources, texts };
 }
 
-/** Function entries of one real-world binary (sqlite, brotli): candidates, exclusions and QA functions. */
+interface SourceText {
+  readonly id: string;
+  readonly text: string;
+}
+
+/** Top-level definitions of `name` over the files, and the defining file when exactly one defines it. */
+function definitions(
+  sources: readonly SourceText[],
+  name: string,
+): { count: number; file: string | null } {
+  let count = 0;
+  const files: string[] = [];
+  for (const { id, text } of sources) {
+    const found = extractDefinitions(text, name).length;
+    count += found;
+    if (found > 0) files.push(id);
+  }
+  return { count, file: files.length === 1 ? files[0]! : null };
+}
+
+/** Function entries of one symbol-bearing binary: candidates, exclusions and QA functions. */
 async function realBinary(
   binary: CorpusBinary,
-  sourceId: string,
-  sourceText: string,
+  sources: readonly SourceText[],
   qa: readonly { readonly function: string; readonly address: string }[],
   stats: BuildStats,
 ): Promise<{ candidates: Candidate[]; qa: Candidate[] }> {
@@ -358,9 +381,9 @@ async function realBinary(
       else if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(fn.name)) exclude('compiler_derived_name');
       else if ((nameCount.get(fn.name) ?? 0) > 1) exclude('duplicate_name_in_binary');
       else {
-        const definitions = extractDefinitions(sourceText, fn.name).length;
-        if (definitions === 0) exclude('no_definition_in_source');
-        else if (definitions > 1) exclude('ambiguous_definition_in_source');
+        const count = definitions(sources, fn.name).count;
+        if (count === 0) exclude('no_definition_in_source');
+        else if (count > 1) exclude('ambiguous_definition_in_source');
         else {
           const candidate = await measure({ ...fn, name: fn.name });
           if (candidate === null) exclude('code_bytes_unreadable');
@@ -385,9 +408,9 @@ async function realBinary(
         throw new Error(
           `${binary.id}: ${question.address} is ${at.name ?? '(unnamed)'}, questions.json says ${question.function}`,
         );
-      if (extractDefinitions(sourceText, question.function).length !== 1)
+      if (definitions(sources, question.function).count !== 1)
         throw new Error(
-          `${binary.id}: QA function ${question.function} has no unique definition in ${sourceId}`,
+          `${binary.id}: QA function ${question.function} has no unique definition in ${binary.sources.join(', ')}`,
         );
       const candidate = await measure({ ...at, name: question.function });
       if (candidate === null)
@@ -439,6 +462,28 @@ function matrixSource(
   return { file, name, alternative };
 }
 
+type Entry = Omit<Candidate, 'name'> & { readonly name: string | null };
+
+const tierOf = (quick: boolean): readonly Tier[] => (quick ? ['quick', 'full'] : ['full']);
+
+function corpusFunction(
+  binary: CorpusBinary,
+  entry: Entry,
+  source: CorpusFunction['source'],
+  tiers: readonly Tier[],
+): CorpusFunction {
+  return {
+    id: functionId(binary.id, entry.name, entry.va),
+    binary: binary.id,
+    va: entry.va,
+    name: entry.name,
+    source,
+    code_bytes: entry.code_bytes,
+    size: entry.size,
+    tiers,
+  };
+}
+
 async function buildCorpus(): Promise<{ corpus: Corpus; summary: string }> {
   const { sources, texts } = await loadSources();
   const stats: BuildStats = { exclusions: {}, candidates: {} };
@@ -452,22 +497,10 @@ async function buildCorpus(): Promise<{ corpus: Corpus; summary: string }> {
   };
   const record = (
     binary: CorpusBinary,
-    entry: Candidate | (Omit<Candidate, 'name'> & { name: string | null }),
+    entry: Entry,
     source: CorpusFunction['source'],
     tiers: readonly Tier[],
-  ): void => {
-    functions.push({
-      id: functionId(binary.id, entry.name, entry.va),
-      binary: binary.id,
-      va: entry.va,
-      name: entry.name,
-      source,
-      code_bytes: entry.code_bytes,
-      size: entry.size,
-      tiers,
-    });
-  };
-  const tierOf = (quick: boolean): readonly Tier[] => (quick ? ['quick', 'full'] : ['full']);
+  ): void => void functions.push(corpusFunction(binary, entry, source, tiers));
 
   // SQLite: stratified draw from the candidates without QA functions, plus every QA function.
   const sqlite = await stamp({
@@ -484,7 +517,12 @@ async function buildCorpus(): Promise<{ corpus: Corpus; summary: string }> {
     sources: ['sqlite3.c'],
   });
   const sqliteQa = questions.filter((question) => question.binary === sqlite.id);
-  const sq = await realBinary(sqlite, 'sqlite3.c', texts.get('sqlite3.c')!, sqliteQa, stats);
+  const sq = await realBinary(
+    sqlite,
+    [{ id: 'sqlite3.c', text: texts.get('sqlite3.c')! }],
+    sqliteQa,
+    stats,
+  );
   const qaVas = new Set(sq.qa.map((fn) => fn.va));
   const pool = sq.candidates.filter((fn) => !qaVas.has(fn.va));
   const sqliteFull = stratified(pool, SQLITE_FULL, mulberry32(SEED));
@@ -511,7 +549,12 @@ async function buildCorpus(): Promise<{ corpus: Corpus; summary: string }> {
     sources: ['brotli.c'],
   });
   const brotliQa = questions.filter((question) => question.binary === brotli.id);
-  const br = await realBinary(brotli, 'brotli.c', texts.get('brotli.c')!, brotliQa, stats);
+  const br = await realBinary(
+    brotli,
+    [{ id: 'brotli.c', text: texts.get('brotli.c')! }],
+    brotliQa,
+    stats,
+  );
   const brQaVas = new Set(br.qa.map((fn) => fn.va));
   const brOthers = br.candidates.filter((fn) => !brQaVas.has(fn.va));
   const brQuick = new Set([
@@ -604,41 +647,16 @@ async function buildCorpus(): Promise<{ corpus: Corpus; summary: string }> {
   const order = new Map(binaries.map((binary, index) => [binary.id, index]));
   functions.sort((a, b) => order.get(a.binary)! - order.get(b.binary)! || byVa(a, b));
 
-  const tierCounts = (tier: Tier): string => {
-    const chosen = functions.filter((fn) => fn.tiers.includes(tier));
-    const perBinary = binaries
-      .map((binary) => [binary.id, chosen.filter((fn) => fn.binary === binary.id)] as const)
-      .filter(([, list]) => list.length > 0);
-    const groups = [...new Set(binaries.map((binary) => binary.group))].map(
-      (group) =>
-        `${group} ${chosen.filter((fn) => binaries.find((binary) => binary.id === fn.binary)?.group === group).length}`,
-    );
-    const buckets = BUCKETS.map(
-      (bucket) => `${bucket} ${chosen.filter((fn) => fn.size === bucket).length}`,
-    );
-    return `${tier}: ${chosen.length} functions (${groups.join(', ')}); by size ${buckets.join(', ')}; per binary ${perBinary
-      .map(([id, list]) => `${id} ${list.length}`)
-      .join(', ')}`;
-  };
-  const exclusionText = Object.entries(stats.exclusions)
-    .map(
-      ([id, reasons]) =>
-        `${id}: ${stats.candidates[id]} candidates after excluding ${Object.entries(reasons)
-          .sort(([a], [b]) => (a < b ? -1 : 1))
-          .map(([reason, count]) => `${count} ${reason}`)
-          .join(', ')}`,
-    )
-    .join('; ');
   const method = [
     `Selected once on ${FROZEN} by scripts/bench/odbench/select.ts (\`bun run bench select\`; \`--check\` rebuilds and compares); the committed file is frozen.`,
-    `Candidates (sqlite3-arm64, brotli): functions of the Open Decomp function index of the binary, minus import stubs (kind import_stub), unnamed and compiler-derived names (outlined .cold pieces and other names with a dot), names that occur more than once in the binary, names without exactly one top-level definition in the binary's source (sources.ts extractDefinitions: prototypes do not count; names defined on several conditional-compilation branches are ambiguous), and code_bytes outside [${MIN_CODE_BYTES}, ${MAX_CODE_BYTES}] (larger functions dominate every total).`,
-    `code_bytes = sum of the instruction sizes of the function's compact disassembly (getFunction view disassembly), the value of index.tsv code_bytes in the CLI export; size buckets: small < 128 <= medium < 1024 <= large < 8192 <= huge.`,
-    `Exclusion counts: ${exclusionText}.`,
+    `Candidates (sqlite3-arm64, brotli): ${CANDIDATE_RULE}`,
+    CODE_BYTES_RULE,
+    `Exclusion counts: ${exclusionText(stats)}.`,
     `sqlite3-arm64: full = ${Object.values(SQLITE_FULL).reduce((a, b) => a + b, 0)} drawn from the candidates other than QA functions, stratified small ${SQLITE_FULL.small}, medium ${SQLITE_FULL.medium}, large ${SQLITE_FULL.large}, huge ${SQLITE_FULL.huge} (a bucket that runs out hands its remainder to medium), plus every function used by a question of scripts/bench/llm-tasks/questions.json (mapped by address, forced in regardless of size); quick = those QA functions + ${Object.values(SQLITE_QUICK).reduce((a, b) => a + b, 0)} drawn from the full draw (small ${SQLITE_QUICK.small}, medium ${SQLITE_QUICK.medium}, large ${SQLITE_QUICK.large}, huge ${SQLITE_QUICK.huge}).`,
     `brotli: full = every candidate plus the QA functions; quick = the QA functions + ${BROTLI_QUICK_EXTRA} others.`,
     `matrix: full = the 12 build-manifest functions of the 6 apple-clang21 symbol-bearing cells (macho-arm64, pe-x86_64, elf-x86_64 x O0, O2) and of the 3 llvm-clang23 -O2 stripped cells (stripped functions: name null, source from the symbol-bearing twin by address); quick = the 12 functions of elf-x86_64-apple-clang21-O2 symbols and of pe-x86_64-llvm-clang23-O2 stripped. crc32_z is defined on both branches of #ifdef ARMCRC32 in zlib crc32.c; the #else definition is active in every build (source.alternative 1; clang -E of each target defines neither W nor ARMCRC32).`,
     `PRNG: mulberry32 seeded ${SEED}; pools sorted by va before drawing (partial Fisher-Yates per bucket in order small, medium, large, huge); one fresh generator per draw.`,
-    `Counts: ${tierCounts('quick')}. ${tierCounts('full')}.`,
+    `Counts: ${tierCounts(binaries, functions, 'quick')}. ${tierCounts(binaries, functions, 'full')}.`,
   ].join(' ');
 
   const corpus: Corpus = {
@@ -649,7 +667,219 @@ async function buildCorpus(): Promise<{ corpus: Corpus; summary: string }> {
     sources,
     functions,
   };
-  return { corpus, summary: `${tierCounts('quick')}\n${tierCounts('full')}` };
+  return {
+    corpus,
+    summary: `${tierCounts(binaries, functions, 'quick')}\n${tierCounts(binaries, functions, 'full')}`,
+  };
+}
+
+const CANDIDATE_RULE = `functions of the Open Decomp function index of the binary, minus import stubs (kind import_stub), unnamed and compiler-derived names (outlined .cold pieces and other names with a dot), names that occur more than once in the binary, names without exactly one top-level definition in the binary's source (sources.ts extractDefinitions: prototypes do not count; names defined on several conditional-compilation branches are ambiguous), and code_bytes outside [${MIN_CODE_BYTES}, ${MAX_CODE_BYTES}] (larger functions dominate every total).`;
+const CODE_BYTES_RULE = `code_bytes = sum of the instruction sizes of the function's compact disassembly (getFunction view disassembly), the value of index.tsv code_bytes in the CLI export; size buckets: small < 128 <= medium < 1024 <= large < 8192 <= huge.`;
+
+function tierCounts(
+  binaries: readonly CorpusBinary[],
+  functions: readonly CorpusFunction[],
+  tier: Tier,
+): string {
+  const chosen = functions.filter((fn) => fn.tiers.includes(tier));
+  const perBinary = binaries
+    .map((binary) => [binary.id, chosen.filter((fn) => fn.binary === binary.id)] as const)
+    .filter(([, list]) => list.length > 0);
+  const groups = [...new Set(binaries.map((binary) => binary.group))].map(
+    (group) =>
+      `${group} ${chosen.filter((fn) => binaries.find((binary) => binary.id === fn.binary)?.group === group).length}`,
+  );
+  const buckets = BUCKETS.map(
+    (bucket) => `${bucket} ${chosen.filter((fn) => fn.size === bucket).length}`,
+  );
+  return `${tier}: ${chosen.length} functions (${groups.join(', ')}); by size ${buckets.join(', ')}; per binary ${perBinary
+    .map(([id, list]) => `${id} ${list.length}`)
+    .join(', ')}`;
+}
+
+function exclusionText(stats: BuildStats): string {
+  return Object.entries(stats.exclusions)
+    .map(
+      ([id, reasons]) =>
+        `${id}: ${stats.candidates[id]} candidates after excluding ${Object.entries(reasons)
+          .sort(([a], [b]) => (a < b ? -1 : 1))
+          .map(([reason, count]) => `${count} ${reason}`)
+          .join(', ')}`,
+    )
+    .join('; ');
+}
+
+// ---------------------------------------------------------------------------------------------
+// Own inputs: `<bench dir>/inputs.json`
+
+const InputsManifest = z.strictObject({
+  schema: z.literal('odbench-inputs/1'),
+  /** Recorded as the corpus' `frozen` label. */
+  frozen: z.string().default('own inputs'),
+  seed: z.number().int().default(SEED),
+  /** Files under `<bench dir>/sources/`. */
+  sources: z
+    .array(
+      z.strictObject({
+        id: z.string().min(1),
+        path: z.string().min(1),
+        origin: z.string().default(''),
+        url: z.string().optional(),
+      }),
+    )
+    .min(1),
+  binaries: z
+    .array(
+      z.strictObject({
+        id: z.string().regex(/^[A-Za-z0-9._-]+$/),
+        /** Under `<bench dir>/inputs/`. */
+        path: z.string().min(1),
+        format: z.enum(['macho', 'elf', 'pe']),
+        arch: z.enum(['arm64', 'x86_64']),
+        opt: z.string().default('unknown'),
+        group: z.string().optional(),
+        origin: z.string().default(''),
+        /** Source ids defining the binary's functions (symbol-bearing binaries). */
+        sources: z.array(z.string()).default([]),
+        /** Stripped binary: id of its symbol-bearing twin (the same build before stripping). */
+        symbols: z.string().optional(),
+        /** Functions drawn for the full tier (default: every candidate) and, from those, the quick tier (default: all of them). */
+        full: z.number().int().positive().optional(),
+        quick: z.number().int().positive().optional(),
+      }),
+    )
+    .min(1),
+});
+
+/**
+ * Corpus of the binaries and sources an own-input manifest declares. A symbol-bearing binary's
+ * candidates follow the pinned corpus' rules over all of its sources; its full tier is a seeded draw
+ * of `full` of them (all by default) and its quick tier a draw of `quick` from the full tier (all by
+ * default). A stripped binary (`symbols`) takes its twin's functions at the same addresses, unnamed.
+ */
+async function buildOwnCorpus(manifestText: string): Promise<{ corpus: Corpus; summary: string }> {
+  const manifest = InputsManifest.parse(JSON.parse(manifestText));
+  const sources: CorpusSource[] = [];
+  const texts = new Map<string, string>();
+  for (const source of manifest.sources) {
+    if (texts.has(source.id)) throw new Error(`inputs.json: duplicate source ${source.id}`);
+    const bytes = await readFile(join(paths.sources(), source.path));
+    texts.set(source.id, bytes.toString('utf8'));
+    sources.push({
+      id: source.id,
+      path: source.path,
+      sha256: sha256(bytes),
+      origin: source.origin,
+      ...(source.url === undefined ? {} : { url: source.url }),
+    });
+  }
+  const ids = new Set<string>();
+  for (const entry of manifest.binaries) {
+    if (ids.has(entry.id)) throw new Error(`inputs.json: duplicate binary ${entry.id}`);
+    ids.add(entry.id);
+  }
+
+  const stats: BuildStats = { exclusions: {}, candidates: {} };
+  const picked = new Map<
+    string,
+    { binary: CorpusBinary; picks: readonly { fn: Candidate; file: string; quick: boolean }[] }
+  >();
+  for (const entry of manifest.binaries.filter((item) => item.symbols === undefined)) {
+    if (entry.sources.length === 0)
+      throw new Error(`inputs.json: ${entry.id} needs sources (or symbols, if it is stripped)`);
+    const own = entry.sources.map((id) => {
+      const text = texts.get(id);
+      if (text === undefined)
+        throw new Error(`inputs.json: ${entry.id} names unknown source ${id}`);
+      return { id, text };
+    });
+    const binary: CorpusBinary = {
+      id: entry.id,
+      path: entry.path,
+      sha256: await fileSha(join(paths.inputs(), entry.path)),
+      format: entry.format,
+      arch: entry.arch,
+      opt: entry.opt,
+      stripped: false,
+      group: entry.group ?? entry.id,
+      origin: entry.origin,
+      sources: entry.sources,
+    };
+    const { candidates } = await realBinary(binary, own, [], stats);
+    const full = draw(candidates, entry.full ?? candidates.length, mulberry32(manifest.seed));
+    const quick = new Set(
+      draw(full, entry.quick ?? full.length, mulberry32(manifest.seed)).map((fn) => fn.va),
+    );
+    picked.set(entry.id, {
+      binary,
+      picks: full.map((fn) => ({
+        fn,
+        file: definitions(own, fn.name).file!,
+        quick: quick.has(fn.va),
+      })),
+    });
+  }
+  for (const entry of manifest.binaries) {
+    if (entry.symbols === undefined) continue;
+    const twin = picked.get(entry.symbols);
+    if (!twin)
+      throw new Error(
+        `inputs.json: ${entry.id}: symbols must name a symbol-bearing binary of the manifest (got ${entry.symbols})`,
+      );
+    if (entry.sources.length > 0 || entry.full !== undefined || entry.quick !== undefined)
+      throw new Error(
+        `inputs.json: ${entry.id} takes sources and functions from ${entry.symbols}; drop sources/full/quick`,
+      );
+    picked.set(entry.id, {
+      binary: {
+        id: entry.id,
+        path: entry.path,
+        sha256: await fileSha(join(paths.inputs(), entry.path)),
+        format: entry.format,
+        arch: entry.arch,
+        opt: entry.opt,
+        stripped: true,
+        group: entry.group ?? twin.binary.group,
+        origin: entry.origin,
+        sources: twin.binary.sources,
+      },
+      picks: twin.picks,
+    });
+  }
+
+  const binaries = manifest.binaries.map((entry) => picked.get(entry.id)!.binary);
+  const functions = binaries.flatMap((binary) =>
+    picked
+      .get(binary.id)!
+      .picks.map(({ fn, file, quick }) =>
+        corpusFunction(
+          binary,
+          { ...fn, name: binary.stripped ? null : fn.name },
+          { file, name: fn.name },
+          tierOf(quick),
+        ),
+      ),
+  );
+  const method = [
+    `Built by scripts/bench/odbench/select.ts (\`bun run bench select\`; \`--check\` rebuilds and compares) from the own-input manifest inputs.json.`,
+    `Candidates (every symbol-bearing binary): ${CANDIDATE_RULE}`,
+    CODE_BYTES_RULE,
+    `Exclusion counts: ${exclusionText(stats)}.`,
+    `Per symbol-bearing binary: full = \`full\` candidates (default all), quick = \`quick\` of the full functions (default all); stripped binaries (\`symbols\`) take their twin's functions by address (name null).`,
+    `PRNG: mulberry32 seeded ${manifest.seed}; pools sorted by va before drawing (partial Fisher-Yates); one fresh generator per draw.`,
+    `Counts: ${tierCounts(binaries, functions, 'quick')}. ${tierCounts(binaries, functions, 'full')}.`,
+  ].join(' ');
+  return {
+    corpus: {
+      schema: 'odbench-corpus/1',
+      frozen: manifest.frozen,
+      method,
+      binaries,
+      sources,
+      functions,
+    },
+    summary: `${tierCounts(binaries, functions, 'quick')}\n${tierCounts(binaries, functions, 'full')}`,
+  };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -684,21 +914,27 @@ function diffSummary(committed: Corpus, rebuilt: Corpus): string {
   return lines.join('\n');
 }
 
-/** Writes `corpus.json`, or (check) verifies that rebuilding reproduces the committed file byte for byte. */
+/**
+ * Writes the active corpus (`corpusPath()`: the committed one, or `<bench dir>/corpus.json` built from
+ * `inputs.json`), or (check) verifies that rebuilding reproduces it byte for byte.
+ */
 export async function selectCorpus(opts: { check: boolean }): Promise<void> {
-  const { corpus, summary } = await buildCorpus();
+  const target = corpusPath();
+  const { corpus, summary } = existsSync(paths.manifest())
+    ? await buildOwnCorpus(await readFile(paths.manifest(), 'utf8'))
+    : await buildCorpus();
   const text = `${JSON.stringify(corpus, null, 2)}\n`;
   if (opts.check) {
-    const committed = await readFile(CORPUS_PATH, 'utf8');
+    const committed = await readFile(target, 'utf8');
     if (committed !== text) {
       const detail = diffSummary(JSON.parse(committed) as Corpus, corpus);
       throw new Error(
-        `corpus.json does not reproduce from the current inputs:\n${detail || 'formatting differs'}`,
+        `${target} does not reproduce from the current inputs:\n${detail || 'formatting differs'}`,
       );
     }
-    console.log(`corpus.json reproduces (${corpus.functions.length} functions)\n${summary}`);
+    console.log(`${target} reproduces (${corpus.functions.length} functions)\n${summary}`);
     return;
   }
-  await writeFile(CORPUS_PATH, text);
-  console.log(`wrote ${CORPUS_PATH}\n${summary}`);
+  await writeFile(target, text);
+  console.log(`wrote ${target}\n${summary}`);
 }

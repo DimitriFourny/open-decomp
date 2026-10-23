@@ -96,7 +96,7 @@ test(
 );
 
 test('the gate table names every heuristic and enables only measured ones', () => {
-  // Heuristics measured below 95% (docs/PERFORMANCE.md) must stay disabled.
+  // Heuristics measured below 95% (docs/BENCHMARK.md) must stay disabled.
   for (const name of [
     'opaque_word_formal',
     'caller_argument_pointer',

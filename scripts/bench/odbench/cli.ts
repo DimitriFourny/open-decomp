@@ -7,7 +7,7 @@ import { availableParallelism } from 'node:os';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { corpusSha256, loadCorpus, verifyInputs } from './corpus.js';
-import { DEFAULT_MODEL, defaultBackend } from './judge/backend.js';
+import { DEFAULT_MODEL } from './judge/backend.js';
 import { collectJudgments, runJudge } from './judge/tasks.js';
 import { runGhidraLane } from './lane-ghidra.js';
 import { runOdLane } from './lane-od.js';
@@ -26,7 +26,8 @@ const USAGE = `Usage: bench <command> [flags]
 
 Commands:
   inputs                       verify every corpus binary/source hash in the data store
-  select [--check]             rebuild corpus.json (--check: verify the committed one reproduces)
+  select [--check]             rebuild the corpus (committed corpus.json, or <data store>/corpus.json
+                               from <data store>/inputs.json); --check: verify it reproduces
   run od --label L [--repo PATH] [--tier quick|full] [--repeat N] [--jobs N] [--inference proven|likely] [--only BINARY,...]
                                [--no-open-job]
   run ghidra [--tier] [--install DIR] [--java-home DIR] [--force] [--only BINARY,...]
@@ -42,7 +43,7 @@ Commands:
         [--qa-samples N] [--comprehension-samples N] [--out DIR]
         run od, source and ghidra (cached), judge od-L/ghidra/source[/base], write the report
 
-Defaults: --tier quick, --model ${DEFAULT_MODEL}, --backend anthropic if ANTHROPIC_API_KEY is set else omp,
+Defaults: --tier quick, --model ${DEFAULT_MODEL}, --backend anthropic (needs ANTHROPIC_API_KEY),
 --concurrency 8, --qa-samples 3, --comprehension-samples 1, --repeat 1, --inference proven,
 --repo this checkout, --reference ghidra, --jobs ${DEFAULT_OD_JOBS} (request workers per binary: min(4, cores/2)).
 --no-open-job opens without the open-time job (T8).
@@ -293,7 +294,7 @@ function judgeOptions(
   tasks: readonly TaskName[],
   dryRun: boolean,
 ): JudgeOptions {
-  const backend = choice(flags, 'backend', ['omp', 'anthropic', 'cmd'], defaultBackend());
+  const backend = choice(flags, 'backend', ['omp', 'anthropic', 'cmd'], 'anthropic');
   const command = text(flags, 'command');
   if (backend === 'cmd' && !command) throw new UsageError('--backend cmd needs --command');
   return {

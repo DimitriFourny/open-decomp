@@ -4,7 +4,7 @@ import { glob } from 'node:fs/promises';
 
 /**
  * Integration tests spawn clang, python3, the source CLI, MCP servers or real child
- * processes, extract evidence tarballs, or wait on long real timers. Everything else is a
+ * processes, or wait on long real timers. Everything else is a
  * unit test; a new `*.test.ts` file is a unit test unless it is listed here.
  */
 const INTEGRATION = [
@@ -24,8 +24,6 @@ const INTEGRATION = [
   'test/reconstruction/recursive-result-source.test.ts',
   'test/reconstruction/source-names-executable.test.ts',
   'test/reconstruction/source-names.test.ts',
-  'test/reconstruction/sqlite-cell-constants.test.ts',
-  'test/reconstruction/sqlite-interfaces.test.ts',
   'test/service/analysis/caller-result-use.test.ts',
   'test/service/analysis/native-summary.test.ts',
   'test/service/analysis/request-determinism.test.ts',

@@ -257,7 +257,7 @@ Use hexadecimal `offset`, length at most 524,288 bytes, and the returned next UR
 
 Minimum output budget is 1,024 bytes. Defaults use conservative unknown calls, bounded indirect-target recovery, evidence included, C-like output and two-space indentation. Raising a budget is not proof of completeness and does not silently extend already-published partial function ranges. Full analysis artifacts are limited to 16 MiB. Image storage separately bounds individual records at 16 MiB, aggregate encoded metadata at 64 MiB and facts at one million; these are serialized-data bounds, **not process-memory ceilings**.
 
-Local stdio frames/wrappers are capped at 2 MiB, pending requests and pending output messages at eight each, request string IDs at 1,024 UTF-8 bytes. Drain replies; a write stalled for 30 seconds closes the connection. Larger non-analysis delivery is an error, not silent truncation. HTTP has its own bounded connection/request/work lanes and deadlines documented in [REMOTE.md](REMOTE.md), while preserving the tool/resource delivery ceiling. Work/deadline/queue limits and artifact delivery limits are separate. [Performance evidence](PERFORMANCE.md) includes real partial imports, failed limit probes and observed worker RSS; do not extrapolate small-fixture latency or file size into a large-input SLA.
+Local stdio frames/wrappers are capped at 2 MiB, pending requests and pending output messages at eight each, request string IDs at 1,024 UTF-8 bytes. Drain replies; a write stalled for 30 seconds closes the connection. Larger non-analysis delivery is an error, not silent truncation. HTTP has its own bounded connection/request/work lanes and deadlines documented in [REMOTE.md](REMOTE.md), while preserving the tool/resource delivery ceiling. Work/deadline/queue limits and artifact delivery limits are separate. Do not extrapolate small-fixture latency or file size into a large-input SLA.
 
 Recognition, lifting, ABI, analysis and reconstruction report **separate coverage**:
 
@@ -299,7 +299,6 @@ These commands require the source repository and development dependencies. They 
 
 ```sh
 bun install --frozen-lockfile
-node --import tsx scripts/bench/fetch-evidence.ts --from "$EVIDENCE_BACKUP" --only baseline-2026-10-17.tar.gz
 bun run check
 node dist/scripts/release-acceptance.js
 bun run smoke:mcp
@@ -320,11 +319,9 @@ Optional paths restrict both stages to those files or directories; without paths
 
 `.prettierrc.json` uses two-space indentation, single quotes, semicolons, trailing commas and a 100-column print width. Both stages respect `.gitignore` and `.prettierignore`, excluding the Bun lockfile, vendored code, license snapshots, fixture corpora and hash-bound fixture generation recipes. Prettier-aware editors use the same local dependency and configuration; run the formatting command to apply the method-spacing rule too.
 
-`bun run check` gates the whole tree: typecheck, `format:check` (type-aware `typescript-eslint` recommended rules including `no-floating-promises`, then Prettier), `test:unit`, `test:integration` and build. `bun run lint` runs ESLint alone; `bun run test` runs both test suites. Integration tests spawn clang, python3, the source CLI or MCP servers, extract tarballs or use real timers; they skip with an explicit reason when `/usr/bin/clang` or `python3` is unavailable. The list of integration files is in `scripts/test.ts`; any other `*.test.ts` is a unit test.
+`bun run check` gates the whole tree: typecheck, `format:check` (type-aware `typescript-eslint` recommended rules including `no-floating-promises`, then Prettier), `test:unit`, `test:integration` and build. `bun run lint` runs ESLint alone; `bun run test` runs both test suites. Integration tests spawn clang, python3, the source CLI or MCP servers or use real timers; they skip with an explicit reason when `/usr/bin/clang` or `python3` is unavailable. The list of integration files is in `scripts/test.ts`; any other `*.test.ts` is a unit test.
 
-Retained benchmark archives are not in git. `scripts/bench/evidence-assets.json` pins their sizes and SHA256 hashes. The canonical store is `<repo>/.local/evidence/` (gitignored, so back it up yourself), preserving original repo-relative paths; `$OPEN_DECOMP_EVIDENCE_DIR` overrides the destination/resolver store. The fetch command above populates it from another copy of the archives: exactly one of `--from DIR` or `--url-base URL` (a published mirror) is required, and `--only NAME` selects one archive. No public mirror is currently configured. The SQLite interfaces regression explicitly skips with the fetch command when its baseline is absent; fetch it before `check` to run that test. Corrupt evidence fails rather than skips. See [evidence archive setup](PERFORMANCE.md#evidence-archive-setup).
-
-`tsconfig.build.json` compiles `src`, vendored a64js and only the drivers that run from `dist` (`smoke`, `mcp-smoke`, `release-acceptance`, and the `pipeline`, `resources` and `incremental-controlled` benchmarks); other scripts and tests run from source with `node --import tsx`.
+`tsconfig.build.json` compiles `src`, vendored a64js and only the drivers that run from `dist` (`smoke`, `mcp-smoke`, `release-acceptance`); other scripts and tests run from source with `node --import tsx`.
 
 Output fingerprint guard: `test/service/output-fingerprint.test.ts` pins a hash of the canonical expanded emission of a fixed fixture/function/dialect set against the analysis identity (versions). If emitted output changes while the identity does not, it fails: bump `src/service/analysis/versions.ts` (and the emitter version when presentation changed) and regenerate with `bun run fingerprints`.
 
@@ -339,4 +336,4 @@ Packaging invokes the existing build after cleaning only declared generated `dis
 
 Earlier npm-built archives require their matching historical verifier; their manifests are not compatibility inputs for the current Bun release verifier.
 
-For measured benchmark reproduction and reviewed external input setup, follow [PERFORMANCE.md](PERFORMANCE.md). The runtime does not fetch benchmark inputs, raw Arm references, symbol servers or target-selected URLs. Preserve manifests, host/runtime details, typed failures and partial states alongside successful measurements.
+To run the benchmark on your own inputs, follow [BENCHMARK.md](BENCHMARK.md). The runtime does not fetch benchmark inputs, raw Arm references, symbol servers or target-selected URLs. Preserve manifests, host/runtime details, typed failures and partial states alongside successful measurements.

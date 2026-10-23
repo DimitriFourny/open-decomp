@@ -89,7 +89,7 @@ Demangling is bounded local display decoration. Neither a demangled name nor the
 
 [FIXTURES.md](FIXTURES.md), the source checkout's `fixtures/manifest.json` and the Windows ABI fixture's `evidence.json` bind original source, recipes, compiler/linker versions, output hashes and independent inspection. Those corpus inputs are acceptance assets supplied explicitly to developer drivers, not installed runtime dependencies; the selected application artifact includes their documentation/license, not the fixture binaries. Compiler-output validation/native trusted-fixture execution and analysis-host acceptance are different evidence events.
 
-Compiler/linker tools, system SDKs/libraries, sibling source checkouts, private inputs, external benchmark binaries and local VM disks/media are not redistributed in this artifact. The fixture license grants no rights in them. Benchmark download references and upstream statements in [PERFORMANCE.md](PERFORMANCE.md) are provenance for separate developer setup, not independent clearance of every linked runtime component or permission to bundle those inputs.
+Compiler/linker tools, system SDKs/libraries, sibling source checkouts, private inputs, external benchmark binaries and local VM disks/media are not redistributed in this artifact. The fixture license grants no rights in them. Benchmark input origins in [BENCHMARK.md](BENCHMARK.md) are provenance for separate developer setup, not independent clearance of every linked runtime component or permission to bundle those inputs.
 
 ## Maintaining these notices
 

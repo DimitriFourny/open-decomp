@@ -108,7 +108,7 @@ undefined8 _fts5SentenceFinderAdd(long param_1,undefined4 param_2)
 
 Pure JavaScript keeps pace with Ghidra end to end: slower on the large SQLite binary, 2.7× faster on small ones, and first results in half the time because nothing waits for whole-program analysis. On the same 232 functions, a blind LLM judge preferred Open Decomp's listing to Ghidra's 180 times, Ghidra's 6 times, with 46 ties.
 
-<sub>odbench, 2026-10-23: Open Decomp `1239ec9` with 4 request workers; Ghidra 12.1.4 `analyzeHeadless` with default auto-analysis, its time including JVM start and analysis. One run on a 12-core Apple M6 under load. The corpus is a development set the decompiler was tuned against. Method and caveats: [performance](docs/PERFORMANCE.md#roadmap-4-round-result-2026-10-23).</sub>
+<sub>odbench, 2026-10-23: Open Decomp `1239ec9` with 4 request workers; Ghidra 12.1.4 `analyzeHeadless` with default auto-analysis, its time including JVM start and analysis. One run on a 12-core Apple M6 under load. The corpus is a development set the decompiler was tuned against. Method, caveats and how to run it on your own binaries: [benchmark](docs/BENCHMARK.md).</sub>
 
 ## Quick setup
 
@@ -145,7 +145,7 @@ Set defaults once (cache root, analysis cache, decompile/export language, view, 
 - [CLI, settings file, MCP setup and troubleshooting](docs/README.md)
 - [JavaScript / TypeScript API](docs/API.md)
 - [Remote MCP and security](docs/REMOTE.md)
-- [Core contracts](docs/CORE.md), [fixtures](docs/FIXTURES.md) and [performance](docs/PERFORMANCE.md)
+- [Core contracts](docs/CORE.md), [fixtures](docs/FIXTURES.md) and [benchmark](docs/BENCHMARK.md)
 - [Internals: architecture and algorithms](docs/internals/README.md)
 
 ## License

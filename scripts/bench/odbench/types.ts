@@ -4,11 +4,13 @@
  */
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const ODBENCH_DIR = dirname(fileURLToPath(import.meta.url));
-export const CORPUS_PATH = join(ODBENCH_DIR, 'corpus.json');
+/** The committed corpus of the pinned inputs. */
+const CORPUS_PATH = join(ODBENCH_DIR, 'corpus.json');
 
 export type Tier = 'quick' | 'full';
 export type SizeBucket = 'small' | 'medium' | 'large' | 'huge';
@@ -39,8 +41,8 @@ export interface CorpusBinary {
   readonly sha256: string;
   readonly format: 'macho' | 'elf' | 'pe';
   readonly arch: 'arm64' | 'x86_64';
-  /** `release` = vendor build with unknown exact flags. */
-  readonly opt: 'O0' | 'O2' | 'release';
+  /** `O0`, `O2`, … as built; `release` = vendor build with unknown exact flags. */
+  readonly opt: string;
   readonly stripped: boolean;
   /** Corpus group used for breakdowns: `sqlite`, `brotli`, `matrix`. */
   readonly group: string;
@@ -352,7 +354,17 @@ export function benchDir(): string {
 export const paths = {
   inputs: (): string => join(benchDir(), 'inputs'),
   sources: (): string => join(benchDir(), 'sources'),
+  /** Own-input manifest (`select.ts` `InputsManifest`); its presence makes the store's corpus the active one. */
+  manifest: (): string => join(benchDir(), 'inputs.json'),
   lane: (lane: string): string => join(benchDir(), 'lanes', lane),
   judgeCache: (): string => join(benchDir(), 'judge', 'cache'),
   reports: (): string => join(benchDir(), 'reports'),
 };
+
+/**
+ * The corpus every command reads and `bench select` writes: `<bench dir>/corpus.json` when the data
+ * store has an own-input manifest (`inputs.json`), else the committed corpus of the pinned inputs.
+ */
+export function corpusPath(): string {
+  return existsSync(paths.manifest()) ? join(benchDir(), 'corpus.json') : CORPUS_PATH;
+}
