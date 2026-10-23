@@ -1211,7 +1211,10 @@ function of the image (symbol or discovered; `function_entry`) prints as
 `(uintptr_t)name` with an `extern void name();` declaration of unknown prototype
 (`function_address("name")` in Python-like), a named data object as its address,
 and an immutable string literal added to a variable offset in a load/store address
-as `(uintptr_t)"create" + i`. Unnamed data addresses stay numbers.
+as `(uintptr_t)"create" + i`. Unnamed data addresses stay numbers. An integer call
+or tail argument whose value is such a constant prints the same way
+(`sqlite3_config(4, (uintptr_t)sqlite3MemSetDefault_defaultMethods)`), so a
+consumed argument store (`stack_argument_store`) never takes the only name away.
 
 Indexed read-only tables (`indexed_data_load`) print their contents as
 `static const uintN_t name[N] = {...}` (16 bytes per line, decimal below 2^32). `N`

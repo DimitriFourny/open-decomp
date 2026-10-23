@@ -928,3 +928,98 @@ for (const variant of ['closed', 'reread'] as const)
     const checked = emit(fixture.ir, fixture.extra, 'c-like', 'checked').emission;
     assert.ok(!checked.local_validation?.some((record) => record.rule === 'stack_argument_store'));
   });
+
+/** Darwin arm64 `printf("%lld", (long long)handler)` closed by its format
+ * rule: the anonymous argument is a constant equal to a function entry, stored
+ * to SP+0 (an open-arity call follows). With the store consumed, the argument
+ * names the function as an assignment would. */
+test('darwin-arm64: a consumed stack argument that is a function entry prints its name', () => {
+  const abi = darwinArm64Abi;
+  const x0 = location(abi, 0);
+  const direct = (value: bigint) => ({
+    kind: 'direct' as const,
+    address: { image_id: image, space: 'va' as const, value },
+  });
+  const b = builder('darwin-format-function-argument'),
+    entry = b.block('entry');
+  const sp = entry.readRegister(abi.stack_pointer);
+  const outgoing = entry.int('sub', sp, entry.constant(u64, 16n));
+  entry.writeRegister(abi.stack_pointer, outgoing);
+  entry.store(outgoing, entry.constant(u64, 0x1000n));
+  entry.writeRegister(x0, entry.constant(u64, 0x3000n));
+  entry.call(direct(0x2000n), [], [], abi.unknown_call_clobbers);
+  entry.call(direct(0x4000n), [], [], {
+    registers: [x0],
+    flags: [],
+    memory: 'unknown_read_write',
+  });
+  entry.writeRegister(abi.stack_pointer, sp);
+  entry.return([]);
+  const ir = constructSSA(b.finish(entry, [])).value as SSAForm;
+  const call = ir.blocks[0]!.instructions.find(
+    (node) =>
+      node.kind === 'call' &&
+      node.target.kind === 'direct' &&
+      node.target.address.value === 0x2000n,
+  )!;
+  const types = recoverTypes(ir, abi, createOperationContext(), {
+    image_id: image,
+    slice_id: slice,
+    revision: 0,
+  });
+  const signature = {
+    returns: { kind: 'integer' as const, bits: 32, signed: true },
+    parameters: [
+      { kind: 'pointer' as const },
+      { kind: 'integer' as const, bits: 64, signed: true },
+    ],
+    variadic: true,
+    fixed_parameter_count: 1,
+    argument_list_complete: true,
+  };
+  const source = {
+    abi,
+    callees: [],
+    addresses: [
+      {
+        address: { image_id: image, space: 'va' as const, value: 0x1000n },
+        name: '_handler',
+        source_name: 'handler',
+        function_entry: { self: false },
+      },
+    ],
+    call_argument_signatures: new Map([[call.id, signature]]),
+  };
+  for (const language of ['c-like', 'python-like'] as const) {
+    const { emission } = emit(ir, { types, source }, language);
+    assert.ok(
+      emission.local_validation?.some((record) => record.rule === 'stack_argument_store'),
+      emission.text,
+    );
+    assert.match(
+      emission.text,
+      language === 'c-like'
+        ? /sub_2000\(0x3000, \(uintptr_t\)handler\)/
+        : /sub_2000\(0x3000, (?:int64\()?function_address\("handler"\)/,
+      emission.text,
+    );
+    const observed = execute(
+      emission,
+      new Map([['handler', 0x1000n]]),
+      new Map(),
+      0n,
+      new Map(),
+      new Map(),
+      new Map([
+        ['sub_2000', () => 0n],
+        ['sub_4000', () => 0n],
+      ]),
+    );
+    assert.deepEqual(
+      (observed.source_calls ?? []).filter((item) => item.name === 'sub_2000'),
+      [{ name: 'sub_2000', arguments: [0x3000n, 0x1000n] }],
+      `${language}\n${emission.text}`,
+    );
+    assert.ok(!observed.events.includes('store'), emission.text);
+  }
+});
