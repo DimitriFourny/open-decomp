@@ -2,7 +2,7 @@ import { openBinary, BinaryOpenError, FunctionSelectionError } from '../api/inde
 import type { BinarySession, FunctionSelector } from '../api/index.js';
 import { caveats, distinctDiagnostics, entityIdSchema, sliceIdSchema } from '../core/index.js';
 import type { ToolResult, WireDiagnostic, WireJob } from '../core/index.js';
-import { exportBinary } from './export.js';
+import { exportBinary, exportJobs } from './export.js';
 import { inferenceSchema, languageSchema, loadSettings, viewSchema } from '../settings/index.js';
 import type { Settings } from '../settings/index.js';
 
@@ -262,7 +262,7 @@ function help(command: Command): void {
       command === 'functions'
         ? 'List every matching function; --name performs a case-insensitive substring search.\nJSON result is {pages:[...]} with the original schema envelope for each page.'
         : command === 'export'
-          ? 'Decompile every function in one process into a directory an agent can grep:\n  OUT/functions/NAME@0xADDR.c|.py  header comment + the pseudocode `decompile` prints\n  OUT/functions/NAME@0xADDR.asm    compact disassembly where decompilation failed (reason in header)\n  OUT/index.tsv  OUT/strings.tsv  OUT/imports.tsv  OUT/exports.tsv  OUT/README.txt\n--out DIR      Output directory (created; generated files are overwritten on re-run).\n--language     c-like (default) or python-like.\n--inference    proven (default) or likely: likely also closes open argument lists by gated heuristics; each guess is marked `likely_arity(...)` and recorded as a guess inference.\n--jobs N       Parallel workers (default min(4, CPUs/2)); extra workers analyze private copies of the project.\n--name TEXT    Only functions whose name contains TEXT (case-insensitive).\nPartial and failed functions are recorded in index.tsv and do not change the exit status.'
+          ? 'Decompile every function in one process into a directory an agent can grep:\n  OUT/functions/NAME@0xADDR.c|.py  header comment + the pseudocode `decompile` prints\n  OUT/functions/NAME@0xADDR.asm    compact disassembly where decompilation failed (reason in header)\n  OUT/index.tsv  OUT/strings.tsv  OUT/imports.tsv  OUT/exports.tsv  OUT/README.txt\n--out DIR      Output directory (created; generated files are overwritten on re-run).\n--language     c-like (default) or python-like.\n--inference    proven (default) or likely: likely also closes open argument lists by gated heuristics; each guess is marked `likely_arity(...)` and recorded as a guess inference.\n--jobs N       Request workers decompiling in parallel over one shared read-only snapshot of the project (default min(4, CPUs/2)); the files are identical for every N.\n--name TEXT    Only functions whose name contains TEXT (case-insensitive).\nPartial and failed functions are recorded in index.tsv and do not change the exit status.'
           : command === 'decompile'
             ? 'Decompile one exact, unambiguous function name, entity ID or address.\nText stdout contains only pseudocode; JSON preserves the result envelope.\n--inference proven|likely  proven (default) closes only established interfaces; likely also closes open argument lists by gated heuristics (each guess is marked `likely_arity(...)` and recorded as a guess inference; may be wrong).'
             : 'Print the image-wide merged structure types as C declarations (the names decompile uses).\nAnalyzes function bodies within the default budget; a partial result exits 2.'
@@ -385,6 +385,9 @@ export async function runAnalysisCli(args: readonly string[]): Promise<void> {
     }
   };
   let code = 0;
+  // An export decompiles in parallel over the session's request workers.
+  const exportWorkers =
+    parsed.command === 'export' ? exportJobs(parsed.jobs ?? settings.export.jobs ?? undefined) : 1;
   try {
     session = await openBinary(parsed.binary, {
       ...(cachePath === undefined ? {} : { cachePath }),
@@ -392,6 +395,7 @@ export async function runAnalysisCli(args: readonly string[]): Promise<void> {
       ...(analysisCache ? {} : { analysisCache: false }),
       openJob: parsed.noOpenJob ? false : {},
       ...(parsed.unitStoreBytes === undefined ? {} : { unitStoreBytes: parsed.unitStoreBytes }),
+      ...(exportWorkers > 1 ? { requestWorkers: exportWorkers } : {}),
       signal: controller.signal,
       onProgress,
     });
@@ -422,11 +426,8 @@ export async function runAnalysisCli(args: readonly string[]): Promise<void> {
           out: parsed.out!,
           language: parsed.emitter ?? settings.export.language,
           inference: parsed.inference ?? settings.decompile.inference,
-          jobs: parsed.jobs ?? settings.export.jobs ?? undefined,
-          sliceId: parsed.sliceId,
+          jobs: exportWorkers,
           name: parsed.name,
-          analysisCache,
-          unitStoreBytes: parsed.unitStoreBytes,
         },
         controller.signal,
         (message) => process.stderr.write(`${terminal(message)}\n`),

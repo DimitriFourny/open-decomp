@@ -195,13 +195,20 @@ test(
       0,
     );
     const baseline = await snapshot(serial);
-    assert.equal(
-      (await run(['export', fixture, '--out', parallel, '--cache', cache, '--jobs', '3'])).code,
-      0,
-    );
+    // A fresh cache: every function is analysed again, now by four request workers.
+    const parallelRun = await run([
+      'export',
+      fixture,
+      '--out',
+      parallel,
+      '--cache',
+      join(root, 'cache4'),
+      '--jobs',
+      '4',
+    ]);
+    assert.equal(parallelRun.code, 0);
+    assert.match(parallelRun.stderr, /, 4 workers/);
     assert.deepEqual(await snapshot(parallel), baseline);
-    // Worker copies live under the cache root only while exporting.
-    assert.ok((await readdir(cache)).every((entry) => !entry.startsWith('.export-')));
 
     // Re-running over its own output (plus stale and foreign files) restores the same tree.
     await writeFile(join(serial, 'functions', 'stale@0xdead.c'), 'old');

@@ -77,7 +77,10 @@ export function reconstructFunctionGraph(
     indexes.set(image, prepared);
   }
   const cached = cache.get(key);
-  if (cached) {
+  // Reuse charges the build's work in one charge. Where that charge does not fit the
+  // remaining work, a fresh build would charge part of it before failing; rebuild, so the
+  // charge is the same whether this process built the graph before or not.
+  if (cached && cached.work <= (context.remainingWork?.() ?? Infinity)) {
     context.checkpoint(cached.work);
     // Refresh the bounded graph LRU without retaining its image bytes.
     cache.delete(key);
