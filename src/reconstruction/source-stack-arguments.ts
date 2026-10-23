@@ -15,6 +15,7 @@ import type { LocalValidationSession } from './local-validation.js';
 import type { BoundaryProjection, TailProjection } from './model.js';
 
 type Store = Extract<Instruction, { kind: 'store' }>;
+type Call = Extract<Instruction, { kind: 'call' }>;
 
 export interface StackArgumentPart {
   readonly value: Value;
@@ -296,6 +297,8 @@ export interface OutgoingStackSlots {
    * lies wholly below the lowest escaped offset and rests on
    * `escaped_frame_floor` (`requireEscapedFrameFloor`). */
   readonly escapes: readonly string[];
+  /** The body's calls in block order, collected by the eligibility scan. */
+  readonly calls: readonly Call[];
   /** The stores of the `extent` bytes at `offset` above `call`'s SP, when they
    * are its only observer; null when any condition fails. */
   readonly slot: (
@@ -469,7 +472,8 @@ export function createOutgoingStackSlots(
       ) ?? false
     );
   };
-  const stores = new Map<string, Store>();
+  const stores = new Map<string, Store>(),
+    bodyCalls: Call[] = [];
   for (const block of blocks.values()) {
     for (const node of block.statements) {
       context.checkpoint(1);
@@ -481,6 +485,7 @@ export function createOutgoingStackSlots(
         !bounded(node.id, node.register_inputs)
       )
         return null;
+      else if (node.kind === 'call') bodyCalls.push(node);
     }
     if (block.control.kind === 'indirect' && block.control.tail_call && !bounded(block.control.id))
       return null;
@@ -770,6 +775,7 @@ export function createOutgoingStackSlots(
   return {
     consumed,
     escapes,
+    calls: bodyCalls,
     slot(call, offset, extent, calleeOwned = false) {
       let skipped = false;
       const through =
