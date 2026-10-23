@@ -8054,6 +8054,19 @@ export class Renderer {
       )
     )
       for (const site of rematerialized) candidates.delete(site.node.result.id);
+    const reloads = [...candidates.values()].filter((site) => site.nonfaulting);
+    if (
+      reloads.length &&
+      !this.localValidation.presentation(
+        'nonfaulting_load_order',
+        subject,
+        'a nonvolatile load of an address range that a printed nonvolatile access of the same structural address and at least its width reached (through its block and single-predecessor blocks, with only assignments, register reads and nonvolatile loads/stores in between) expands at its unconditional same-block single use across independent nonvolatile loads, never across a store, call, unknown effect, fence or volatile access; it cannot fault, so the faults of the loads it crosses keep their order, and loads change no memory',
+        reloads.map(({ node }) => node.id),
+      )
+    ) {
+      calls = new Map();
+      for (const site of reloads) candidates.delete(site.node.result.id);
+    }
     if (
       candidates.size &&
       this.localValidation.presentation(
@@ -8063,6 +8076,12 @@ export class Renderer {
         [...candidates.values()].map(({ node }) => node.id),
       )
     ) {
+      if (reloads.some((site) => candidates.has(site.node.result.id)))
+        this.localValidation.requireAbi(
+          'nonfaulting_reload',
+          [...new Set(reloads.map(({ anchor }) => anchor))].slice(0, 64),
+          'A successful access to [a, a+w) implies that a later read of it does not fault, absent an intervening call, unknown effect or volatile access: no other agent unmaps, protects or remaps those bytes in between. Each moved reload keeps its address, width and value; the checked view keeps every load at its original position.',
+        );
       for (const [id, site] of candidates) {
         this.inlined.set(id, site);
         this.inline.add(id);
