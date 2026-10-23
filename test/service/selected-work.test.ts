@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { createOperationContext } from '../../src/core/index.js';
 import type { LoadedImage } from '../../src/core/index.js';
 import { discoverFunctions } from '../../src/analysis/discovery/index.js';
@@ -199,5 +199,78 @@ test(
         running_jobs: 'wait',
       });
     }
+  },
+);
+
+test(
+  'a body whose tail reserve exceeds the remaining work still returns text, and the skipped stages are named',
+  { timeout: 120_000 },
+  async (t) => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'open-decomp-tail-reserve-'))),
+      fixtures = resolve('fixtures/bin');
+    const service = await QueryService.create({
+      authorized_roots: [root, fixtures],
+      max_workers: 1,
+      // Every request computes: the repeated budget below is not a cache hit.
+      analysis_cache: false,
+    });
+    t.after(async () => {
+      await service.close('cancel');
+      await rm(root, { recursive: true, force: true });
+    });
+    const opened = await service.execute('project_open', {
+      wait: true,
+      source: {
+        kind: 'import',
+        input_path: join(fixtures, 'macho-arm64-symbols'),
+        project_path: join(root, 'project'),
+      },
+    });
+    assert.ok('data' in opened && opened.data.image, JSON.stringify(opened));
+    const image = opened.data.image;
+    const scope = { project_id: opened.project_id!, revision: opened.revision! };
+    // fixture_check calls every other fixture function: optional callee summaries
+    // and image types compete with its tail for the request's work.
+    const address = '0x100000714';
+    const found = await service.execute('functions_find', {
+      ...scope,
+      image_id: image.id,
+      address: { image_id: image.id, space: 'va', value: address },
+    });
+    assert.ok('data' in found);
+    const fn = found.data.items.find((item) => item.entry.value === address);
+    assert.ok(fn);
+    const decompile = (work?: number) =>
+      service.execute('function_decompile', {
+        ...scope,
+        function_id: fn.id,
+        wait: true,
+        // Inline delivery: the text itself, not an artifact reference.
+        budget: { output_bytes: 8 << 20, ...(work === undefined ? {} : { work }) },
+      });
+    const full = await decompile();
+    assert.ok('data' in full && full.data.delivery === 'inline' && full.data.work);
+    // Only the tail reserve leaves a zero pool: half of any positive remainder is not.
+    const skippedStage = /^Native dependency worklist stopped at its work sub-budget \(0\)/;
+    assert.ok(!full.diagnostics.some((item) => skippedStage.test(item.message)));
+    const skipped: { work: number; text: string }[] = [];
+    for (let step = 8; step < 20; step++) {
+      const work = Math.floor((full.data.work * step) / 20);
+      const result = await decompile(work);
+      if (!('data' in result)) continue;
+      assert.equal(result.data.delivery, 'inline');
+      if (!result.diagnostics.some((item) => skippedStage.test(item.message))) continue;
+      // The optional stage had nothing above the tail reserve: it stopped at its
+      // first charge with its own reason, and the request is partial for budget.
+      assert.equal(result.state, 'partial');
+      assert.equal(result.reason, 'budget');
+      assert.ok(result.data.emission.text.includes('fixture_arithmetic'));
+      skipped.push({ work, text: result.data.emission.text });
+    }
+    assert.ok(skipped.length > 0, 'some budget leaves no pool above the tail reserve');
+    // A function of the request's own counters: the same budget, the same text.
+    const again = await decompile(skipped[0]!.work);
+    assert.ok('data' in again && again.data.delivery === 'inline');
+    assert.equal(again.data.emission.text, skipped[0]!.text);
   },
 );

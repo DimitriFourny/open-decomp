@@ -22,8 +22,10 @@ import {
 import { emitC } from '../../../src/emitters/c/index.js';
 import { emitPythonLike } from '../../../src/emitters/python-like/index.js';
 import type { EmissionResult } from '../../../src/emitters/model.js';
-import { image, provenance, slice } from '../../ir/support.js';
-import { execute, type SourceCallOracle } from './support.js';
+import { builder, image, provenance, slice } from '../../ir/support.js';
+import { emit as emitSource, emittedFormals, execute, type SourceCallOracle } from './support.js';
+import { constructSSA } from '../../../src/analysis/ssa/index.js';
+import { sysvAMD64Abi } from '../../../src/abi/sysv-amd64/index.js';
 import { DarwinArm64Abi } from '../../../src/abi/darwin-arm64/index.js';
 
 const i8 = integer(8),
@@ -163,6 +165,52 @@ function countedLoop(guarded = true): {
   );
   exit.return(exit.parameters);
   return { input: b.finish(entry, [i32]), count, base, acc, next };
+}
+
+/** `-O0` counted loop over frame-private stack slots: `for (i = 0; i < n; i++)
+ * acc += i + 1`, with `i` and `acc` kept in memory and reloaded at every use.
+ * `again` adds a second store to `i` inside the loop body. */
+function slotLoop(again: boolean): { input: SSAForm; abi: typeof sysvAMD64Abi } {
+  const abi = sysvAMD64Abi,
+    layout = abi.classifyCall({
+      returns: { kind: 'integer', bits: 32, signed: true },
+      parameters: [{ kind: 'integer', bits: 32, signed: true }],
+      variadic: false,
+      fixed_parameter_count: 1,
+    }),
+    location = layout.parameters[0]!.locations[0]!;
+  assert.equal(location.kind, 'register');
+  if (location.kind !== 'register') throw new Error('register argument required');
+  const b = builder(`source-control-slot-loop-${again}`),
+    entry = b.block('entry'),
+    head = b.block('head'),
+    body = b.block('body'),
+    latch = b.block('latch'),
+    done = b.block('done');
+  const n = entry.readRegister({
+    ...location.register,
+    id: `${location.register.root}:0:32`,
+    width_bits: 32,
+    write_rule: 'preserve_other_bits',
+  });
+  const stack = entry.readRegister(abi.stack_pointer),
+    index = entry.int('sub', stack, entry.constant(i64, 16n)),
+    sum = entry.int('sub', stack, entry.constant(i64, 24n));
+  entry.store(sum, entry.constant(i32, 0n));
+  entry.store(index, entry.constant(i32, 0n));
+  entry.jump(head);
+  head.branch(head.compare('slt', head.load(i32, index), n), head.edge(body), head.edge(done));
+  const current = body.load(i32, index);
+  body.store(
+    sum,
+    body.int('add', body.load(i32, sum), body.int('add', current, body.constant(i32, 1n))),
+  );
+  if (again) body.store(index, body.int('add', current, body.constant(i32, 1n)));
+  body.jump(latch);
+  latch.store(index, latch.int('add', latch.load(i32, index), latch.constant(i32, 1n)));
+  latch.jump(head);
+  done.return([done.load(i32, sum)]);
+  return { input: constructSSA(b.finish(entry, [i32])).value as SSAForm, abi };
 }
 
 for (const language of ['c-like', 'python-like'] as const)
@@ -2354,4 +2402,27 @@ for (const language of ['c-like', 'python-like'] as const)
           );
       }
     });
+    for (const again of [false, true])
+      test(`an -O0 loop over a stack-slot induction variable ${again ? 'with a second store in the loop stays while' : 'prints as for'}`, () => {
+        const { input, abi } = slotLoop(again);
+        const output = emitSource(input, { source: { abi, callees: [], addresses: [] } }, language);
+        const text = output.emission.text;
+        assert.ok(rules(output).includes('private_stack_promotion'), text);
+        assert.equal(rules(output).includes('for_loop'), c && !again, text);
+        assert.equal(/\bfor\b/.test(text), c && !again, text);
+        if (!c || again) assert.match(text, c ? /\bwhile \(/ : /\bwhile /, text);
+        else assert.doesNotMatch(text, /\bwhile\b/, text);
+        const formals = emittedFormals(output.emission);
+        assert.equal(formals.length, 1);
+        for (const n of [0n, 1n, 3n]) {
+          // The second store skips every other index.
+          let expected = 0n;
+          for (let i = 0n; i < n; i += again ? 2n : 1n) expected += i + 1n;
+          assert.deepEqual(
+            execute(output.emission, new Map([[formals[0]!.statement_id, n]])).values,
+            [expected],
+            `${n}: ${text}`,
+          );
+        }
+      });
   });
