@@ -74,6 +74,8 @@ Decompiling prepares many callee bodies ([calls-abi](calls-abi.md#algorithm)), t
 
 A unit that is not kept leaves its preparation **prefix** in a second in-process LRU of the same tier (`prefixes`, bounded at 64k size units apart from the unit LRU, never persisted): the lift segment (lift with environment writers, `boundIR`, entry register prefix) and, when SSA completed within its limit, the SSA segment (construct, simplify, verify). Each segment carries the work it charged and its traced reads; the rules for replaying them are in §5 (prefix reuse). The graph is not part of the prefix: it is loaded on every preparation (see §5). The two LRUs are bounded apart on purpose: when prefixes shared the unit LRU they evicted retained units, which later requests then took from their persisted rows or prepared again, and 24 SQLite functions charged different work than the baseline (texts unchanged; measured on one lane run).
 
+A persisted row is checked (trace verification, index creation) under the cancellation and deadline of the request that loads it (`NativeUnitPersistence.load(fn, context)`), never of the request that created the tier: that request may be cancelled or past its 30 s deadline by then, which once failed later requests with `Operation deadline exceeded` once prefix entries had evicted their units from the process tier (SQLite `isDate`, `fts3auxDisconnectMethod`).
+
 ### 5. Budgets and deterministic work accounting
 
 - Work is a count, not time; one cumulative counter, never reset by a pass. The deadline is the only wall-clock limit (sampled every 32 charges).

@@ -1318,7 +1318,7 @@ export function nativeUnitLoader(
     // A unit this process has not prepared may be one an earlier process persisted. It is
     // used exactly as if it had been prepared here, so the checks below are the same.
     if (!entry && persistence) {
-      entry = persistence.load(fn);
+      entry = persistence.load(fn, boundedContext);
       if (entry && !retain(fn.id, entry)) entry = undefined;
     }
     const allowance = boundedContext.remainingWork?.();
