@@ -851,22 +851,6 @@ export function loopCopyRotations(
       topTested(header, leave.transfer.target)
     )
       return;
-    const inside = blocksOf(loop.body);
-    // The repeat edge is the only edge back, and every other edge falls into
-    // the loop (as bottom tests require: `continue` would reach the test).
-    if (
-      leave.transfer.target === loop.header ||
-      inside.some((block) => block.id === leave.transfer.target) ||
-      inside.some((block) =>
-        controlTransfers(block.control).some(
-          (transfer) => transfer !== again.transfer && transfer.target === loop.header,
-        ),
-      ) ||
-      entries(loop.header).some(
-        ({ transfer, action }) => transfer !== again.transfer && action !== 'fallthrough',
-      )
-    )
-      return;
     const exit = liveness.live(leave.transfer.target),
       entry = liveness.live(loop.header);
     if (!exit || !entry) return;
@@ -879,6 +863,8 @@ export function loopCopyRotations(
       context.checkpoint(1);
       const index = liveness.index.get(phi.id);
       if (index === undefined || program.inline.has(phi.id)) continue;
+      // Copies dead on exit move before the test; one the test reads keeps
+      // the loop from rotating (only L2's restatement could print it).
       if (!liveness.has(exit, index) && !exitReads.has(index)) {
         if (testReads.has(index)) return;
         continue;
@@ -912,6 +898,23 @@ export function loopCopyRotations(
         },
       });
     }
+    if (!found.length) return;
+    const inside = blocksOf(loop.body);
+    // The repeat edge is the only edge back, and every other edge falls into
+    // the loop (as bottom tests require: `continue` would reach the test).
+    if (
+      leave.transfer.target === loop.header ||
+      inside.some((block) => block.id === leave.transfer.target) ||
+      inside.some((block) =>
+        controlTransfers(block.control).some(
+          (transfer) => transfer !== again.transfer && transfer.target === loop.header,
+        ),
+      ) ||
+      entries(loop.header).some(
+        ({ transfer, action }) => transfer !== again.transfer && action !== 'fallthrough',
+      )
+    )
+      return;
     result.push(...found);
   };
   const visit = (region: Region): void => {
