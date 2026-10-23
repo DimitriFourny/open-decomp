@@ -1096,6 +1096,21 @@ function nativeSelectedNodes(ir: SSAForm): number {
   );
 }
 
+/** Work per selected IR node reserved for the mandatory tail (reconstruct, the text
+ * render and its validation, publication) before an optional stage sizes its pool.
+ * The tail measured 232–250 per node on the largest corpus bodies with a full render
+ * (`sqlite3Select`, `sqlite3Pragma`); a generous margin above that. */
+const TAIL_WORK_PER_NODE = 300;
+
+/** An optional stage's pool: its `share` of the request's remaining work, never
+ * reaching into the tail reserve of the selected body. A share that already leaves the
+ * reserve is unchanged; with nothing above the reserve the pool is 0 and the stage stops
+ * at its first charge with its own explicit sub-budget reason. A function of the
+ * request's own counters only, so budgets stay deterministic. */
+export function optionalWorkPool(ir: SSAForm, remaining: number, share: number): number {
+  return Math.min(share, Math.max(0, remaining - TAIL_WORK_PER_NODE * nativeSelectedNodes(ir)));
+}
+
 /** Dependency capacity left after the selected body; part of the cache identity. */
 function nativeCapacity(input: SourceFactsInput, context: OperationContext): NativeSummaryCapacity {
   return {
@@ -1536,7 +1551,8 @@ function observeNativeUnit(
 }
 
 /** Optional native dependencies share at most half the actual work remaining
- * after selected-body analysis. Their local limits retain explicit metadata;
+ * after selected-body analysis, and never the selected body's tail reserve
+ * (`optionalWorkPool`). Their local limits retain explicit metadata;
  * outer cancellation/deadline/work and selected-path invariants still propagate. */
 export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
   const { scope, components, image, revision } = input,
@@ -1577,7 +1593,8 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
   for (const dependency of dependencies) targets.set(dependency.target.id, dependency.target);
   const selectedNodes = nativeSelectedNodes(input.ir);
   const capacity = nativeCapacity(input, context);
-  const summaryWorkLimit = Math.floor((context.remainingWork?.() ?? 0) / 2);
+  const remaining = context.remainingWork?.() ?? 0;
+  const summaryWorkLimit = optionalWorkPool(input.ir, remaining, Math.floor(remaining / 2));
   let summaryWork = 0;
   const summaryContext: OperationContext = {
     ...context,
