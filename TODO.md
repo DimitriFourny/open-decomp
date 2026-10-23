@@ -958,7 +958,7 @@ Files that several items touch:
 
 ### L4: Rotate loop-carried copies so bottom tests become do-while
 
-- [ ] **Problem.** 34 loops are do-while candidates rejected only because the repeat copies are live on exit (`source-control.ts:1529`). 29 loops end with "test, then pure var-to-var copies": `sqlite3BtreeOpen`, `pcache1RemoveFromHash`, `renameColumnFunc` ×4, `renameTableFunc` ×3, … Ghidra prints all of them as do-while, with the copy at the loop top.
+- [x] **Problem.** 34 loops are do-while candidates rejected only because the repeat copies are live on exit (`source-control.ts:1529`). 29 loops end with "test, then pure var-to-var copies": `sqlite3BtreeOpen`, `pcache1RemoveFromHash`, `renameColumnFunc` ×4, `renameTableFunc` ×3, … Ghidra prints all of them as do-while, with the copy at the loop top. _Done (`wt/rm4-l4`): lane `od-rm4-l4` vs `od-main-0914f06`: 9 texts change (`pcache1RemoveFromHash`, `sqlite3BtreeOpen`, `renameColumnFunc` ×4, `renameTableFunc` ×5, `fts3EvalTestExpr`, `fts5FlushSecureDelete`, `sqlite3session_delete`, Mach-O `adler32_z` `-O2` sym and stripped), every one losing `while (true)` loops for do-while: `while (true)` 204 → 188, `break;` 385 → 369, `do {` 199 → 215, gotos and `for` unchanged; states unchanged; checked view identical; `loop_copy_rotation`; near-limit work +74 (`isDate`, `sqlite3Fts3Incrmerge`), +19 (brotli `main`)._
   - **Root cause:** the header phi `x = φ(x0, y)` is resolved by a copy `x = y` on the repeat edge, after the test (`partitionVariables` `source-control.ts:448-461`, `edgeCopies` `:676-703`).
   - **Change:**
     - Only for loops whose bottom test is the sole repeat edge and whose only blocker is live-on-exit copies of a loop-defined `y`:
