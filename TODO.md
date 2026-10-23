@@ -217,7 +217,7 @@ Files that several items touch:
 
 ### C3: Always produce text within the unchanged 10M
 
-- [ ] **Problem.** Four functions fail with no text. Optional stages (callee summaries, image types, pointer evidence, goto search, provenance metadata) are sized as fractions of what remains, not against what the mandatory tail needs. Two output bounds turn finished text into a failure:
+- [x] **Problem.** Four functions fail with no text. Optional stages (callee summaries, image types, pointer evidence, goto search, provenance metadata) are sized as fractions of what remains, not against what the mandatory tail needs. Two output bounds turn finished text into a failure: _Done (C3): tail reserve 300/IR node on the summary pool and image types, text-first render below 450/render unit with a goto-search sub-allowance leaving 120/unit, catalog bounds publish text with an `evidence` omission. Lane: `sqlite3WhereCodeOneLoopStart` (8.34M) and `sqlite3_str_vappendf` (9.62M) get text, every other text and work count byte-identical, 233 → 235 with text; `sqlite3Select`/`sqlite3Pragma` still fail (their mandatory prefix plus reconstruct leaves < 1.1M for the render)._
   - the evidence catalog of 10,000 ids (`catalog.ts:36-62, 95-101`, `src/core/tools.ts:538`);
   - a cache-catalog type with more than 1,000 `evidence_ids` (`src/project/cache/index.ts:92`).
   - **Change:**
@@ -432,7 +432,7 @@ Files that several items touch:
 
 ### K4: String literals from tail-exit arguments and partly constant phis
 
-- [ ] **Problem.** 78 addresses of `__cstring` strings print as hex (71 non-empty) in 16 functions: brotli `main` 27, `isDate` 23, `codeOffset` `0x100153ba2` where Ghidra prints `"OFFSET"`. Ghidra spells 65 of the 71 as literals.
+- [x] **Problem.** 78 addresses of `__cstring` strings print as hex (71 non-empty) in 16 functions: brotli `main` 27, `isDate` 23, `codeOffset` `0x100153ba2` where Ghidra prints `"OFFSET"`. Ghidra spells 65 of the 71 as literals.
   - **Root cause:** a literal needs a `SourceAddress.string` fact, and only addresses in the candidate set of `sourceAddresses` (`source-facts.ts:663-902`) get one.
     - (a) Tail-exit register constants are never candidates. Only calls are (`:834-876`).
     - (b) The 32-bit-cell concat/phi rule drops every constant when any edge is non-constant (`:772-811`, `:789-790`).
@@ -449,6 +449,7 @@ Files that several items touch:
     - With `constantCandidates`, also `sqlite3_result_error_code` and brotli `main` [estimate].
     - Checked view: report any added `data_address(...)` wrappers.
   - **Expected effect:** comprehension and QA in `isDate`, brotli `main`, `codeOffset`, `sqlite3_result_error_code`.
+  - **Done (K4):** hex `__cstring` addresses over the lane texts 78 (16 functions) → 12 (7 functions: 7 are the empty string `0x10013bef4`, which prints a literal only where a character pointer is established, and 5 are the `/* 0x…: +N bytes */` markers of long brotli literals, not printed addresses). Changed texts: brotli `main` (11 literals), `isDate` (23), `codeOffset` (`"OFFSET"`), `parserDoubleLinkSelect`, `fts5UnicodeCreate`, `sqlite3_result_error_code` (4), `openStatTable`, `sessionRetryConstraints`, `sqlite3VdbeDisplayComment`, `sqlite3WhereExplainBloomFilter`, `generateSortTail`; three texts also name an unnamed data address (`sqlite3VdbeGetOp_dummy`, `aNanInfName`). Checked view identical on the acceptance functions. Work: brotli `main` 9.443M → 9.378M, `isDate` 8.925M → 8.975M.
 
 ### K5: Writable import slots are program storage; interior addresses are named after their symbol
 
@@ -771,7 +772,7 @@ Files that several items touch:
 
 ### E4: Choose signed or narrow local types by conversion cost
 
-- [ ] **Problem.** Locals are declared `uint32_t` 736 times and `int32_t` 8 times. The texts hold 397 signed tests such as `(int32_t)x >= 1`, 236 chains such as `(uint64_t)(int32_t)x`, and 80 `(uint32_t)valueN ==` on 64-bit locals that are only read low. Judges read `count` as unsigned or cite "machine-level sign-extension arithmetic".
+- [x] **Problem.** Locals are declared `uint32_t` 736 times and `int32_t` 8 times. The texts hold 397 signed tests such as `(int32_t)x >= 1`, 236 chains such as `(uint64_t)(int32_t)x`, and 80 `(uint32_t)valueN ==` on 64-bit locals that are only read low. Judges read `count` as unsigned or cite "machine-level sign-extension arithmetic".
   - **Root cause:** signed and narrow spellings exist only for formals (`signedConsumer`, `formal_low_slice`, `source-signature.ts:715-725, 829-888`). A local declared signed converts back at each use (`renderer.ts:1841-1842`).
   - **Change:**
     - A planner next to `planLocalTypes` (`src/emitters/source-local-types.ts`) for integer partitions of 8, 16 and 32 bits, plus 64 → low slice.
@@ -792,6 +793,7 @@ Files that several items touch:
     - `btreeOverwriteContent` has no `(int32_t)value0 <= arg3`.
     - No text where conversions increase. Checked view unchanged.
   - **Expected effect:** −0.75k to −1.2k tokens in about 55 functions [estimate].
+  - **Done (E4):** `planIntegerSpellings` + `local_integer_spelling`, C only; OD lane vs `od-main-ad6a967`: 43 texts change, −313 printed casts, none increases; `sqlite3DropTrigger` prints `int32_t count; … if (count >= 1)`; `btreeOverwriteContent` keeps `(int32_t)value0 <= arg3` (signed `value0` would print 2 conversions, `value0 - (uint32_t)arg3` and `(uint64_t)(uint32_t)value0`, against 1) and narrows its three call results; checked view and Python-like unchanged.
 
 ### E5: Fold the bitfield-move aliases (SXTB/SXTH/SXTW, SBFIZ/UBFIZ, SBFX)
 
@@ -854,7 +856,7 @@ Files that several items touch:
 
 ### P2: Struct bodies without pad members in the inline text
 
-- [ ] **Problem.** Struct bodies cost 7,200 tokens, and 482 of their 1,382 members (35%) are `uint8_t pad_0xOFF[N];`. Every real member name already carries its offset (`field_0x14`). Judges cite pads in 28 reasons.
+- [x] **Problem.** Struct bodies cost 7,200 tokens, and 482 of their 1,382 members (35%) are `uint8_t pad_0xOFF[N];`. Every real member name already carries its offset (`field_0x14`). Judges cite pads in 28 reasons.
   - **Root cause:** `structureBodies` (`renderer.ts:3369-3435`) emits a pad for every gap (`:3407`, `:3418`), because the same lines feed `emission.structures`/`types.h` (`:9350-9355`).
   - **Change:**
     - `structureBodies(compact)`: for `options.structures === 'inline'`, omit pads (`struct X { uint32_t field_0x4; opaque_1* field_0x28; };`). For `external` (export/`types.h`, `src/cli/export.ts:468-478`), keep today's text.
@@ -865,6 +867,7 @@ Files that several items touch:
   - **Tests:** `test/emitters/c/source-structs.test.ts` (inline vs external; pads in `emission.structures`); one test per dialect for `address->field_0x14` with a gap before it, with equal `execute()` results.
   - **Acceptance:** the 99 functions with bodies change. Everything else, including `types.h`, `emission.structures` and the checked view, is byte-identical.
   - **Expected effect:** −2,892 lexical tokens, geomean −0.024 (measured on texts).
+  - **Done (`wt/rm4-p2`).** 489 pads removed from 92 of the 99 body texts (the other 7 have no gap); lane diff against `od-main-ad6a967` is exactly the pad removal, −2,934 lexical tokens (`\w+|\S` tokenizer); coverage and checked view unchanged. One `compact_struct_members` record per function (cites one access node per structure) costs +33…+898 work (mean +180; `isDate` +612, `sqlite3Fts3Incrmerge` +642). Objective-C ivars (declared names carry no offset) keep their pad; a trailing stride pad is replaced by the `/* access stride N, not size */` comment. At the 256-record validation bound the record is refused and the body keeps its pads.
 
 ### P3: Header comment diet
 
@@ -935,7 +938,7 @@ Files that several items touch:
 
 ### L3: `for` loops over `-O0` promoted stack-slot induction variables
 
-- [ ] **Problem.** 8 `-O0` loops (`matrix_callback` ×3, `matrix_multi_exit` ×3, `matrix_variadic` PE/Mach-O) print `index = 0; while (index < n) { …; index = index + 1; }`. Ghidra prints `for`, and the judge cites "ghidra has a clean for-loop".
+- [x] **Problem.** 8 `-O0` loops (`matrix_callback` ×3, `matrix_multi_exit` ×3, `matrix_variadic` PE/Mach-O) print `index = 0; while (index < n) { …; index = index + 1; }`. Ghidra prints `for`, and the judge cites "ghidra has a clean for-loop".
   - **Root cause:** the step and init are `store`s to a promoted private local. `trailingStatement` accepts only `assign`/`load` (`renderer.ts:5644`), and `acceptStatementFor` identifies the variable by `step.result` (`:5587`).
   - **Change:** accept a trailing store into a promoted, non-escaped, non-punned local when:
     - the test reads a load of it;
@@ -947,6 +950,7 @@ Files that several items touch:
   - **Tests:** `source-control.test.ts`: an `-O0`-style IR executed for n = 0, 1, 3; negative: a second store in the loop.
   - **Acceptance:** those 8 texts print `for (index = 0; index < argN; index = index + 1)`. Nothing else changes.
   - **Depends on:** L1 (`acceptStatementFor`).
+  - **Done:** `od-rm4-l3` vs `od-main-07f4b12`: exactly the 8 acceptance texts change (`for (index = 0; index < argN; index = index + 1)`), nothing else; work deterministic, checked view byte-identical; `test/emitters/c/source-control.test.ts` executes the `-O0` slot loop for n = 0, 1, 3 in both dialects plus a second-store negative.
 
 ### L4: Rotate loop-carried copies so bottom tests become do-while
 
@@ -1062,7 +1066,7 @@ Files that several items touch:
 
 ### T7: Constant-factor bundle
 
-- [ ] **Change** (all four are output-neutral):
+- [x] **Change** (all four are output-neutral): _Done (`wt/rm4-t7`): parts 1-3 as specified; part 4 only for derived data. Lane `od-rm4-t7` and an `--only sqlite3-arm64` rerun: all texts, states and work identical to `od-main-bf6f43f`. Summaries are encoded and written off the commit (idle slices, no fsync); the artifact `fsync` and `FULL` commit stay because they are job state (`project-cache.md` §7). Measured SQLite lane time is within noise (126.1 vs 126.5 s in the cleanest pair, load 6-16); 25-function runs 24.9 → 21.0 s._
   1. `verifyIR` identity checks: precompiled `^entity_[0-9a-f]{64}$` / `^evidence_[0-9a-f]{64}$` tests instead of zod `safeParse` per id (`src/ir/verify.ts:228, 253, 254, 582`). Measured −1.6 s.
   2. `analysis/stack/index.ts` `combine`/`join`/`union` (`:135-170`): fast paths for equal, empty and single lists, and a merge of two sorted unique lists. 5.7 s self in the profile.
   3. Do not re-validate and re-encode the result just built in the same process (`validateComputation`, `src/project/cache/index.ts:150`, 5.1 s; `delivery`): parse once, as the result-hit path does.

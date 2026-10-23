@@ -10,6 +10,7 @@ import { bitWidth, evaluateExpression, expressionOperands, successors } from '..
 import type { Edge, Expression, RegisterBinding, SSAForm, Value } from '../../ir/index.js';
 import { AnalysisBudget, type AnalysisOptions } from '../ssa/budget.js';
 import { instructionResults } from '../effects/index.js';
+import { sortedUnion } from './sorted-union.js';
 
 export type Initialization = 'initialized' | 'uninitialized' | 'maybe_initialized' | 'unknown';
 export type StackValue =
@@ -132,9 +133,6 @@ function sameValue(a: StackValue, b: StackValue): boolean {
             : true)
   );
 }
-function union<T>(a: readonly T[], b: readonly T[]): T[] {
-  return [...new Set([...a, ...b])];
-}
 function initialization(facts: readonly StackFact[]): Initialization {
   if (facts.length === 0) return 'unknown';
   if (facts.every((fact) => fact.initialization === 'initialized')) return 'initialized';
@@ -149,14 +147,25 @@ function combine(
   return {
     value,
     initialization: init,
-    value_ids: [...new Set(facts.flatMap((fact) => fact.value_ids))].sort(),
-    evidence_ids: [...new Set(facts.flatMap((fact) => fact.evidence_ids))].sort(),
-    incoming_registers: [
-      ...new Map(
-        facts.flatMap((fact) => fact.incoming_registers).map((register) => [register.id, register]),
-      ).values(),
-    ].sort((a, b) => a.id.localeCompare(b.id)),
+    value_ids: sortedUnion(...facts.map((fact) => fact.value_ids)),
+    evidence_ids: sortedUnion(...facts.map((fact) => fact.evidence_ids)),
+    incoming_registers: incomingRegisters(facts),
   };
+}
+function incomingRegisters(facts: readonly StackFact[]): RegisterDescriptor[] {
+  let count = 0,
+    only: readonly RegisterDescriptor[] = [];
+  for (const fact of facts)
+    if (fact.incoming_registers.length > 0) {
+      count += fact.incoming_registers.length;
+      only = fact.incoming_registers;
+    }
+  if (count <= 1) return only.slice();
+  return [
+    ...new Map(
+      facts.flatMap((fact) => fact.incoming_registers).map((register) => [register.id, register]),
+    ).values(),
+  ].sort((a, b) => a.id.localeCompare(b.id));
 }
 function join(a: StackFact, b: StackFact): StackFact {
   if (sameFact(a, b)) return a;
@@ -756,8 +765,8 @@ export function recoverStack(
           const fact = evaluate(node.expression, node.result);
           publish(node.result.id, {
             ...fact,
-            value_ids: union(fact.value_ids, [node.result.id]).sort(),
-            evidence_ids: union(fact.evidence_ids, node.provenance.evidence_ids).sort(),
+            value_ids: sortedUnion(fact.value_ids, [node.result.id]),
+            evidence_ids: sortedUnion(fact.evidence_ids, node.provenance.evidence_ids),
           });
           if (record) {
             if (fact.value.kind === 'stack') {
@@ -779,7 +788,7 @@ export function recoverStack(
           const source = node.kind === 'store' ? get(node.value) : before;
           const fact = {
             ...source,
-            evidence_ids: union(source.evidence_ids, node.provenance.evidence_ids).sort(),
+            evidence_ids: sortedUnion(source.evidence_ids, node.provenance.evidence_ids),
           };
           if (record && isStack(address.value))
             accesses.push({
@@ -795,8 +804,8 @@ export function recoverStack(
           if (node.kind === 'load')
             publish(node.result.id, {
               ...fact,
-              value_ids: union(fact.value_ids, [node.result.id]).sort(),
-              evidence_ids: union(fact.evidence_ids, node.provenance.evidence_ids).sort(),
+              value_ids: sortedUnion(fact.value_ids, [node.result.id]),
+              evidence_ids: sortedUnion(fact.evidence_ids, node.provenance.evidence_ids),
             });
           else if (offset !== null) {
             for (let index = 0n; index < size; index++) {

@@ -43,15 +43,15 @@ export function decompileText(
       ? result.reason
       : undefined;
   const omitted =
-    data.delivery === 'inline' && data.emission.omitted?.length
-      ? data.emission.omitted.map((item) => item.kind).join(', ')
-      : undefined;
+    data.delivery === 'inline' && data.emission.omitted?.length ? data.emission.omitted : undefined;
   const entry = label.entry === null ? null : `${label.entry.space}:${label.entry.value}`;
   const name = label.name ?? shortIds([label.id]).get(label.id)!;
   const notes = [
     ...(omitted === undefined
       ? []
-      : [`provenance bounded out (output_limit): ${omitted}; pseudocode is complete`]),
+      : [
+          `provenance bounded out (${[...new Set(omitted.map((item) => item.reason))].join(', ')}): ${omitted.map((item) => item.kind).join(', ')}; pseudocode is complete`,
+        ]),
     ...caveats(result.diagnostics).map((item) => item.text),
   ];
   const head = [
