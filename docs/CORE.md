@@ -316,7 +316,19 @@ loads may expand only at unconditional same-block uses when no store, call,
 fence, unknown effect or independent load intervenes; private-local reads and
 writes are no memory and may intervene. Dependent nested loads retain their
 address/data evaluation order; independent faulting loads never become
-unsequenced C operands. Both explicit addresses and symbolic-table indices
+unsequenced C operands. A reload that cannot fault may also cross independent
+nonvolatile loads (never a store, call, fence, unknown effect or volatile access;
+`nonfaulting_load_order` presentation record, ABI premise `nonfaulting_reload`,
+anchored at each reader): a printed nonvolatile access to the same structural
+address (identical pure inline expressions over the same SSA leaves) of at least
+its width reaches it through its block and single-predecessor blocks with only
+assignments, register reads and nonvolatile loads/stores in between (within 64
+statements and hops back); an access printed inside a later reader does not
+count. `-O0` `matrix_alias` (Mach-O, ELF, PE) prints `*address = *address +
+arg2; *address_1 = *address_1 ^ *address; return *address + *address_1;`
+instead of two reload temporaries; on the odbench full tier five texts change
+(those three, `vdbeMemAddTerminator`, `fts5FlushSecureDelete`). Both explicit
+addresses and symbolic-table indices
 participate in use/liveness accounting. `single_use_inlining` records one
 function-level presentation inference, and original load/definition identities
 map to their consuming expression. `copy_propagation` reads a plain multi-use
@@ -382,8 +394,9 @@ enumerated-outcome fold (integer relations; IEEE less/equal/greater/unordered),
 e.g. `!(x < 0 || x > 0) && !isunordered(x, 0)` is `x == 0`, using only leaves
 the merged tests already read. Header notes: the ABI scratch comment is printed
 only when a scratch register name occurs in the text (`abi_scratch_note`), and
-the FP-environment assumption trails the signature with an unambiguous
-requirement ID prefix (`requirement_note`); full records stay in metadata.
+the source view prints no FP-environment note (`requirement_note`): the
+assumption is the recorded `fp_default_environment` ABI requirement, and full
+records stay in metadata.
 
 `else_if` prints an `else` arm that is exactly one `if` statement (no statement,
 definition, label, note or edge copy before or after it; the arm's own `else`
@@ -448,7 +461,9 @@ that place aggregates below scalars (SQLite `renameColumnFunc`, brotli `main`),
 all slots above it stay explicit; a 21-function SQLite/brotli sample of the LLM task set
 showed no change. Only the frame object's layout uses a tighter reach (A3,
 below): a proven frame save ends an escaped object under `frame_save`. Unknown effects and unbounded escapes keep the whole frame
-explicit. Accesses straddling a slot's end, outgoing argument slots and volatile
+explicit; a memory-free unknown effect (an ISA-bounded unlifted SIMD&FP
+instruction, see ARM64.md) is not an escape, except for a frame address in one
+of its vector inputs, so saves are elided across it. Accesses straddling a slot's end, outgoing argument slots and volatile
 accesses stay explicit. Same-width accesses of differing types (an O0
 integer/IEEE pun through memory) forward a bitcast of the reaching stored value;
 when the reaching values differ, the slot is one local of its stores' common type
@@ -524,12 +539,23 @@ copies right after the loop when that edge is the only one from inside the loop
 to its continuation; outer-loop exit flags are tested before them, and a
 do/while's repeat copies (moved before its test) must not be read by them
 (`loop_exit_copies`). The bottom test is found through nested lexical
-sequences. `loop_test_restatement` also restates an unsigned range test
+sequences. A C do/while test that reads a variable its repeat copy writes prints
+restated over that copy's result (`loop_test_restatement`). After `x = x + c`
+(through casts and constant steps no narrower than `x`), an equality
+`L ==/!= B` whose `L` is `x` or its low `w` bits plus a constant `k` becomes
+`x ==/!= B + c - k` (mod 2^w, roadmap 4 L2), the low bits printed as
+`(uint32_t)x`. `B` is a constant (a zero-extended `L` tests its narrower
+value when `B` fits it), or an expression without inline loads or calls over
+variables the repeat copies do not write; `B + d` folds into `B = y ± m`, so
+`(uint64_t)n - 1 == i` after `i = 1 + i` prints `while (i != n)` and a test on
+the copy's own source (`(uint32_t)x + 16 == K` after `x = x + 16`) prints
+`(uint32_t)x != K`. An unsigned range test
 `x < 2^c` (or `x <= 2^c - 1`, or a negation) after a repeat copy `x = x >> c`
-(logical or arithmetic, `0 < c < width`) as `x ==/!= 0`. Restatements are exact
+(logical or arithmetic, `0 < c < width`) becomes `x ==/!= 0`; other ordered
+compares are not restated. Restatements are exact
 derivations over the IR; while the shared allowance remains, the bit-vector
-checker re-proves them and may veto. Python-like keeps `while True` for bottom
-tests.
+checker re-proves them over the copy's source value and may veto. Python-like
+keeps `while True` for bottom tests.
 
 Return-tail copies remain owned by the edge that enters them. When all incoming
 edges use copies and a tail's original home is removed, its copied continuation
@@ -556,7 +582,7 @@ A type inference record carries every `association_ids` member whose assertion d
 
 Parameter roles distinguish observed source inputs, physical-register inputs and explicit entry-storage environment inputs; an entry-SP formal is not evidence of authored arity. Interpretation widths describe reconstructed IR, not necessarily a decoder operand or source declaration. Call constants expose exact unsigned bit patterns with explicit widths, without inventing signedness. Partial fields retain unknown bounds and observed callback targets; local checks retain their bounded scope and counterexamples. Metadata uses the same operation/output budget and cancellation as rendering, and omits evidence IDs when evidence was not requested. Five focused regressions and 12 public both-dialect observations cover these boundaries; they do not establish whole-function equivalence.
 
-Optional `emission.requirements` localize assumptions, unresolved values/effects/calls/control and conflicts at original subjects and instruction-backed output spans. One function-level `fp_environment` explanation names every affected guard/operation and its original state epoch. Source-only `fp_environment_guard` presentation selects the supported edge of an exact lifter guard when its state is the entry value, unchanged or carried through phis and bitcasts, there are no explicit environment writes, and the unsupported arm is exclusively owned. Transport acceptance is coinductive (a greatest fixpoint over the phi/bitcast web, so loop cycles qualify): a member is accepted when each input is the entry epoch or an accepted member; one input of any other kind rejects the guards of the whole function. Each guard record lists the accepted transports its epoch passes through. This is conditional on the recorded requirement at **each** epoch. Omitted guard/failure provenance maps to the top requirement comment; checked guards and ordered effects remain intact. Computed, loaded, known unsupported, or opaque-written control state retains explicit guards. An opaque effect that is the last statement of a block ending in an unresolved exit changes no recorded epoch (no modeled operation follows it) and does not retain them (`fp_terminal_effect`); an opaque effect elsewhere, such as an unsupported encoding inside the function, still does.
+Optional `emission.requirements` localize assumptions, unresolved values/effects/calls/control and conflicts at original subjects and instruction-backed output spans. One function-level `fp_environment` explanation names every affected guard/operation and its original state epoch. Source-only `fp_environment_guard` presentation selects the supported edge of an exact lifter guard when its state is the entry value, unchanged or carried through phis and bitcasts, there are no explicit environment writes, and the unsupported arm is exclusively owned. Transport acceptance is coinductive (a greatest fixpoint over the phi/bitcast web, so loop cycles qualify): a member is accepted when each input is the entry epoch or an accepted member; one input of any other kind rejects the guards of the whole function. Each guard record lists the accepted transports its epoch passes through. This is conditional on the recorded requirement at **each** epoch. Omitted guard/failure provenance maps to the signature in the source view and to the top requirement comment in the checked view; checked guards and ordered effects remain intact. Computed, loaded, known unsupported, or opaque-written control state retains explicit guards. An opaque effect that is the last statement of a block ending in an unresolved exit changes no recorded epoch (no modeled operation follows it) and does not retain them (`fp_terminal_effect`); an opaque effect elsewhere, such as an unsupported encoding inside the function, still does.
 
 Calls preserve the FP control state on every ABI profile: FPCR is not an ordinary Darwin call clobber (AAPCS64 6.1.2: its control fields change only through support functions), and SysV/Win64 already preserve MXCSR[6:16] and the x87 control word. The exceptions are known environment writers. Before SSA construction, a call whose target is a `fesetround`, `fesetenv`, `feupdateenv`, `feholdexcept`, `fesetexceptflag`, `feenableexcept`, `fedisableexcept`, `_controlfp`, `_control87`, `_controlfp_s`, `__control87_2`, `_set_controlfp`, `_fpreset`, `fpsetround` or `fpsetmask` import (callable stub, import-slot reference or constant target) also clobbers the profile's `environment_writer_clobbers` (FPCR; MXCSR[6:16] and the x87 control word). Its output is no epoch, so the fixpoint keeps the guards. A local callee whose summary shows a changed exit state (`fp_environment_writer`: a writer-import call or tail on a path to an exit, an explicit write that reaches an exit binding, or a writer callee; an opaque effect is no such evidence) keeps every guard of its caller. Omitting a guard records `requireAbi('fp_environment_preserved', [every call of the function])`: unknown, indirect and ordinary callees preserve the control state.
 
@@ -1205,13 +1231,24 @@ function is declared once before it: C `extern T name;` (one element at offset 0
 `extern T name[];` (one scalar type at element-multiple offsets, never a bound) or
 `extern uint8_t name[];` (anything else, accessed through explicit casts); Python-like
 uses `memory_view`. Native names use their C spelling (Mach-O drops one underscore;
-leading `__` is kept); otherwise a neutral `data_<VA>` names the object. The trailing
+leading `__` is kept); otherwise a neutral `data_<VA>` names the object. Storage that
+no symbol or data record covers is named after the nearest preceding object symbol of
+its section when that symbol is size-less, starts less than 4 KiB before it, and no
+other symbol or data record starts in between (`sqlite3Config_0x80`, comment
+`sqlite3Config+0x80`; source-only `symbol_relative_name` record). This is naming
+only: the symbol's extent stays unknown and no type or layout is claimed. The trailing
 comment carries the VA (omitted when the printed `data_<VA>` name or a `memory_view(0x…)` already states it) and any known byte extent or data kind; declarations are mapped
 with the object's evidence. Checked view still prints the explicit `data_address(...)`
-identity and declares nothing.
+identity (`"_sqlite3Config+0x80"` for a relative name) and declares nothing.
 
-Loader-bound import slots (Mach-O GOT/chained-fixup binds, ELF GLOB_DAT, PE IAT; not
-lazy-bound slots or stub entries) carry `SourceAddress.import`. In the source view a
+Loader-bound import slots carry `SourceAddress.import` only in storage the loader
+alone writes: a Mach-O `S_NON_LAZY_SYMBOL_POINTERS`/`__got`/`__auth_got` section or a
+segment read-only after fixups (`__DATA_CONST`, `SG_READ_ONLY`), an ELF `PT_GNU_RELRO`
+range, the PE IAT, or a mapping without write permission (never lazy-bound slots or stub
+entries). A bind in writable program data (SQLite's `aSyscall[i].pCurrent`, rewritten by
+`unixSetSystemCall`; an ELF lazy `.got.plt` slot) stays plain storage: its read prints as
+a read and its declaration comment adds `initially <symbol>` when the slot holds the
+symbol's exact address at load time. In the source view a
 pointer-width read of such a slot is the imported symbol's address (`&sym`) and a
 read through it is the symbol itself (`sym`), declared once with a compact comment
 (`import from <library basename>`) and the bind records as evidence. The declared type is
@@ -1384,9 +1421,16 @@ Original helper names and contracts stay in metadata.
 Only the helper definitions, `#include` and `#define` lines that the finished
 function text references (directly or through another helper) precede it, in a
 fixed order; the text is scanned outside comments and string literals after
-rendering, so unused or speculative expressions never add one. The FP environment
-requirement appears as one comment line citing its id; its full explanation is in
-the `requirements` metadata, and checked rendering keeps the full text.
+rendering, so unused or speculative expressions never add one. The source view
+prints no comment for the FP environment requirement: emitted C without
+`#pragma STDC FENV_ACCESS ON` presumes the default modes (C11 7.6.1p2, a language
+premise of the same class as `frame_object`), recorded as one
+`fp_default_environment` `abi_conformance` requirement beside the unchanged
+`fp_environment` requirement. Its provenance is the listed FP-environment site
+whose origin cites the fewest instructions (not the function origin, which would
+repeat every instruction of the function; the function anchors it only when
+that site prints nowhere). Omitted guard sites map to the signature. Its full explanation is in the `requirements`
+metadata, and checked rendering keeps the full `/* Requirement … */` line.
 `c_bitcast` uses same-width `memcpy` helpers for integer/IEEE32/IEEE64
 reinterpretation under an explicit native-representation ABI requirement.
 `c_integer_storage` uses ordinary C scalar storage for nonstandard-width integer
@@ -1402,11 +1446,20 @@ slots (every stored value reaches each reload), constant byte steps and index
 terms (a constant-scaled or extended addend) to the retained accesses through a
 formal. One consistent 8/16/32/64-bit integer or 32/64-bit IEEE element kind
 yields `uintN_t*` / `float*` / `double*`; byte accesses use `uint8_t*`, never
-invented character types. Mixed widths or kinds remain explicit.
+invented character types. Mixed widths or kinds remain explicit. The lineage must
+also be array-shaped: an index term is added, a copy cycle steps the pointer, or
+the constant displacements of its accesses are exactly 0, w, 2w, ... for element
+width w. Constant offsets alone (`p + 0x10`, or `p`, `p + 0x10` with a gap) are
+fields of a record: the formal then keeps the analysis structure (or integer)
+and prints `p->field_0x10`; the `formal_pointer` record says which shape held.
 It adds C `const` only without writes through that formal, escape to a potentially
 writing call, or unknown effects; unrelated stores and known read-only calls do
 not remove the qualifier. Python annotations use `pointer[T]`; the presentation
 record retains the read-only/write-capable formal observation in both dialects.
+A declared pointer member whose pointee is an unsigned scalar of exactly the
+accessed width (or an IEEE element) is dereferenced as its lvalue,
+`*p->field_0x48`, under `typed_dereference`, instead of casting its address bits
+back to a pointer.
 C `typed_index` prints `p[i]` / `p[k]` / `p[i + k]` / `p[i - k]` for an access
 through a declared scalar pointer (integer or IEEE element) of exactly the
 accessed width and kind. The address is flattened through nested inline

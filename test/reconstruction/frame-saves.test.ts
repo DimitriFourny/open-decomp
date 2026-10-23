@@ -10,7 +10,7 @@ import { sysvAMD64Abi } from '../../src/abi/sysv-amd64/index.js';
 import { windowsX64Abi } from '../../src/abi/windows-x64/index.js';
 import { constructSSA } from '../../src/analysis/ssa/index.js';
 import { recoverTypes } from '../../src/analysis/types/index.js';
-import { integer, type SSAForm } from '../../src/ir/index.js';
+import { evaluateIR, integer, type SSAForm } from '../../src/ir/index.js';
 import { newIdentity } from '../../src/core/index.js';
 import { structureControlFlow } from '../../src/presentation/index.js';
 import { reconstruct } from '../../src/reconstruction/index.js';
@@ -90,7 +90,10 @@ type Gate =
   | 'second-store'
   | 'entry-slot'
   | 'return-address'
-  | 'branch-unrestored';
+  | 'branch-unrestored'
+  | 'simd-effect'
+  | 'simd-vector-escape'
+  | 'opaque-effect';
 
 function fixture(abi: AbiProfile, saved: RegisterDescriptor, gate: Gate = 'valid') {
   const b = builder(`frame-save-${abi.id}-${saved.id}-${gate}`),
@@ -106,6 +109,21 @@ function fixture(abi: AbiProfile, saved: RegisterDescriptor, gate: Gate = 'valid
     block.store(block.int('add', slot, block.constant(u64, 1n)), block.constant(integer(8), 3n));
   // Frame-pointer setup does not turn this private address into an escape.
   if (saved.bank === 'integer') block.writeRegister(saved, slot);
+  // An ISA-bounded unlifted SIMD instruction between save and reload: it
+  // clobbers a vector register and no memory, unless a vector input carries
+  // a frame address (`simd-vector-escape`); `opaque-effect` may write memory.
+  if (gate === 'simd-effect' || gate === 'simd-vector-escape' || gate === 'opaque-effect') {
+    const vector = abi.unknown_call_clobbers.registers.find(
+      (register) => register.bank === 'vector',
+    )!;
+    if (gate === 'simd-vector-escape')
+      block.writeRegister(vector, block.cast('zero_extend', integer(vector.width_bits), slot));
+    block.unknown('Unsupported SIMD instruction', {
+      registers: [vector],
+      flags: [],
+      memory: gate === 'opaque-effect' ? 'unknown_read_write' : 'none',
+    });
+  }
   const loaded = block.load(integer(saved.width_bits), slot, access);
   const low = block.extract(loaded, 0, saved.width_bits / 2),
     high = block.extract(loaded, saved.width_bits / 2, saved.width_bits / 2);
@@ -200,12 +218,50 @@ for (const abi of [sysvAMD64Abi, windowsX64Abi]) {
     'second-store',
     'entry-slot',
     'branch-unrestored',
+    'opaque-effect',
+    'simd-vector-escape',
   ] as const)
     test(`${abi.id}: ${gate} refuses frame-save inference`, () => {
       const { source } = fixture(abi, saved, gate);
       assert.equal(source.source?.frame_saves?.stores.size ?? 0, 0);
       assert.ok(!source.local_validation?.some((record) => record.rule === 'frame_save'));
     });
+  test(`${abi.id}: a save is elided across a memory-free unknown effect`, () => {
+    const { ir, extra, source, checked } = fixture(abi, saved, 'simd-effect');
+    assert.equal(source.source?.frame_saves?.stores.size, 1);
+    assert.equal(source.source?.frame_saves?.reloads.size, 1);
+    assert.ok(
+      source.local_validation_session?.abiConformance.some((site) => site.rule === 'frame_save'),
+    );
+    assert.equal(checked.source?.frame_saves, undefined);
+    // Both the IR and the emitted program stop at the ordered unknown effect,
+    // with no memory event before it.
+    const evaluated = evaluateIR(ir, {
+      registers: new Map([
+        [abi.stack_pointer.root, 0x9000n],
+        [saved.root, 0x1234n],
+      ]),
+      memory: [{ base: 0x8f00n, bytes: new Uint8Array(0x100), writable: true }],
+    });
+    assert.equal(evaluated.status, 'unknown');
+    assert.equal(evaluated.reason, 'Unsupported SIMD instruction');
+    for (const language of ['c-like', 'python-like'] as const) {
+      const output = emit(ir, extra, language).emission;
+      assert.doesNotMatch(output.text, /unknown_value|entry_sp|stack_frame|\blocal\d/);
+      const result = execute(
+        output,
+        new Map(),
+        new Map(),
+        0n,
+        new Map(),
+        new Map(),
+        new Map(),
+        acknowledgeRequirements(output),
+      );
+      assert.equal(result.exit, 'unknown');
+      assert.deepEqual(result.events, ['unknown']);
+    }
+  });
   test(`${abi.id}: a caller-saved entry value is not a frame save`, () => {
     const scratch = abi.unknown_call_clobbers.registers.find(
       (register) => register.bank === 'integer',

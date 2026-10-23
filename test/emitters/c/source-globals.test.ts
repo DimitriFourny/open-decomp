@@ -267,3 +267,86 @@ test('checked view keeps the explicit helper and declares nothing', () => {
   assert.match(output.emission.text, /data_address\(/);
   assert.doesNotMatch(output.emission.text, /extern /);
 });
+
+// SQLite's `aSyscall[i].pCurrent`: a bind in writable `__DATA,__data` with no
+// covering symbol, 0x80 bytes after the size-less `_config` object symbol.
+const RELATIVE = at(0x3080n);
+const relativeSlot: SourceAddress = {
+  address: RELATIVE,
+  symbol_relative: {
+    symbol_id: 'symbol-config',
+    name: '_config',
+    source_name: 'config',
+    offset: 0x80n,
+    evidence_ids: ['config-symbol-evidence'],
+  },
+  initial_import: 'fstat',
+  object: {
+    address: RELATIVE,
+    byte_length: null,
+    offset: 0n,
+    mutable: true,
+    kind: 'bytes',
+    evidence_ids: ['config-evidence'],
+  },
+};
+// The program rewrote the slot at run time (`unixSetSystemCall`): a read yields
+// the stored pointer, never the load-time import.
+const REWRITTEN = 0x7766554433221100n;
+const slotMemory = (value: bigint): Map<bigint, number> =>
+  new Map(
+    Array.from({ length: 8 }, (_, index) => [
+      RELATIVE.value + BigInt(index),
+      Number((value >> BigInt(index * 8)) & 0xffn),
+    ]),
+  );
+
+for (const language of ['c-like', 'python-like'] as const)
+  test(`${language} a writable bound slot is read as storage named after its preceding symbol`, () => {
+    const ssa = ssaOf('rewritten-slot', (block) => [block.load(u64, block.address(RELATIVE))]);
+    const output = emit(
+      ssa,
+      { source: { abi: sysvAMD64Abi, callees: [], addresses: [relativeSlot] } },
+      language,
+    );
+    const text = output.emission.text;
+    assert.doesNotMatch(text, /data_address|data_3080|import_view|\(uintptr_t\)fstat/);
+    if (language === 'c-like') {
+      assert.match(
+        text,
+        /^extern uint64_t config_0x80; \/\* VA 0x3080, config\+0x80, initially fstat \*\/$/m,
+      );
+      assert.match(text, /return config_0x80;/);
+    } else
+      assert.match(
+        text,
+        /^config_0x80 = memory_view\(0x3080, "uint64_t", True\) {2}# config\+0x80, initially fstat$/m,
+      );
+    assert.ok(
+      output.emission.local_validation?.some(
+        (record) => record.kind === 'presentation' && record.rule === 'symbol_relative_name',
+      ),
+    );
+    // The preceding symbol's records evidence the printed name.
+    assert.ok(
+      expandEmission(output.emission).mappings.some((mapping) =>
+        mapping.evidence_ids.includes('config-symbol-evidence'),
+      ),
+    );
+    assert.deepEqual(execute(output.emission, new Map(), slotMemory(REWRITTEN)).values, [
+      REWRITTEN,
+    ]);
+  });
+
+test('checked view states the relative identity in its data_address helper', () => {
+  const ssa = ssaOf('checked-relative', (block) => [block.load(u64, block.address(RELATIVE))]);
+  const output = emit(
+    ssa,
+    { source: { abi: sysvAMD64Abi, callees: [], addresses: [relativeSlot] } },
+    'c-like',
+    'checked',
+  );
+  assert.match(output.emission.text, /data_address\("_config\+0x80", 0x3080, 0x0, "unknown"/);
+  assert.doesNotMatch(output.emission.text, /extern /);
+  assert.deepEqual(execute(output.emission, new Map(), slotMemory(REWRITTEN)).values, [REWRITTEN]);
+});

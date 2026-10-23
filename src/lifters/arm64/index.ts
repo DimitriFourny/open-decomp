@@ -21,6 +21,7 @@ import {
 import {
   ArmSemantics,
   Unsupported,
+  boundedUnknownClobbers,
   fpEnvironmentGuard,
   gp,
   needsFpGuard,
@@ -47,7 +48,7 @@ export interface Arm64LiftResult {
  * SIMD supports common fixed-lane integer arithmetic/bitwise/MOVI, scalar
  * FP32/64 moves/arithmetic/compare/select/conversion, FCVTZS/FCVTZU (saturating,
  * NaN to zero), fixed-point SCVTF/UCVTF, and vector FP add/sub/mul/div when
- * structured operands exist; DUP (general), CMEQ and AND/ORR (register) read
+ * structured operands exist; DUP and INS (general), CMEQ and AND/ORR (register) read
  * canonical fields. Runtime FPCR guards bound arithmetic
  * to nearest-even, gradual underflow and masked exceptions. Arithmetic NaNs
  * are explicitly canonicalized and FPSR is unknown, never claimed exact.
@@ -58,11 +59,15 @@ export interface Arm64LiftResult {
  * privileged/system state, fused FP, FP16, other rounding conversions and
  * unimplemented SIMD remain unknown effect boundaries. Unsupported operations
  * clobber the entire modeled state and memory, never disappear or become
- * invented guaranteed traps. Decode gaps/unresolved exits remain boundaries.
+ * invented guaranteed traps, except a valid falling-through SIMD&FP or crypto
+ * data-processing encoding that reads no general register: its effect is
+ * bounded by the ISA to V0-V31, a to-general Rd, NZCV and FPSR, with no
+ * memory, SP or FPCR (`boundedUnknownClobbers`). Decode gaps/unresolved exits
+ * remain boundaries.
  */
 export class Arm64Lifter implements Lifter<RegisterIR> {
   readonly name = 'ARM64 typed semantic lifter';
-  readonly version = '1.0.7';
+  readonly version = '1.0.8';
   readonly architecture = 'arm64' as const;
   lift(graph: FunctionGraph, abi: AbiProfile, context: OperationContext): Arm64LiftResult {
     if (abi.architecture !== 'arm64') throw new TypeError('ARM64 lifter requires an ARM64 ABI');
@@ -339,7 +344,19 @@ export class Arm64Lifter implements Lifter<RegisterIR> {
         } catch (error) {
           if (!(error instanceof Unsupported)) throw error;
           report(instruction, error.message);
-          unknown(block, error.message);
+          // A valid SIMD&FP data-processing instruction that falls through has
+          // an ISA-bounded effect; anything else stays fully unknown.
+          const bounded =
+            instruction.validity === 'valid' &&
+            instruction.flow.kind === 'fallthrough' &&
+            payload?.architecture === 'arm64' &&
+            payload.behavior === 'instruction'
+              ? boundedUnknownClobbers(payload)
+              : undefined;
+          if (bounded) {
+            block.unknown(error.message, bounded);
+            reasons.add(error.message);
+          } else unknown(block, error.message);
           if (instruction.flow.kind !== 'fallthrough' && instruction.flow.kind !== 'call') {
             block.terminate({ kind: 'unknown', reason: error.message });
             terminated = true;
