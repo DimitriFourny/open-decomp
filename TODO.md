@@ -392,7 +392,7 @@ Files that several items touch:
 
 ### K2: Consume outgoing stores that a bound stack argument already shows
 
-- [ ] **Problem.** 33 stores in 10 functions (17 in brotli `main`) print the value and pass it again as the call's argument: `frame.local_2b0 = …; fprintf(stream_3, "corrupt input [%s]\n", …same…)`, `frame.local_88 = arg9; … sqlite3CreateFunc(…, arg8, arg9, …)`.
+- [x] **Problem.** 33 stores in 10 functions (17 in brotli `main`) print the value and pass it again as the call's argument: `frame.local_2b0 = …; fprintf(stream_3, "corrupt input [%s]\n", …same…)`, `frame.local_88 = arg9; … sqlite3CreateFunc(…, arg8, arg9, …)`.
   - **Root cause:** only `planVariadicStackArguments` consumes stores (`reconstruction/index.ts:286-302`). Format-rule closures (`bindStack`, `source-planner.ts:566-573`) and callee stack parameters (`:386-390`) bind the value but leave the store.
   - **Change:**
     - Factor the slot-eligibility checks out of `planVariadicStackArguments` into one helper.
@@ -409,6 +409,7 @@ Files that several items touch:
     - Checked view unchanged.
   - **Expected effect:** tokens −1.5k to −2k [estimate]; QA tokens (brotli `main`).
   - **Depends on:** K1 (same files).
+  - **Done (K2, reconstruction 96):** `createOutgoingStackSlots` (shared with `planVariadicStackArguments`) + `planStackArgumentStores` consume the stores of every `bindStack` binding (`stack_argument_store`; `open_call_argument_area` on stores a later boundary sees only through the call). OD lane vs `od-main-66cb8fe`: exactly 4 texts change, 11 store lines gone: `createFunctionApi` (6, both `sqlite3CreateFunc` sites), `PrintFileProcessingProgress` (2, frame gone), `sqlite3_rtree_query_callback` (3, frame gone), `sqlite3Initialize` (2, frame gone); checked view identical. Blocked on K7 (escape abort): brotli `main` 17/17 consume with the abort lifted (measured), `fts5FlushSecureDelete` 1. Not K2 cases: `sqlite3Fts3Incrmerge` (the 9th `fts3WriteSegdir` argument is not bound), `rename*Func` (walker fields, not arguments), ELF `-O0` `matrix_variadic` (no call), `sqlite3BtreeOpen` (not bound).
 
 ### K3: Print the fixed prefix of an established variadic library contract
 

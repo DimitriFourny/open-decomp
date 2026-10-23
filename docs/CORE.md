@@ -836,6 +836,17 @@ or load, the call block writing nothing before the call) instead feeds a
 source-only block parameter assigned on every edge (`variadic_stack_join`), and
 the stores print as those assignments. A tail call (SP back at the entry SP)
 does not observe an outgoing slot below its SP.
+An outgoing store whose bytes a call's projection already binds as an argument
+through the stack (a closed format rule, a callee's observed stack parameters, a
+published `va_start` footprint) prints only as that argument
+(`stack_argument_store`) when the same slot conditions hold: one eligible store
+(or one per incoming edge whose join value is the argument) covering the bound
+bytes — under a complete projection also the ABI padding of a pointer-sized slot
+no other argument occupies — read by no load and seen by no other stack-reading
+boundary before the call. A boundary that sees the store only through the call
+does not observe it: the callee owns and may overwrite its stack arguments
+(`open_call_argument_area`, recorded on those stores). Any stack address leaving
+the body disables this, as for variadic slots.
 Discovery-established tails to uniquely resolved imported callable entries may
 use complete nonvariadic register-only library contracts. Their interfaces
 propagate through the same bounded native dependency worklist as source-only
