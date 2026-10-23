@@ -143,6 +143,11 @@ export interface StructuringOptions {
    * ownership are unchanged (the source view structures again; see
    * StructuringConditions). */
   readonly search?: boolean;
+  /** Work this structuring may have charged while the goto-selection search still
+   * runs; past it, as past the selection allowance, the remaining nodes of a stuck
+   * scope are laid out in dependency order. The source view's restructure passes the
+   * request's remaining work less the text render's reserve. Unbounded when absent. */
+  readonly search_work?: number;
   /** Block contents known after reconstruction (source view): short-circuit
    * conditions collapse first, Ghidra's `collapseConditions`. */
   readonly conditions?: StructuringConditions;

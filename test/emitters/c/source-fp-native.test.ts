@@ -241,3 +241,263 @@ test('exact emitted native FP unary and conversion C executes under clang', () =
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+/** Integer arguments in their SysV registers, an f64 result from `make`,
+ * returned and, with `store`, also stored through one more pointer argument. */
+function integers(
+  name: string,
+  count: number,
+  make: (block: BlockBuilder, inputs: readonly Value[], fp: DataType) => Value,
+  store = false,
+): Fixture {
+  const abi = sysvAMD64Abi,
+    fp: DataType = { kind: 'float', bits: 64 },
+    parameters = Array.from({ length: count + Number(store) }, () => ({
+      kind: 'integer' as const,
+      bits: 64,
+      signed: false,
+    }));
+  const b = builder(`native-integers-${name}`),
+    entry = b.block('entry');
+  const inputs = abi
+    .classifyCall({
+      returns: fp,
+      parameters,
+      variadic: false,
+      fixed_parameter_count: parameters.length,
+    })
+    .parameters.map(({ locations: [location] }) => {
+      if (location?.kind !== 'register') throw new Error('Integer argument register required');
+      return entry.readRegister(location.register);
+    });
+  const result = make(entry, inputs.slice(0, count), fp);
+  if (store) entry.store(inputs[count]!, entry.cast('bitcast', integer(64), result));
+  entry.return([result]);
+  const ir = constructSSA(b.finish(entry, [fp])).value as SSAForm;
+  return { ir, source: { abi, callees: [], addresses: [] } };
+}
+
+const POINTER = 0x2000n;
+const zeroed = (): Map<bigint, number> =>
+  new Map(Array.from({ length: 8 }, (_, i) => [POINTER + BigInt(i), 0]));
+const stored = (memory: ReadonlyMap<bigint, number>): bigint =>
+  Array.from(
+    { length: 8 },
+    (_, i) => BigInt(memory.get(POINTER + BigInt(i))!) << BigInt(8 * i),
+  ).reduce((total, byte) => total | byte);
+
+/** Source and checked views agree on every argument tuple: result and stored bits. */
+function agreeIntegers(
+  f: Fixture,
+  language: Language,
+  cases: readonly (readonly bigint[])[],
+): void {
+  const source = emit(f.ir, { source: f.source }, language).emission;
+  const checked = emit(f.ir, { source: f.source }, language, 'checked').emission;
+  for (const args of cases) {
+    const [actual, expected] = [source, checked].map((emission) => {
+      const formals = emittedFormals(emission);
+      return execute(
+        emission,
+        new Map(
+          formals.flatMap((formal, index) =>
+            formal.semantic_ids.map((id) => [id, args[index] ?? POINTER] as const),
+          ),
+        ),
+        zeroed(),
+      );
+    });
+    const label = `${language} ${args.map((value) => `0x${value.toString(16)}`).join(', ')}`;
+    assert.equal(actual!.exit, expected!.exit, label);
+    assert.deepEqual(actual!.values, expected!.values, label);
+    assert.equal(stored(actual!.memory), stored(expected!.memory), label);
+  }
+}
+
+/** Compile the C view with clang and check each result (and stored bits)
+ * against the checked view's execution. */
+function clangAgrees(f: Fixture, cases: readonly (readonly bigint[])[], store: boolean): void {
+  const output = emit(f.ir, { source: f.source });
+  const checked = emit(f.ir, { source: f.source }, 'c-like', 'checked').emission;
+  const name = output.identifiers.find((item) => item.entity_id === f.ir.id)!.identifier;
+  const checks = cases.map((args) => {
+    const observed = execute(
+      checked,
+      new Map(
+        emittedFormals(checked).flatMap((formal, index) =>
+          formal.semantic_ids.map((id) => [id, args[index] ?? POINTER] as const),
+        ),
+      ),
+      zeroed(),
+    );
+    const expected = observed.values[0]!;
+    const call = `${name}(${[...args.map((value) => `0x${value.toString(16)}ULL`), ...(store ? ['&slot'] : [])].join(', ')})`;
+    const nan = (expected & 0x7fffffffffffffffn) > 0x7ff0000000000000n;
+    return `{ double slot = 0, result = ${call}; uint64_t bits, kept; memcpy(&bits, &result, 8); memcpy(&kept, &slot, 8); if (${nan ? '!isnan(result)' : `bits != 0x${expected.toString(16)}ULL`}) return 1; if (${store ? 1 : 0} && ${nan ? '!isnan(slot)' : `kept != 0x${stored(observed.memory).toString(16)}ULL`}) return 2; }`;
+  });
+  const directory = mkdtempSync(join(tmpdir(), 'open-decomp-native-fp-nan-free-'));
+  try {
+    const path = join(directory, 'native.c'),
+      binary = join(directory, 'native');
+    writeFileSync(
+      path,
+      `#include <stdint.h>\n#include <math.h>\n#include <string.h>\n${output.emission.text}\nint main(void) { ${checks.join('\n')} return 0; }\n`,
+    );
+    execFileSync('clang', ['-std=c11', '-O2', '-ffp-contract=off', path, '-o', binary]);
+    execFileSync(binary);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+const U64_CASES = [[0n], [1n], [123456789n], [0x8000000000000001n], [0xffffffffffffffffn]] as const;
+// 2^-30, as in brotli's PrintBytes.
+const SCALE = 0x3e10000000000000n;
+
+test('NaN-free: a u64 conversion times a literal is native even when stored', () => {
+  const f = integers(
+    'scaled-store',
+    1,
+    (block, [value], fp) =>
+      block.fp('mul', block.cast('unsigned_to_float', fp, value!), block.constant(fp, SCALE)),
+    true,
+  );
+  for (const language of LANGUAGES) {
+    const { emission } = emit(f.ir, { source: f.source }, language);
+    assert.doesNotMatch(emission.text, /fp_mul\(|cast_unsigned_to_float\(/, emission.text);
+    const record = emission.local_validation?.find((item) => item.rule === 'fp_nan_free');
+    assert.ok(record, 'fp_nan_free record');
+    // The product's operands: the u64 conversion (2^64) and the literal (2^-30).
+    assert.match(record.reason ?? '', /18446744073709552000, 9\.313225746154785e-10/);
+    agreeIntegers(f, language, U64_CASES);
+  }
+  clangAgrees(f, U64_CASES, true);
+});
+
+test('NaN-free negatives: argument operands, variable divisors and bound overflows keep helpers', () => {
+  // A stored product of an FP argument may carry its NaN payload.
+  const argument = build(
+    64,
+    'argument-scaled',
+    (block, input, fp) => block.fp('mul', input, block.constant(fp, SCALE)),
+    true,
+  );
+  for (const language of LANGUAGES) {
+    assert.match(
+      emit(argument.ir, { source: argument.source }, language).emission.text,
+      /fp_mul\(/,
+    );
+    agree(argument, language, 64);
+  }
+  // 0/0 is invalid: a stored quotient by a variable keeps its helper; the
+  // conversions themselves are native.
+  const quotient = integers(
+    'variable-divisor',
+    2,
+    (block, [left, right], fp) =>
+      block.fp(
+        'div',
+        block.cast('unsigned_to_float', fp, left!),
+        block.cast('unsigned_to_float', fp, right!),
+      ),
+    true,
+  );
+  const text = emit(quotient.ir, { source: quotient.source }).emission.text;
+  assert.match(text, /fp_div\(/);
+  assert.doesNotMatch(text, /cast_unsigned_to_float\(/);
+  for (const language of LANGUAGES)
+    agreeIntegers(quotient, language, [
+      [0n, 0n],
+      [1n, 0n],
+      [6n, 3n],
+    ]);
+  // 2^64 * 1e300 overflows the binary64 bound: the outer product of that
+  // infinity with zero is a NaN, so it keeps its helper; the inner one is native.
+  const overflow = integers(
+    'bound-overflow',
+    1,
+    (block, [value], fp) =>
+      block.fp(
+        'mul',
+        block.fp(
+          'mul',
+          block.cast('unsigned_to_float', fp, value!),
+          block.constant(fp, 0x7e37e43c8800759cn),
+        ),
+        block.constant(fp, 0n),
+      ),
+    true,
+  );
+  for (const language of LANGUAGES) {
+    const text = emit(overflow.ir, { source: overflow.source }, language).emission.text;
+    assert.equal(text.match(/fp_mul\(/g)?.length, 1, text);
+    agreeIntegers(overflow, language, U64_CASES);
+  }
+});
+
+test('integer-to-float conversions of zero- and sign-extended values convert the narrow value', () => {
+  const cases: readonly [
+    string,
+    (block: BlockBuilder, value: Value, fp: DataType) => Value,
+    readonly bigint[],
+  ][] = [
+    // A u32 at or above 2^31 is positive in the signed 64-bit conversion.
+    [
+      'zext-u32-signed',
+      (block, value, fp) =>
+        block.cast(
+          'signed_to_float',
+          fp,
+          block.cast('zero_extend', integer(64), block.cast('truncate', integer(32), value)),
+        ),
+      [0n, 0x7fffffffn, 0x80000000n, 0x80000001n, 0xffffffffn],
+    ],
+    // A u16 at or above 2^15 is positive in the signed 32-bit conversion.
+    [
+      'zext-u16-signed',
+      (block, value, fp) =>
+        block.cast(
+          'signed_to_float',
+          fp,
+          block.cast('zero_extend', integer(32), block.cast('truncate', integer(16), value)),
+        ),
+      [0n, 0x7fffn, 0x8000n, 0x8001n, 0xffffn],
+    ],
+    [
+      'zext-u16-unsigned',
+      (block, value, fp) =>
+        block.cast(
+          'unsigned_to_float',
+          fp,
+          block.cast('zero_extend', integer(64), block.cast('truncate', integer(16), value)),
+        ),
+      [0n, 0x8000n, 0xffffn],
+    ],
+    // A negative i32 stays negative through its sign extension.
+    [
+      'sext-i32-signed',
+      (block, value, fp) =>
+        block.cast(
+          'signed_to_float',
+          fp,
+          block.cast('sign_extend', integer(64), block.cast('truncate', integer(32), value)),
+        ),
+      [0n, 0x7fffffffn, 0x80000000n, 0xffffffffn],
+    ],
+  ];
+  // Values within the narrowed formal's declared range.
+  for (const [name, make, values] of cases) {
+    const f = integers(name, 1, (block, [value], fp) => make(block, value!, fp));
+    const text = emit(f.ir, { source: f.source }).emission.text;
+    // The conversion reads the narrow operand, not a wider reinterpretation.
+    assert.doesNotMatch(text, /cast_\w+_to_float\(/, text);
+    assert.doesNotMatch(
+      text,
+      name.startsWith('zext') ? /\(double\)\(u?int\d+_t\)/ : /\(double\)\(u?int64_t\)/,
+      text,
+    );
+    const runs = values.map((value) => [value]);
+    for (const language of LANGUAGES) agreeIntegers(f, language, runs);
+    clangAgrees(f, runs, false);
+  }
+});

@@ -145,10 +145,13 @@ export const localValidationSchema = z.strictObject({
 });
 /** Provenance metadata that was bounded out of this emission. The pseudocode text is
  * always complete; a record here means the named metadata is absent (`omitted` counts
- * the records known to be dropped, `null` when the bound hit before they were counted). */
+ * the records known to be dropped, `null` when the bound hit before they were counted).
+ * `output_limit`: a size bound of the emission or its stored artifact; `budget`: the
+ * request's work went to the text render first. `evidence` counts proof references
+ * (type and emission citations) left out of the published proof catalog. */
 export const emissionOmissionSchema = z.strictObject({
-  kind: z.enum(['mappings', 'inferences', 'requirements']),
-  reason: z.literal('output_limit'),
+  kind: z.enum(['mappings', 'inferences', 'requirements', 'evidence']),
+  reason: z.enum(['output_limit', 'budget']),
   omitted: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).nullable(),
 });
 /** Canonical compact emission. Each distinct entity identity, proof identity and
@@ -170,7 +173,7 @@ export const emissionSchema = z
     local_validation: z.array(localValidationSchema).max(1000).optional(),
     inferences: z.array(inferenceSchema).max(10000).optional(),
     requirements: z.array(requirementSchema).max(1000).optional(),
-    omitted: z.array(emissionOmissionSchema).max(3).optional(),
+    omitted: z.array(emissionOmissionSchema).max(4).optional(),
     /** `options.structures: "external"`: the C declarations the text refers to by name (a
      * `typedef struct N N;` or the partial body of `struct N`), for the caller to keep
      * once per image. Absent when the text carries them (the default) or none are used. */
