@@ -1023,3 +1023,136 @@ test('darwin-arm64: a consumed stack argument that is a function entry prints it
     assert.ok(!observed.events.includes('store'), emission.text);
   }
 });
+
+/** Darwin arm64 `n = f(n, a)` variadic call (as `darwinVariadicCaller`
+ * `tail`'s slot) after an earlier call `sub_5000(p)` that receives a frame
+ * address: the frame is 32 bytes below entry SP, its outgoing slot is
+ * [SP, SP + 8) and `p` is
+ * - `above`: SP + 16, a local above the slot;
+ * - `or`: (SP + 16) | 4, an inexact address at or above SP + 16;
+ * - `at`: SP itself, the slot's own address;
+ * - `dynamic`: SP + x2, an unbounded frame address. */
+function darwinEscapeCaller(variant: 'above' | 'or' | 'at' | 'dynamic') {
+  const abi = darwinArm64Abi;
+  const [x0, x1, x2] = [0, 1, 2].map((index) => location(abi, index)) as [
+    RegisterDescriptor,
+    RegisterDescriptor,
+    RegisterDescriptor,
+  ];
+  const direct = (value: bigint) => ({
+    kind: 'direct' as const,
+    address: { image_id: image, space: 'va' as const, value },
+  });
+  const clobbers = {
+    registers: [x0],
+    flags: [],
+    memory: 'unknown_read_write' as const,
+  };
+  const b = builder(`darwin-escape-caller-${variant}`),
+    entry = b.block('entry');
+  const sp = entry.readRegister(abi.stack_pointer),
+    count = entry.readRegister(x0),
+    a = entry.readRegister(x1),
+    index = entry.readRegister(x2);
+  const frame = entry.int('sub', sp, entry.constant(u64, 32n));
+  entry.writeRegister(abi.stack_pointer, frame);
+  const local = entry.int('add', frame, entry.constant(u64, 16n));
+  entry.writeRegister(
+    x0,
+    variant === 'above'
+      ? local
+      : variant === 'or'
+        ? entry.int('or', local, entry.constant(u64, 4n))
+        : variant === 'at'
+          ? frame
+          : entry.int('add', frame, index),
+  );
+  entry.call(direct(0x5000n), [], [], clobbers);
+  entry.store(frame, a);
+  entry.writeRegister(x0, count);
+  entry.call(direct(0x2000n), [], [], clobbers);
+  entry.writeRegister(abi.stack_pointer, sp);
+  entry.return([]);
+  const ir = constructSSA(b.finish(entry, [])).value as SSAForm;
+  const call = ir.blocks[0]!.instructions.find(
+    (node) =>
+      node.kind === 'call' &&
+      node.target.kind === 'direct' &&
+      node.target.address.value === 0x2000n,
+  )!;
+  const types = recoverTypes(ir, abi, createOperationContext(), {
+    image_id: image,
+    slice_id: slice,
+    revision: 0,
+  });
+  const callee = {
+    call_id: call.id,
+    parameters: [{ ...x0, width_bits: 32 }],
+    parameter_types: [integer(32)],
+    returns: [x0],
+    return_types: [u64],
+    parameter_state: 'ambiguous' as const,
+    argument_list_complete: false,
+    variadic: { named_integer: 1, named_vector: 0, named_stack_bytes: 0n, named: [x0] },
+    evidence_ids: [],
+  };
+  return { ir, extra: { types, source: { abi, callees: [callee], addresses: [] } } };
+}
+
+for (const variant of ['above', 'or', 'at', 'dynamic'] as const)
+  test(`darwin-arm64 ${variant}: an escaped frame address ${variant === 'above' || variant === 'or' ? 'above the outgoing slot lets its store become the argument' : variant === 'at' ? 'at the outgoing slot keeps its store' : 'without a lowest exact origin keeps the store'} and executes like the oracle`, () => {
+    const fixture = darwinEscapeCaller(variant);
+    const bound = variant === 'above' || variant === 'or';
+    const { count, a } = callerInputs;
+    for (const language of ['c-like', 'python-like'] as const) {
+      const { emission } = emit(fixture.ir, fixture.extra, language);
+      assert.equal(
+        emission.local_validation?.some((record) => record.rule === 'variadic_stack_arguments') ??
+          false,
+        bound,
+        emission.text,
+      );
+      // The floor premise is recorded exactly when a slot below it binds.
+      assert.equal(
+        emission.requirements?.some(
+          (item) =>
+            item.kind === 'abi_conformance' &&
+            item.explanation.includes('designates bytes at or above itself'),
+        ) ?? false,
+        bound,
+        emission.text,
+      );
+      // The unbounded address is not a printable argument (x2 stays unread).
+      const formals = emittedFormals(emission);
+      const inputs = [count, a];
+      assert.equal(formals.length, inputs.length, emission.text);
+      const observed = execute(
+        emission,
+        new Map(formals.map((formal, position) => [formal.statement_id, inputs[position]!])),
+        new Map(),
+        0n,
+        new Map(),
+        new Map(),
+        new Map([
+          ['sub_5000', () => 0n],
+          ['sub_2000', (args: readonly bigint[]) => args[0]! + 1n],
+        ]),
+        acknowledgeRequirements(emission),
+      );
+      assert.deepEqual(
+        (observed.source_calls ?? []).filter((call) => call.name === 'sub_2000'),
+        [{ name: 'sub_2000', arguments: bound ? [count, a] : [count] }],
+        `${language}\n${emission.text}`,
+      );
+      assert.equal(
+        (observed.source_calls ?? []).filter((call) => call.name === 'sub_5000').length,
+        1,
+      );
+      // A consumed store prints nothing; an unconsumed one stays a statement.
+      assert.equal(observed.events.includes('store'), !bound, `${language}\n${emission.text}`);
+    }
+    const checked = emit(fixture.ir, fixture.extra, 'c-like', 'checked').emission;
+    assert.ok(
+      !checked.local_validation?.some((record) => record.rule === 'variadic_stack_arguments'),
+    );
+  });
