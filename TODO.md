@@ -874,7 +874,7 @@ Files that several items touch:
 
 ### P3: Header comment diet
 
-- [ ] **Problem.** OD prints 33.5 KB of comments against Ghidra's 1.3 KB, and the Claude tokenizer counts them.
+- [x] **Problem.** OD prints 33.5 KB of comments against Ghidra's 1.3 KB, and the Claude tokenizer counts them.
   - **Change** (one emitter change each):
     1. Drop the bare `/* partial */` before struct bodies (183 lines; `renderer.ts:3424-3431`). Keep `/* conflicts with X, Y */`, and drop the `partial; N fns;` prefix.
     2. Table notes drop the basis words (with P1).
@@ -888,6 +888,7 @@ Files that several items touch:
   - **Acceptance:** only comment bytes change (about −14.5 KB); lexical metrics byte-identical; checked view identical.
   - **Expected effect:** Claude geomean about −0.015 [estimate].
   - **Depends on:** P2 (same function).
+  - **Done (`wt/rm4-p3`):** OD lane vs `od-main-66cb8fe`: 139 of 235 texts change; only comment bytes (360 `/* partial… */` lines, 119 `open arity` lines shortened, 21 `import from` comments dropped, 7,855 bytes removed in total); identical after stripping comments (0 lexical diffs); coverage and failures unchanged; versions C 106, Python-like 102.
 
 ### P4: Struct class names without another function's name
 
@@ -1004,7 +1005,7 @@ Files that several items touch:
 
 ### T3: Retain prepared units whose reasons do not depend on the budget
 
-- [ ] **Problem.** Units whose only reason is "unresolved control flow" are never kept (any indirect call in the body sets it), so hub callees are prepared again in every request: `sqlite3Initialize` 30–46 times, `sqlite3Malloc` 30, `sqlite3_free` 50, `sqlite3Realloc` 13, … In total 580 repeat preparations.
+- [x] **Problem.** Units whose only reason is "unresolved control flow" are never kept (any indirect call in the body sets it), so hub callees are prepared again in every request: `sqlite3Initialize` 30–46 times, `sqlite3Malloc` 30, `sqlite3_free` 50, `sqlite3Realloc` 13, … In total 580 repeat preparations.
   - **Root cause:** `reusablePreparation` (`source-facts.ts:1125-1126`) requires `!unit.reasons.length`, and so does the persisted schema (`native-summaries.ts:88`). The documented contract (`:1101-1110`) needs only "hit no limit".
   - **Change:**
     - Split the predicate:
@@ -1018,6 +1019,7 @@ Files that several items touch:
     - The store schema test.
   - **Acceptance:** texts byte-identical (prototype: 0 of 129 changed); work identical after T2.
   - **Expected effect:** SQLite −6 to −7 s on top of T1 (measured).
+  - **Done (T3):** SQLite lane (114 functions, one process): repeat preparations 695 → 152 (preparations 1201 → 658, same binary with the old predicate behind a scratch switch); lane texts and per-function work identical to `od-main-bf6f43f` (0 of 114 sqlite texts or work counts differ); in the same-binary pair wall time 188 s → 147 s (load average 28 → 16, so noisy), user CPU 26 m → 16.7 m. Summary format 5.
   - **Depends on:** T2.
 
 ### T4: Do not load effects-only native dependencies

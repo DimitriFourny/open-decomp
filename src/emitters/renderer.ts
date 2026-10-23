@@ -3636,12 +3636,12 @@ export class Renderer {
       }
       const image = this.sourceStructs.image(id);
       const runtime = this.typeRecords.get(id)?.source === 'runtime';
+      // A body is a partial layout by construction (only the accessed members), so only an
+      // ObjC runtime source and a conflict with another function's layout are worth a note.
+      if (runtime) lines.push('/* ObjC ivars at static class-metadata offsets; partial */');
+      else if (image?.conflicts.length)
+        lines.push(`/* conflicts with ${image.conflicts.join(', ')} */`);
       lines.push(
-        runtime
-          ? '/* ObjC ivars at static class-metadata offsets; partial */'
-          : `/* partial${image && image.functions > 1 ? `; ${image.functions} fns` : ''}${
-              image?.conflicts.length ? `; conflicts with ${image.conflicts.join(', ')}` : ''
-            } */`,
         `struct ${name} { ${parts.join(' ')} }${packed ? ' __attribute__((packed))' : ''};`,
       );
       bodies.push({ name, lines, gaps });
@@ -3945,14 +3945,18 @@ export class Renderer {
         first = lines.length;
       // Comment text only: names stay readable, a comment terminator cannot occur.
       const plain = (text: string): string => text.replace(/\*\//g, '* /');
-      // Compact for readers: the library basename, plus the native name only when it is
+      // Compact for readers: an import comment names the native symbol only when it is
       // not the printed name or its Mach-O `_`-prefixed form. Slot VA, binding records
       // and the declaration's source stay in the mapped evidence. An image VA is stated only
       // where the text does not already carry it (the printed name or a python memory_view).
       const native = global.import?.name;
       const hex = global.address.value.toString(16);
+      // The library is not printed: the bind records carry it, and the Python-like
+      // `import_view` names it and the native name as arguments.
       const where = global.import
-        ? `import${native === name || native === `_${name}` ? '' : ` ${plain(native!)}`}${global.import.library === null ? '' : ` from ${plain(global.import.library.slice(global.import.library.lastIndexOf('/') + 1))}`}`
+        ? python || native === name || native === `_${name}`
+          ? ''
+          : `import ${plain(native!)}`
         : [
             ...(python || name.split('_').includes(hex) ? [] : [`VA 0x${hex}`]),
             ...(relative === undefined ? [] : [plain(relative)]),
@@ -10316,7 +10320,7 @@ export class Renderer {
       if (support !== undefined) support += delta;
     }
     if (this.openCallees.size) {
-      const comment = `open arity (calls show proven args only): ${[...this.openCallees].join(', ')}`;
+      const comment = `open arity (proven args only): ${[...this.openCallees].join(', ')}`;
       const delta = insert(scratchAt, [
         this.language === 'c-like' ? `/* ${comment} */` : `# ${comment}`,
       ]);
