@@ -9541,16 +9541,6 @@ export class Renderer {
       const start = this.writer.offset;
       // A rotated phi's header-start copy prints like the edge copy it replaces.
       const pseudo = this.rotatedPhis.get(anchor)?.get(value.id);
-      if (pseudo && process.env.L4DBG)
-        console.error('L4DBG', {
-          x: value.id,
-          holder: this.variables.get(value.id)?.id,
-          declared: this.declaredSpelling(value),
-          own: this.valueType(value),
-          type: this.sourceValueTypes.get(value.id) ?? this.program.source?.value_types?.get(value.id)?.type_id,
-          spelled: this.localSpellings.get(value.id),
-          pholder: this.variables.get(pseudo.id)?.id,
-        });
       this.writer.statement(
         depth,
         `${this.local(value)} = ${
