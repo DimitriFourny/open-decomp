@@ -57,6 +57,8 @@ These encodings expose some operands as opaque display text in the pinned decode
 
 - `INS` (general register, `INS_asimdins_IR_r`): inserts the low 8/16/32/64 bits of Wn/Xn into the lane of Vd that `imm5` selects (element size from its lowest set bit, index from the bits above) and keeps every other bit of the 128-bit root; `imm5` without a set bit in 0..3 is reserved and stays an unknown effect.
 
+- `ST1` / `LD1` single structure, one lane (`ST1_asisdlso_*`, `ST1_asisdlsop_*`, `LD1_…`): the decoder shows these operands as opaque text, so the lifter reads `Q`, `S`, `size`, `opcode` (8-bit lane `Q:S:size`, 16-bit `Q:S:size<1>`, 32-bit `Q:S`, 64-bit `Q`), `Rn` (31 is SP), `Rt` and, for the post-indexed form, `Rm` (31: add the element size in bytes, else add `X[Rm]`). `ST1` stores `extract(V[Rt], lane*esize, esize)` little-endian; `LD1` inserts the loaded element into `V[Rt]` and keeps every other bit. The writeback adds to the base after the access. The multi-register forms (`asisdlse`, `asisdlsep`), `LD1R` and `ST2`–`ST4` / `LD2`–`LD4` stay unknown effects with all memory clobbered; they are not bounded (`asisdls` is excluded from `boundedUnknownClobbers`).
+
 Other encodings of the same mnemonic families (e.g. `FCVTZS` fixed-point, `FCVT{N,M,P,A}*`, FP16, lane-indexed `DUP`) remain unknown effects.
 
 ## Bounded effects of unlifted SIMD&FP data processing
