@@ -109,11 +109,13 @@ import {
 
 // Persistence migrations are independent of the public wire/artifact schema version.
 const STORE_SCHEMA_VERSION = 7;
-/** Per-project cap on persisted prepared-callee summaries (compressed payload bytes). Entries
- * of superseded revisions go first, then the oldest write; see `flushNativeSummaries`. Sized
- * for the open-time job, which persists every retained unit of the image: SQLite's 3.4k units
- * take about 0.8 GB (a unit is mostly unique identifiers: IR values, evidence, traced reads). */
-export const DEFAULT_NATIVE_SUMMARY_BYTES = 2048 * 1024 * 1024;
+/** Per-project cap on persisted prepared-callee summaries (compressed payload bytes), the
+ * default of the `unitStoreBytes` / `--unit-store-mib` open option. Entries of superseded
+ * revisions go first, then the oldest write; see `flushNativeSummaries`. The open-time job
+ * imports callees first within it. SQLite's 3.4k retained units take about 600 MB; measured
+ * on its 114 corpus functions, 256 MiB (1.6k units, callees first) kept the decompile-time
+ * gain of the whole set at 40% of the job's time (docs/internals/project-cache.md §4a). */
+export const DEFAULT_NATIVE_SUMMARY_BYTES = 256 * 1024 * 1024;
 /** Delivery-only artifacts (analysis caching disabled) kept in memory for this connection. */
 const MAX_TRANSIENT_ARTIFACT_BYTES = 64 * 1024 * 1024;
 /** Queued summaries are encoded and written later (idle slices, close, or this pressure bound),
@@ -1547,21 +1549,20 @@ export class SqliteProjectStore implements ProjectStore {
       this.#pendingSummaryWeight -= row.weight;
       if (row.revision === current) batch.push(row);
     }
-    this.#insertNativeSummaries(
-      current,
-      batch.flatMap((row) => {
-        const encoded = this.#encodeSummary(row);
-        return encoded ? [{ ...row, ...encoded }] : [];
-      }),
-    );
+    const rows = batch.flatMap((row) => {
+      const encoded = this.#encodeSummary(row);
+      return encoded ? [{ ...row, ...encoded }] : [];
+    });
+    if (rows.length > 0) this.#insertNativeSummaries(current, rows);
     return this.#pendingSummaries.size;
   }
 
   /** One cache-write transaction: drop superseded revisions, insert `rows` (encoded, of the
-   * current revision) in order, evict past the byte cap. Never throws. */
-  #insertNativeSummaries(current: number, rows: readonly EncodedSummary[]): void {
-    if (rows.length === 0) return;
-    let lowered = false;
+   * current revision) in order, evict past the byte cap. Never throws; returns the rows
+   * inserted (0 when the write failed). */
+  #insertNativeSummaries(current: number, rows: Iterable<EncodedSummary>): number {
+    let lowered = false,
+      inserted = 0;
     try {
       if (this.#synchronous > 1) {
         this.#db.exec('PRAGMA synchronous=NORMAL');
@@ -1577,7 +1578,7 @@ export class SqliteProjectStore implements ProjectStore {
         const insert = this.#prepare(
           'INSERT OR REPLACE INTO native_summaries(scope,function_id,revision,seq,allowance,work,bytes,digest,payload) VALUES (?,?,?,?,?,?,?,?,?)',
         );
-        for (const row of rows)
+        for (const row of rows) {
           insert.run(
             row.scope,
             row.function_id,
@@ -1589,6 +1590,12 @@ export class SqliteProjectStore implements ProjectStore {
             row.digest,
             row.payload,
           );
+          inserted++;
+        }
+        if (inserted === 0) {
+          this.#db.exec('ROLLBACK');
+          return 0;
+        }
         let total = numberField(
           this.#prepare('SELECT COALESCE(SUM(bytes),0) AS total FROM native_summaries').get(),
           'total',
@@ -1611,12 +1618,14 @@ export class SqliteProjectStore implements ProjectStore {
           }
         }
         this.#db.exec('COMMIT');
+        return inserted;
       } catch (error) {
         this.#db.exec('ROLLBACK');
         throw error;
       }
     } catch {
       // A cache write never fails a request; the rows are recomputed when next needed.
+      return 0;
     } finally {
       if (lowered) this.#db.exec(`PRAGMA synchronous=${this.#synchronous}`);
     }
@@ -1634,6 +1643,19 @@ export class SqliteProjectStore implements ProjectStore {
     return ids;
   }
 
+  nativeSummaryUsage(): { readonly bytes: number; readonly cap: number } {
+    const current = this.#current();
+    return {
+      bytes: numberField(
+        this.#prepare(
+          'SELECT COALESCE(SUM(bytes),0) AS total FROM native_summaries WHERE revision=?',
+        ).get(current),
+        'total',
+      ),
+      cap: this.#summaryCap,
+    };
+  }
+
   copyProject(destination: string): void {
     this.#current();
     this.flushNativeSummaries();
@@ -1646,48 +1668,90 @@ export class SqliteProjectStore implements ProjectStore {
     this.#prepare('VACUUM INTO ?').run(join(destination, 'project.sqlite'));
   }
 
-  importNativeSummaries(source: string, scope: string): number {
+  importNativeSummaries(
+    sources: readonly string[],
+    scope: string,
+    order: readonly string[],
+  ): number {
     const current = this.#current();
-    const db = new DatabaseSync(join(source, 'project.sqlite'), { readOnly: true });
-    const rows: EncodedSummary[] = [];
+    const rank = new Map(order.map((id, index) => [id, index]));
+    const dbs: DatabaseSync[] = [];
     try {
+      for (const source of sources)
+        dbs.push(new DatabaseSync(join(source, 'project.sqlite'), { readOnly: true }));
       const present = this.#prepare(
         'SELECT allowance FROM native_summaries WHERE scope=? AND function_id=? AND revision=?',
       );
-      for (const row of db
-        .prepare(
-          'SELECT function_id,allowance,work,digest,payload FROM native_summaries WHERE scope=? AND revision=? ORDER BY seq',
-        )
-        .iterate(scope, current)) {
-        const function_id = stringField(row, 'function_id'),
-          allowance = numberField(row, 'allowance'),
-          payload = row['payload'],
-          digest = row['digest'];
-        if (
-          !(payload instanceof Uint8Array) ||
-          typeof digest !== 'string' ||
-          summaryDigest(scope, function_id, current, payload) !== digest ||
-          payload.length > Math.min(this.#summaryCap, MAX_NATIVE_SUMMARY_ROW_BYTES)
-        )
-          continue;
-        // A row this project already holds at an allowance the import cannot improve stays.
-        const prior = present.get(scope, function_id, current);
-        if (prior && numberField(prior, 'allowance') <= allowance) continue;
-        rows.push({
-          scope,
-          function_id: entityIdSchema.parse(function_id),
-          revision: current,
-          allowance,
-          work: numberField(row, 'work'),
-          digest,
-          payload,
-        });
+      // One candidate per function: the row of the smallest allowance any copy holds.
+      const candidates = new Map<
+        string,
+        { readonly source: number; readonly allowance: number; readonly bytes: number }
+      >();
+      dbs.forEach((db, source) => {
+        for (const row of db
+          .prepare(
+            'SELECT function_id,allowance,bytes FROM native_summaries WHERE scope=? AND revision=?',
+          )
+          .iterate(scope, current)) {
+          const id = stringField(row, 'function_id'),
+            allowance = numberField(row, 'allowance'),
+            prior = candidates.get(id);
+          if (!prior || allowance < prior.allowance)
+            candidates.set(id, { source, allowance, bytes: numberField(row, 'bytes') });
+        }
+      });
+      // Callees first, as many as fit in the cap next to the rows of this revision already
+      // held; a row this project holds at an allowance the import cannot improve stays.
+      let room = this.#summaryCap - this.nativeSummaryUsage().bytes;
+      const selected: string[] = [];
+      for (const [id, candidate] of [...candidates].sort(
+        ([a], [b]) =>
+          (rank.get(a) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b) ?? Number.MAX_SAFE_INTEGER) ||
+          (a < b ? -1 : a > b ? 1 : 0),
+      )) {
+        const prior = present.get(scope, id, current);
+        if (prior && numberField(prior, 'allowance') <= candidate.allowance) continue;
+        if (candidate.bytes > room) continue;
+        room -= candidate.bytes;
+        selected.push(id);
       }
+      const reads = dbs.map((db) =>
+        db.prepare(
+          'SELECT allowance,work,digest,payload FROM native_summaries WHERE scope=? AND function_id=? AND revision=?',
+        ),
+      );
+      const summaryCap = this.#summaryCap;
+      // Written callers first, callees last: eviction (oldest write first) then drops the
+      // leaves of the call graph before the callees many functions share.
+      function* rows(): Generator<EncodedSummary> {
+        for (let index = selected.length - 1; index >= 0; index--) {
+          const function_id = selected[index]!;
+          const row = reads[candidates.get(function_id)!.source]!.get(scope, function_id, current);
+          const payload = row?.['payload'],
+            digest = row?.['digest'];
+          if (
+            !row ||
+            !(payload instanceof Uint8Array) ||
+            typeof digest !== 'string' ||
+            summaryDigest(scope, function_id, current, payload) !== digest ||
+            payload.length > Math.min(summaryCap, MAX_NATIVE_SUMMARY_ROW_BYTES)
+          )
+            continue;
+          yield {
+            scope,
+            function_id: entityIdSchema.parse(function_id),
+            revision: current,
+            allowance: numberField(row, 'allowance'),
+            work: numberField(row, 'work'),
+            digest,
+            payload,
+          };
+        }
+      }
+      return this.#insertNativeSummaries(current, rows());
     } finally {
-      db.close();
+      for (const db of dbs) db.close();
     }
-    this.#insertNativeSummaries(current, rows);
-    return rows.length;
   }
 
   readNativeSummary(scope: string, functionId: string): NativeSummaryRow | null {

@@ -40,8 +40,9 @@ export interface NativeOpenJobOptions {
   readonly signal?: AbortSignal;
 }
 export interface NativeOpenJobReport {
-  /** `completed`: every pending function was prepared; `limited`: the job's work budget
-   * stopped it; `cancelled` and `failed` import nothing; `skipped`: nothing to prepare. */
+  /** `completed`: every pending function was prepared; `limited`: the job's work budget or
+   * the unit store's byte cap stopped it; `cancelled` and `failed` import nothing;
+   * `skipped`: nothing to prepare, or the store is full. */
   readonly state: 'completed' | 'limited' | 'cancelled' | 'failed' | 'skipped';
   readonly ms: number;
   /** Work the helpers charged. */
@@ -51,7 +52,10 @@ export interface NativeOpenJobReport {
   readonly prepared: number;
   /** Of those, units retained (the rest hit a limit and keep nothing). */
   readonly retained: number;
-  /** Rows imported into the project's store (units and markers). */
+  /** Compressed payload bytes the helpers wrote (units and markers). */
+  readonly bytes: number;
+  /** Rows imported into the project's store (units and markers), callees first within the
+   * store's byte cap. */
   readonly stored: number;
   readonly message?: string;
 }
@@ -120,7 +124,12 @@ type HelperCommand =
   | { readonly kind: 'finish' };
 type HelperEvent =
   | { readonly kind: 'ready' }
-  | { readonly kind: 'prepared'; readonly work: number; readonly retained: number }
+  | {
+      readonly kind: 'prepared';
+      readonly work: number;
+      readonly retained: number;
+      readonly bytes: number;
+    }
   | { readonly kind: 'finished' }
   | { readonly kind: 'error'; readonly message: string };
 
@@ -164,9 +173,11 @@ class Helper {
       waiting?.({ kind: 'error', message: 'Open-time job helper exited' });
     });
   }
+
   send(command: HelperCommand): void {
     this.#child.stdin.write(`${JSON.stringify(command)}\n`);
   }
+
   next(): Promise<HelperEvent> {
     const queued = this.#events.shift();
     if (queued) return Promise.resolve(queued);
@@ -174,6 +185,7 @@ class Helper {
       return Promise.resolve({ kind: 'error', message: 'Open-time job helper exited' });
     return new Promise((resolve) => (this.#waiting = resolve));
   }
+
   kill(): void {
     this.#child.kill('SIGKILL');
   }
@@ -191,6 +203,7 @@ export async function runNativeOpenJob(
     work = 0,
     prepared = 0,
     retained = 0,
+    bytes = 0,
     stored = 0;
   const report = (state: NativeOpenJobReport['state'], message?: string): NativeOpenJobReport => ({
     state,
@@ -199,13 +212,15 @@ export async function runNativeOpenJob(
     jobs,
     prepared,
     retained,
+    bytes,
     stored,
     ...(message === undefined ? {} : { message }),
   });
   if (
     typeof store.copyProject !== 'function' ||
     typeof store.importNativeSummaries !== 'function' ||
-    typeof store.nativeSummaryFunctions !== 'function'
+    typeof store.nativeSummaryFunctions !== 'function' ||
+    typeof store.nativeSummaryUsage !== 'function'
   )
     return report('skipped', 'The project store keeps no native units');
   const helpers: Helper[] = [];
@@ -236,6 +251,13 @@ export async function runNativeOpenJob(
       (fn) => !present.has(fn.id),
     );
     if (pending.length === 0) return report('skipped');
+    // The job stops handing out functions once the helpers wrote what the cap leaves room
+    // for, and does not start for less than a sixteenth of it (a capped store stays nearly
+    // full once the job filled it: requests' rows replace the oldest).
+    const usage = store.nativeSummaryUsage();
+    const room = usage.cap - usage.bytes;
+    if (room <= 0 || room < usage.cap / 16)
+      return report('skipped', 'The unit store is at its byte cap');
     jobs = Math.max(
       1,
       Math.min(
@@ -255,7 +277,8 @@ export async function runNativeOpenJob(
       helpers.push(new Helper(project));
     }
     let next = 0,
-      exhausted = false;
+      exhausted = false,
+      full = false;
     const run = async (helper: Helper): Promise<void> => {
       helper.send({ kind: 'open', project: helper.project });
       for (;;) {
@@ -264,10 +287,12 @@ export async function runNativeOpenJob(
         if (event.kind === 'prepared') {
           work += event.work;
           retained += event.retained;
+          bytes += event.bytes;
         }
         if (event.kind === 'finished') return;
         if (work >= budget) exhausted = true;
-        if (signal?.aborted || exhausted || next >= pending.length) {
+        if (bytes >= room) full = true;
+        if (signal?.aborted || exhausted || full || next >= pending.length) {
           helper.send({ kind: 'finish' });
           continue;
         }
@@ -279,8 +304,16 @@ export async function runNativeOpenJob(
     };
     await Promise.all(helpers.map(run));
     signal?.throwIfAborted();
-    for (const helper of helpers) stored += store.importNativeSummaries(helper.project, key);
-    return report(next < pending.length ? 'limited' : 'completed');
+    stored = store.importNativeSummaries(
+      helpers.map((helper) => helper.project),
+      key,
+      pending.map((fn) => fn.id),
+    );
+    if (next >= pending.length) return report('completed');
+    return report(
+      'limited',
+      exhausted ? 'The job work budget was exhausted' : 'The unit store byte cap was reached',
+    );
   } catch (error) {
     if (signal?.aborted) return report('cancelled');
     return report('failed', error instanceof Error ? error.message : String(error));
@@ -351,6 +384,8 @@ export function runNativeUnitHelper(): void {
   let store: SqliteProjectStore | undefined;
   let input: NativePreparationInput | undefined;
   let byId: ReadonlyMap<string, FunctionRecord> | undefined;
+  // Payload bytes written so far (the copy's own rows included).
+  let written = 0;
   const send = (event: HelperEvent): void => {
     process.stdout.write(`${JSON.stringify(event)}\n`);
   };
@@ -359,7 +394,11 @@ export function runNativeUnitHelper(): void {
     try {
       const command = JSON.parse(line) as HelperCommand;
       if (command.kind === 'open') {
-        store = SqliteProjectStore.open(command.project, 'resume');
+        // The copy keeps every row; the owner chooses what fits its cap at import.
+        store = SqliteProjectStore.open(command.project, 'resume', {
+          native_summary_bytes: Number.MAX_SAFE_INTEGER,
+        });
+        written = store.nativeSummaryUsage().bytes;
         const snapshot = store.snapshot();
         const image = snapshot.images[0]!;
         const context = createOperationContext({
@@ -382,7 +421,11 @@ export function runNativeUnitHelper(): void {
           work += result.work;
           if (result.retained) retained++;
         }
-        send({ kind: 'prepared', work, retained });
+        // Written now, so the owner can stop at its byte cap.
+        store?.flushNativeSummaries();
+        const now = store?.nativeSummaryUsage().bytes ?? written;
+        send({ kind: 'prepared', work, retained, bytes: now - written });
+        written = now;
       } else {
         store?.flushNativeSummaries();
         void store?.close().then(() => {

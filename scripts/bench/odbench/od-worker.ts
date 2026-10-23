@@ -89,7 +89,7 @@ async function main(): Promise<void> {
     const openStarted = performance.now();
     session = await api.openBinary(request.input, {
       cachePath: request.cachePath,
-      ...(request.open_job ? {} : { openJob: false }),
+      openJob: request.open_job ? {} : false,
     });
     openFinished = performance.now();
     // A build without the open-time job has no `openJob` field.

@@ -212,7 +212,12 @@ export async function startHttpServer(
   input: HttpConfig,
   workerRuntime: Pick<
     QueryServiceOptions,
-    'entry_point' | 'exec_argv' | 'cancel_grace_ms' | 'analysis_cache' | 'open_job'
+    | 'entry_point'
+    | 'exec_argv'
+    | 'cancel_grace_ms'
+    | 'analysis_cache'
+    | 'open_job'
+    | 'native_summary_bytes'
   > = {},
   /** Server-wide request defaults (`decompile.language` / `view`); a request argument wins. */
   defaults: Pick<McpServerDefaults, 'decompile'> = {},

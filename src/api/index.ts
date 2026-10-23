@@ -59,12 +59,19 @@ export interface OpenBinaryOptions {
   readonly budget?: ToolInput<'project_open'>['budget'];
   readonly signal?: AbortSignal;
   readonly onProgress?: (job: WireJob) => void;
-  /** The open-time job (default on, `{}`): after import, the generic native unit of every
-   * indexed function is prepared (callees first, in helper processes) and persisted, so
-   * decompiles reuse them. `false` skips it; output and per-request work are identical
-   * either way. Cancel it with `signal`; it never fails the open. Skipped when
-   * `analysisCache` is false. Its own `signal` cancels the job alone. */
+  /** The open-time job (default off; the CLI, MCP and odbench turn it on): after import, the
+   * generic native unit of every indexed function is prepared (callees first, in helper
+   * processes) and persisted, so decompiles reuse them. Output and per-request work are
+   * identical either way. Off by default because it starts helper processes and spends CPU
+   * a library caller did not ask for; pass `{}` to run it. Cancel it with `signal` (or its
+   * own `signal`, which cancels the job alone); it never fails the open. Skipped when
+   * `analysisCache` is false. */
   readonly openJob?: (OpenJobOptions & { readonly signal?: AbortSignal }) | false;
+  /** Byte cap on the project's persisted native units (compressed payload), default
+   * `DEFAULT_NATIVE_SUMMARY_BYTES`. Past it the oldest writes are evicted; the open-time job
+   * keeps callees first. Rows the cap drops are prepared on demand: output and work are
+   * unaffected. */
+  readonly unitStoreBytes?: number;
 }
 export interface DecompileOptions {
   readonly emitter?: 'c-like' | 'python-like';
@@ -173,6 +180,9 @@ export class BinarySession {
       authorized_roots: [dirname(inputPath), cachePath],
       max_workers: 1,
       ...(options.analysisCache === false ? { analysis_cache: false } : {}),
+      ...(options.unitStoreBytes === undefined
+        ? {}
+        : { native_summary_bytes: options.unitStoreBytes }),
     });
     try {
       options.signal?.throwIfAborted();
@@ -205,8 +215,12 @@ export class BinarySession {
         );
       }
       options.signal?.throwIfAborted();
-      if (options.openJob !== false && options.analysisCache !== false)
-        session.openJob = await session.#runOpenJob(options.openJob ?? {}, options);
+      if (
+        options.openJob !== undefined &&
+        options.openJob !== false &&
+        options.analysisCache !== false
+      )
+        session.openJob = await session.#runOpenJob(options.openJob, options);
       return session;
     } catch (error) {
       await service.close('cancel');
@@ -244,6 +258,7 @@ export class BinarySession {
         jobs: 0,
         prepared: 0,
         retained: 0,
+        bytes: 0,
         stored: 0,
         message: error instanceof Error ? error.message : String(error),
       };

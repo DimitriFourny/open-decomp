@@ -29,7 +29,7 @@ export interface RunStdioOptions {
   readonly outputStallMs?: number;
 }
 
-const HELP = `Usage: open-decomp mcp start [--transport stdio] --root PATH [--root PATH ...] [--max-workers N] [--max-queued N] [--analysis-cache|--no-analysis-cache] [--no-open-job] [--settings PATH]
+const HELP = `Usage: open-decomp mcp start [--transport stdio] --root PATH [--root PATH ...] [--max-workers N] [--max-queued N] [--analysis-cache|--no-analysis-cache] [--no-open-job] [--unit-store-mib N] [--settings PATH]
 
 Serve the local analysis engine over MCP stdio. At least one explicit authorized
 filesystem root is required; no working-directory or home-directory root is added.
@@ -49,6 +49,10 @@ fault containment, not an operating-system sandbox.
   --no-open-job     Server-wide: project_open (wait:true import, or resume) does not run the
                     open-time job that prepares and persists every function's callee unit in
                     helper processes. Results and per-request work are identical either way.
+  --unit-store-mib N
+                    Server-wide: byte cap per project on persisted callee units (1..1048576 MiB;
+                    default 256). The open-time job keeps callees first; units past the cap
+                    are prepared on demand. Results and per-request work are unaffected.
   --settings PATH   Read settings from PATH instead of $XDG_CONFIG_HOME/open-decomp/settings.json
                     (default ~/.config/open-decomp/settings.json). It must exist. Loaded once at
                     startup: analysis_cache is the server-wide default; decompile.language/view/inference
@@ -69,7 +73,9 @@ export function parseCliArguments(
   settings: Settings = DEFAULT_SETTINGS,
 ): CliOptions {
   const roots: string[] = [];
-  let max_workers: number | undefined, max_queued: number | undefined;
+  let max_workers: number | undefined,
+    max_queued: number | undefined,
+    unitStoreMib: number | undefined;
   let action: 'serve' | 'help' | 'version' = 'serve';
   let enableCache = false,
     disableCache = false,
@@ -95,7 +101,12 @@ export function parseCliArguments(
       action = flag === '--help' ? 'help' : 'version';
       continue;
     }
-    if (flag !== '--root' && flag !== '--max-workers' && flag !== '--max-queued')
+    if (
+      flag !== '--root' &&
+      flag !== '--max-workers' &&
+      flag !== '--max-queued' &&
+      flag !== '--unit-store-mib'
+    )
       throw new Error('Unknown CLI argument');
     const value = args[++index];
     if (!value || value.startsWith('--') || value.includes('\0'))
@@ -107,6 +118,13 @@ export function parseCliArguments(
     }
     if (!/^(0|[1-9][0-9]*)$/.test(value)) throw new Error(`Expected an integer for ${flag}`);
     const limit = Number(value);
+    if (flag === '--unit-store-mib') {
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_048_576)
+        throw new Error('Invalid byte cap for --unit-store-mib');
+      if (unitStoreMib !== undefined) throw new Error('Duplicate --unit-store-mib');
+      unitStoreMib = limit;
+      continue;
+    }
     if (
       !Number.isSafeInteger(limit) ||
       limit < (flag === '--max-workers' ? 1 : 0) ||
@@ -131,6 +149,7 @@ export function parseCliArguments(
       ...(max_workers === undefined ? {} : { max_workers }),
       ...(max_queued === undefined ? {} : { max_queued }),
       ...(analysisCache ? {} : { analysis_cache: false }),
+      ...(unitStoreMib === undefined ? {} : { native_summary_bytes: unitStoreMib * 1024 * 1024 }),
       open_job: noOpenJob ? false : {},
     },
     defaults: {

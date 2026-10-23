@@ -12,6 +12,7 @@ import {
   DEFAULT_BUDGET,
   newIdentity,
   type CacheIdentity,
+  type NativeSummaryRow,
 } from '../../../src/core/index.js';
 import { decodeStoredClone, encodeStoredClone } from '../../../src/project/store/encoding.js';
 import { SqliteProjectStore } from '../../../src/project/store/index.js';
@@ -173,6 +174,81 @@ test('the byte cap evicts oldest entries first and refuses a single row above it
       (item) => item['function_id'] !== huge.function_id,
     ),
   );
+});
+
+// The open-time job's store contract: helpers prepare into private copies of the project, and
+// the owner imports their rows: digest re-checked, the smallest allowance per function, a
+// present row the import cannot improve kept, callees first within the cap, written callers
+// first so that eviction drops callers before the callees they share.
+test('project copies and summary import follow the open-time job contract', async (t) => {
+  const state = open(t);
+  const kept = row(0, 'kept');
+  assert.ok(state.store.queueNativeSummary(kept));
+  const copies = [0, 1].map(() => join(mkdtempSync(join(tmpdir(), 'open-decomp-copy-')), 'p'));
+  t.after(() => {
+    for (const copy of copies) rmSync(join(copy, '..'), { recursive: true, force: true });
+  });
+  // A copy holds the queued row too (written first) and the destination must be absent.
+  for (const copy of copies) state.store.copyProject(copy);
+  assert.throws(() => state.store.copyProject(copies[0]!));
+  const rowBytes = state.store.nativeSummaryUsage().bytes;
+  assert.ok(rowBytes > 1000);
+  const [a, b, c] = ['a', 'b', 'c'].map((seed) => row(0, seed));
+  const write = async (path: string, rows: readonly NativeSummaryRow[]) => {
+    const copy = SqliteProjectStore.open(path, 'resume');
+    for (const item of rows) assert.ok(copy.queueNativeSummary(item));
+    copy.flushNativeSummaries();
+    await copy.close();
+  };
+  const copied = SqliteProjectStore.open(copies[0]!, 'resume');
+  assert.deepEqual(copied.readNativeSummary(kept.scope, kept.function_id), kept);
+  await copied.close();
+  // Copy 0: a, b, and `kept` again at a larger allowance (no improvement). Copy 1: a at a
+  // smaller allowance (preferred) and c, whose payload is then damaged (never imported).
+  await write(copies[0]!, [a!, b!, { ...kept, allowance: 5000, work: 99 }]);
+  await write(copies[1]!, [{ ...a!, allowance: 500, work: 7 }, c!]);
+  const damaged = new DatabaseSync(join(copies[1]!, 'project.sqlite'));
+  damaged
+    .prepare('UPDATE native_summaries SET payload=zeroblob(length(payload)) WHERE function_id=?')
+    .run(c!.function_id);
+  damaged.close();
+  const order = [c!, a!, b!, kept].map((item) => item.function_id);
+  assert.equal(state.store.importNativeSummaries(copies, kept.scope, order), 2);
+  assert.deepEqual(state.store.readNativeSummary(kept.scope, kept.function_id), kept);
+  assert.deepEqual(state.store.readNativeSummary(a!.scope, a!.function_id), {
+    ...a!,
+    allowance: 500,
+    work: 7,
+  });
+  assert.deepEqual(state.store.readNativeSummary(b!.scope, b!.function_id), b);
+  assert.equal(state.store.readNativeSummary(c!.scope, c!.function_id), null);
+  assert.deepEqual(
+    state.store.nativeSummaryFunctions(kept.scope),
+    new Set([kept, a!, b!].map((item) => item.function_id)),
+  );
+  // Imported rows are written callers first: past the cap, b goes before a. (The owner holds
+  // the database exclusively while open.)
+  await state.store.close();
+  assert.deepEqual(
+    query(
+      join(state.path, 'project.sqlite'),
+      'SELECT function_id FROM native_summaries ORDER BY seq',
+    ).map((item) => item['function_id']),
+    [kept, b!, a!].map((item) => item.function_id),
+  );
+  state.store = SqliteProjectStore.open(state.path, 'resume');
+  // A cap with room for one more row than the store holds imports the first in `order` only.
+  const capped = open(t, { native_summary_bytes: Math.floor(rowBytes * 1.5) });
+  const target = join(mkdtempSync(join(tmpdir(), 'open-decomp-copy-')), 'p');
+  t.after(() => rmSync(join(target, '..'), { recursive: true, force: true }));
+  capped.store.copyProject(target);
+  await write(target, [a!, b!]);
+  assert.equal(
+    capped.store.importNativeSummaries([target], a!.scope, [b!.function_id, a!.function_id]),
+    1,
+  );
+  assert.ok(capped.store.readNativeSummary(b!.scope, b!.function_id));
+  assert.equal(capped.store.readNativeSummary(a!.scope, a!.function_id), null);
 });
 
 test('rows of superseded revisions are dropped when a newer revision writes', async (t) => {

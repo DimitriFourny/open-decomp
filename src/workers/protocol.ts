@@ -86,6 +86,7 @@ export const openJobReportSchema = z.strictObject({
   jobs: count,
   prepared: count,
   retained: count,
+  bytes: count,
   stored: count,
   message: z.string().max(4096).optional(),
 });
@@ -99,6 +100,8 @@ export const commandSchema = z.discriminatedUnion('kind', [
     max_queued: z.number().int().min(0).max(1024),
     /** False disables derived-analysis caching in this child (trusted host setting). */
     analysis_cache: z.boolean().default(true),
+    /** Byte cap on the project's persisted native units (trusted host setting). */
+    native_summary_bytes: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
     interrupted: z
       .strictObject({ id: jobIdSchema, reason: z.enum(['cancelled', 'deadline']) })
       .optional(),

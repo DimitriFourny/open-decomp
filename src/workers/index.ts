@@ -52,6 +52,10 @@ export interface WorkerPoolOptions {
    * results, reuse candidates, persisted and in-process prepared units); default true. Import,
    * indexes and annotations still persist. */
   readonly analysis_cache?: boolean;
+  /** Byte cap on each project's persisted native units (compressed payload); default
+   * `DEFAULT_NATIVE_SUMMARY_BYTES`. Past it the oldest writes are evicted; the open-time job
+   * keeps callees first. */
+  readonly native_summary_bytes?: number;
   readonly startup_timeout_ms?: number;
   readonly cancel_grace_ms?: number;
   /** Trusted, statically registered child entry point; defaults to workers/entry.js (or .ts under tsx). */
@@ -309,6 +313,9 @@ export class ProjectWorker {
         mode,
         max_queued: this.#pool.max_queued,
         analysis_cache: this.#options.analysis_cache ?? true,
+        ...(this.#options.native_summary_bytes === undefined
+          ? {}
+          : { native_summary_bytes: this.#options.native_summary_bytes }),
         ...(interrupted ? { interrupted } : {}),
       });
       if (event.kind !== 'opened')

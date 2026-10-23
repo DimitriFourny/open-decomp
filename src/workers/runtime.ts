@@ -202,7 +202,13 @@ export function runProjectWorker(handler?: WorkerHandler, observer?: WorkerRunti
         : join(realpathSync(dirname(command.path)), basename(command.path));
       if (canonical !== command.path)
         fail('permission_denied', 'Authorized project path changed before child open');
-      store = SqliteProjectStore.open(command.path, command.mode);
+      store = SqliteProjectStore.open(
+        command.path,
+        command.mode,
+        command.native_summary_bytes === undefined
+          ? {}
+          : { native_summary_bytes: command.native_summary_bytes },
+      );
       maxQueued = command.max_queued;
       analysisCache = command.analysis_cache;
       const recoveryContext = createOperationContext();
@@ -275,7 +281,16 @@ export function runProjectWorker(handler?: WorkerHandler, observer?: WorkerRunti
                 ...(command.work === undefined ? {} : { work: command.work }),
                 signal: controller.signal,
               })
-            : { state: 'skipped', ms: 0, work: 0, jobs: 0, prepared: 0, retained: 0, stored: 0 };
+            : {
+                state: 'skipped',
+                ms: 0,
+                work: 0,
+                jobs: 0,
+                prepared: 0,
+                retained: 0,
+                bytes: 0,
+                stored: 0,
+              };
       } finally {
         unitsJob = undefined;
       }
