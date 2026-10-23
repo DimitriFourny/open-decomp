@@ -63,6 +63,8 @@ export type SourcePrimaryResult =
        * value or unprojected call clobber) on every exit, so it carries no result of
        * this function's own. */
       readonly floating_inert?: true;
+      /** `none` without a void-like rule: as for `integer`. */
+      readonly incidental_paths?: () => boolean;
     };
 
 type ExitState =
@@ -997,6 +999,7 @@ export function selectSourcePrimaryResult(
       written,
       reason: `neither ${integerName} nor typed ${floatingName} is defined by this function on every exit`,
       ...inert,
+      incidental_paths: incidentalPaths,
     };
   return choice === 'float'
     ? {

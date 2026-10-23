@@ -1569,9 +1569,15 @@ integer results this way, and `rtreeInsertCell` types its `rowidWrite` /
 
 Closed-world caller consensus (`caller_consensus`; source view only; premise D1
 recorded with `requireAbi('caller_consensus', …)`). Where an undeclared function
-without an indirect result would still present a result (a non-void-like
-selection, an unresolved or typed tail, or tail transfers only), the planner asks
-once per request for `SourceEvidence.function_result_use`. It is proven for the
+without an indirect result would still present a result that may be incidental,
+the planner asks once per request for `SourceEvidence.function_result_use`: tail
+transfers only; no selected register while a tail or the native interface
+forwards a result; or an integer selection whose every return exit path holds the
+unchanged entry value, a call output, or a value the function also stores or uses
+as an address, call argument or branch operand (`incidental_paths`). A path that
+computes its value only for the exit (a literal, arithmetic, a load, another
+argument) returns it deliberately, and FP or explicit selections are not asked:
+that gate only skips an attempt. It is proven for the
 function and, recursively, for every caller its result reaches: no export, global
 or weak symbol, image entry point or unwind handler names the entry; no
 relocation, rebase, bind or chained fixup targets it, in an image without
@@ -1593,7 +1599,10 @@ a tail site needs it of the tail caller. Callers under proof are assumed
 coinductively (recursion), at most 6 levels deep; a semantic read, an unknown
 window, a result left live into another tail transfer, more than 64 sites of one
 function or 128 in all abstain, and so does a spent share (a quarter of the
-remaining work, like `caller_result_use`). The function then returns nothing
+remaining work, like `caller_result_use`). The sites are refuted first in the
+order of a cyclic sweep from each function's own entry; a site that fails on its
+own abstains for the swept words up to it, before the loader tables and the whole
+image sweep are charged. The function then returns nothing
 on every path (`void_like_result: 'caller_consensus'`), every tail transfer gets
 `result_void` and prints `h(...); return;`, the result registers move to
 `exit_scratch` with their exact values, and the `caller_consensus` presentation

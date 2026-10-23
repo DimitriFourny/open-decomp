@@ -179,26 +179,45 @@ export function callerSiteIndexDeferred(
   return built;
 }
 
-/** The instruction words a cyclic sweep starting at `from` covers up to and including
- * the word at `to` (wrapping past the last instruction section): one per word, as the
- * index build charges them. ARM64 only; elsewhere the whole build cost of `index`'s
- * sweep (its discovered references). A pure function of the image and the two
- * addresses. */
+/** The instruction words a sweep outward from `from` (both directions at once) covers
+ * up to and including the word at `to`: every instruction-section word closer to
+ * `from` than `to`'s far end, one per word as the index build charges them. ARM64 only;
+ * elsewhere the whole build cost of `index`'s sweep (its discovered references). A
+ * pure function of the image and the two addresses. */
 export function callerSiteScanWork(index: CallerSiteIndex, from: bigint, to: bigint): number {
   if (index.image.target.architecture !== 'arm64') return index.references.length;
-  let total = 0,
-    start = 0,
-    end = 0;
+  const reach = to >= from ? to + 4n - from : from - to,
+    low = from - reach,
+    high = from + reach;
+  let words = 0;
   for (const section of instructionSections(index.image)) {
     const base = section.virtual_range.start.value,
-      size = section.virtual_range.size;
-    const below = (address: bigint): number =>
-      total + Number((address <= base ? 0n : address >= base + size ? size : address - base) / 4n);
-    start = from >= base ? below(from) : start;
-    end = to >= base ? below(to + 4n) : end;
-    total += Number(size / 4n);
+      end = base + section.virtual_range.size;
+    const start = low > base ? low : base,
+      stop = high < end ? high : end;
+    if (stop > start) words += Number((stop - start) / 4n);
   }
-  return end > start ? end - start : total - start + end;
+  return words;
+}
+
+/** `sites` in the order a sweep outward from `from` meets them: nearest first, the
+ * lower address first at equal distance. */
+export function sitesOutward(sites: readonly CallerSite[], from: bigint): CallerSite[] {
+  const distance = (site: CallerSite): bigint =>
+    site.address.value >= from ? site.address.value + 4n - from : from - site.address.value;
+  return [...sites].sort((a, b) => {
+    const left = distance(a),
+      right = distance(b);
+    return left !== right
+      ? left < right
+        ? -1
+        : 1
+      : a.address.value < b.address.value
+        ? -1
+        : a.address.value > b.address.value
+          ? 1
+          : 0;
+  });
 }
 
 /** Subtract sorted `holes` from sorted `ranges`. */

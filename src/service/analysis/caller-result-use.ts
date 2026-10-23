@@ -13,6 +13,7 @@ import {
   callerSites,
   classifyResultUse,
   resultRoots,
+  sitesOutward,
   type CallerSite,
   type ResultUse,
 } from '../../analysis/calls/caller-sites.js';
@@ -207,14 +208,15 @@ export function callerResultDemands(
  *     `MAX_CONSENSUS_SITES` sites of one function or `MAX_CONSENSUS_TOTAL_SITES` in
  *     all abstain.
  * A refutation pass runs first: F's sites, and recursively those of the callers its
- * result is forwarded to, each in the order of a cyclic sweep starting at that
- * function's own entry (the callers of a static function mostly follow it). The first
- * site that fails (d) on its own (or a supplied signature or import stub on the way)
- * abstains, charging only the words each visited function's sweep covered up to its
- * last examined site (`callerSiteScanWork`; at most the whole index). Otherwise the
- * export, symbol and fixup tables are charged, then the whole index. Either charge
- * depends only on the image and F. The windows are charged inside a quarter of the
- * request's remaining work; an exhausted share abstains. */
+ * result is forwarded to, each in the order of a sweep outward from that function's
+ * own entry (callers of a static function mostly lie near it). The first site that
+ * fails (d) on its own (or a supplied signature or import stub on the way) abstains,
+ * charging only the words each visited function's sweep covered up to its last
+ * examined site (`callerSiteScanWork`; at most the whole index). Otherwise the export,
+ * symbol and fixup tables are charged and an excluded visited entry abstains; only
+ * then is the whole index charged. Every charge depends only on the image and F. The
+ * windows are charged inside a quarter of the request's remaining work; an exhausted
+ * share abstains. */
 export function callerResultConsensus(
   input: SourceFactsInput,
   context: OperationContext,
@@ -289,19 +291,16 @@ export function callerResultConsensus(
     );
   };
   try {
-    const entry = fn.entry.value;
     const swept = new Map<string, number>(),
-      refuting = new Set<string>();
+      visited = new Map<string, bigint>();
     let examined = 0;
     const refuted = (callee: FunctionRecord, depth: number): boolean => {
-      if (refuting.has(callee.id) || depth > MAX_CONSENSUS_DEPTH) return false;
+      if (visited.has(callee.id) || depth > MAX_CONSENSUS_DEPTH) return false;
       if (callee.entry.space !== 'va' || callee.signature !== null || callee.kind === 'import_stub')
         return true;
-      refuting.add(callee.id);
       const start = callee.entry.value;
-      const own = callerSites(index, callee.entry, local).sites;
-      const sweep = own.filter((site) => site.address.value >= start);
-      sweep.push(...own.filter((site) => site.address.value < start));
+      visited.set(callee.id, start);
+      const sweep = sitesOutward(callerSites(index, callee.entry, local).sites, start);
       for (const [at, site] of sweep.entries()) {
         swept.set(callee.id, callerSiteScanWork(index, start, site.address.value));
         if (at === MAX_CONSENSUS_SITES || ++examined > MAX_CONSENSUS_TOTAL_SITES || fails(site))
@@ -348,7 +347,9 @@ export function callerResultConsensus(
     for (const item of image.entry_points) if (item.space === 'va') named.add(item.value);
     for (const hint of image.hints)
       if (hint.kind === 'unwind' && hint.handler?.space === 'va') named.add(hint.handler.value);
-    if (named.has(entry)) return undefined;
+    // The proof below fails at the first excluded function it reaches; every function
+    // the refutation pass visited is reached unless an earlier site fails.
+    if ([...visited.values()].some((start) => named.has(start))) return undefined;
     useBuilt(context, index);
     const sites: Address[] = [];
     const visiting = new Set<string>();
