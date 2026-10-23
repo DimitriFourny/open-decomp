@@ -1124,9 +1124,9 @@ function sourceAddresses(
  * every SSA limit of at least its work W. A load replays a segment only when running it
  * here could not have failed or differed: its capacity fits, its charge fits every
  * enclosing allowance (`fits`), and for SSA the limit preparing would set now
- * (`nativeSSALimit`, after the replayed lift) is at least W. Otherwise that segment and
- * every later one run for real. The rest of the preparation always runs; so a load
- * charges, reads and returns exactly what a cold preparation would. */
+ * (`nativeSSALimit`, after the lift) is at least W. Otherwise that segment runs for
+ * real. The rest of the preparation always runs; so a load charges, reads and returns
+ * exactly what a cold preparation would. */
 type PreparedUnitCache = {
   readonly identity: string;
   readonly functions: readonly FunctionRecord[];
