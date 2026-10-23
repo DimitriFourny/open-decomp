@@ -73,7 +73,7 @@ export interface NativeWorklistResult<U extends NativeSummaryUnit> {
   readonly context_keys: ReadonlyMap<string, string>;
   readonly remaining: NativeSummaryCapacity;
   readonly complete: boolean;
-  /** Whether a complete, context-free unit is void-like (`result_incidental`), by the
+  /** Whether a unit with a complete own body is void-like (`result_incidental`), by the
    * `incidental` option; evaluated on demand, recursing only into the tails and final
    * calls the classification consults (recursion coinductive). False without the option. */
   readonly result_incidental: (key: string) => boolean;
@@ -848,8 +848,7 @@ export function nativeDependencyWorklist<U extends NativeSummaryUnit>(options: {
           unit.budget_truncated ||
           fallbackReasons.has(key) ||
           refinementLimits.has(key) ||
-          summary.observed.parameter_state === 'ambiguous' ||
-          scheduled.get(key)?.assumptions
+          summary.observed.parameter_state === 'ambiguous'
         ) {
           trial.set(key, false);
           return false;
