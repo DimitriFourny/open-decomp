@@ -1731,7 +1731,7 @@ an `incidental_result` presentation listing the callee ids plus an
 `incidental_result` itself is open when every tail transfer forwards no result
 (also through a void library contract), and a final call into a void-like callee
 no longer establishes the result; the record's scope then lists those callee
-ids. `jsonAppendRaw` prints `void` this way. The checked view is unchanged.
+ids. `jsonAppendRaw` and `codeOffset` print `void` this way. The checked view is unchanged.
 
 A context-specialized callee summary (constant/alias call-site assumptions)
 keeps the callee's result root. The context unit carries the baseline body's
