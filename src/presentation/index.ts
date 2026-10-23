@@ -276,8 +276,10 @@ export function structureControlFlow(
     /** Structured edges that stay labeled transfers. */
     const labeled = new Set<string>();
     // Edge selection is bounded separately; past it, the remaining nodes of a
-    // scope are laid out in dependency order without further search.
+    // scope are laid out in dependency order without further search. The search
+    // also ends once this structuring has charged `search_work`.
     let selection = options.search === false ? -1 : 64 * (blocks.size + edgeCount) + 20_000;
+    const searchWork = options.search_work ?? Infinity;
     /** Short-circuit exits to one clause (see collapseConditions), by edge key:
      * `head` is the first operand's exit, which may own the clause as its arm;
      * `any`: every exit is a true arm (`a || b`), else the `&&` of staying tests. */
@@ -1106,6 +1108,7 @@ export function structureControlFlow(
      * tails. Undefined without candidates or past the selection allowance. */
     const rank = (graph: Graph, tails: boolean): Candidate[] | undefined => {
       // Past the allowance no scan can rank anything: `selection` only falls.
+      if (budget.work > searchWork) selection = -1;
       if (selection < 0) return undefined;
       const groups = new Map<string, CollapseEdge[]>();
       let cost = 0;
@@ -1181,7 +1184,7 @@ export function structureControlFlow(
       let best = ranked[0]!,
         bestKey: number[] | undefined;
       for (const candidate of ranked.slice(0, 8)) {
-        if (selection < 0) break;
+        if (selection < 0 || budget.work > searchWork) break;
         const outcome = unblocked(graph, candidate.group);
         // Collapses enabled count before whether the target becomes nested:
         // with labeled targets kept after their sources, a nested target

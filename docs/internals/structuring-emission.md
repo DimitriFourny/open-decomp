@@ -99,16 +99,18 @@ Printing:
 
 ### 3. Retry and fallback under limits
 
-| limit                                    | behaviour                                                                                                           |
-| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| structuring work or cancellation         | the operation fails; no partial text                                                                                |
-| selection allowance, depth               | more labels, still correct                                                                                          |
-| a held single-use call misses its reader | `CallInliningRetry`: render again with those calls as statements; the 5th attempt prints every call as a statement  |
-| metadata bound                           | rerun without metadata, same text                                                                                   |
-| presentation record bound                | the rewrite is skipped; a call becomes a comma operand only after its `call_effects` record is admitted at planning |
-| validation allowance exhausted           | later phi-copy checks fold into one `parallel-copy` limitation record, so the record bound stays available          |
-| optional searches                        | at most 1/16 of the remaining work each; keep the best found so far                                                 |
-| text over `output_bytes`                 | `resource_limit`, never truncated text                                                                              |
+| limit                                                         | behaviour                                                                                                                                                       |
+| ------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| structuring work or cancellation                              | the operation fails; no partial text                                                                                                                            |
+| selection allowance, depth                                    | more labels, still correct                                                                                                                                      |
+| goto-search sub-allowance (`search_work`)                     | the renderer's restructure stops the search once the request's remaining work minus the text reserve (120 per render unit) is spent; more labels, still correct |
+| a held single-use call misses its reader                      | `CallInliningRetry`: render again with those calls as statements; the 5th attempt prints every call as a statement                                              |
+| metadata bound                                                | rerun without metadata, same text                                                                                                                               |
+| remaining work below 450 per render unit after reconstruction | the text renders first without metadata (same text); omissions carry reason `budget`                                                                            |
+| presentation record bound                                     | the rewrite is skipped; a call becomes a comma operand only after its `call_effects` record is admitted at planning                                             |
+| validation allowance exhausted                                | later phi-copy checks fold into one `parallel-copy` limitation record, so the record bound stays available                                                      |
+| optional searches                                             | at most 1/16 of the remaining work each; keep the best found so far                                                                                             |
+| text over `output_bytes`                                      | `resource_limit`, never truncated text                                                                                                                          |
 
 Attempts share one reconstruction, validated once; each forks the validation session. A retry reuses an earlier attempt's `restructure` when every structuring condition that attempt asked (operand, copies, constant-return edge), asked again in the same order, answers the same: structuring is deterministic in the shared graph and those answers (`AttemptPlans.structures`). At a 40M measurement budget, `sqlite3Select` and `sqlite3Pragma` reuse the first attempt's in attempts 2–4 (0.89M and 7.8M of work each; the fifth attempt prints every call as a statement and structures again), and `sqlite3WhereCodeOneLoopStart` in all four of its attempts (full and metadata-omitted).
 

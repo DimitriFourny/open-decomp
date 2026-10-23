@@ -217,7 +217,7 @@ Files that several items touch:
 
 ### C3: Always produce text within the unchanged 10M
 
-- [ ] **Problem.** Four functions fail with no text. Optional stages (callee summaries, image types, pointer evidence, goto search, provenance metadata) are sized as fractions of what remains, not against what the mandatory tail needs. Two output bounds turn finished text into a failure:
+- [x] **Problem.** Four functions fail with no text. Optional stages (callee summaries, image types, pointer evidence, goto search, provenance metadata) are sized as fractions of what remains, not against what the mandatory tail needs. Two output bounds turn finished text into a failure: _Done (C3): tail reserve 300/IR node on the summary pool and image types, text-first render below 450/render unit with a goto-search sub-allowance leaving 120/unit, catalog bounds publish text with an `evidence` omission. Lane: `sqlite3WhereCodeOneLoopStart` (8.34M) and `sqlite3_str_vappendf` (9.62M) get text, every other text and work count byte-identical, 233 → 235 with text; `sqlite3Select`/`sqlite3Pragma` still fail (their mandatory prefix plus reconstruct leaves < 1.1M for the render)._
   - the evidence catalog of 10,000 ids (`catalog.ts:36-62, 95-101`, `src/core/tools.ts:538`);
   - a cache-catalog type with more than 1,000 `evidence_ids` (`src/project/cache/index.ts:92`).
   - **Change:**
