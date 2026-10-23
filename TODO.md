@@ -1004,7 +1004,7 @@ Files that several items touch:
 
 ### T3: Retain prepared units whose reasons do not depend on the budget
 
-- [ ] **Problem.** Units whose only reason is "unresolved control flow" are never kept (any indirect call in the body sets it), so hub callees are prepared again in every request: `sqlite3Initialize` 30–46 times, `sqlite3Malloc` 30, `sqlite3_free` 50, `sqlite3Realloc` 13, … In total 580 repeat preparations.
+- [x] **Problem.** Units whose only reason is "unresolved control flow" are never kept (any indirect call in the body sets it), so hub callees are prepared again in every request: `sqlite3Initialize` 30–46 times, `sqlite3Malloc` 30, `sqlite3_free` 50, `sqlite3Realloc` 13, … In total 580 repeat preparations.
   - **Root cause:** `reusablePreparation` (`source-facts.ts:1125-1126`) requires `!unit.reasons.length`, and so does the persisted schema (`native-summaries.ts:88`). The documented contract (`:1101-1110`) needs only "hit no limit".
   - **Change:**
     - Split the predicate:
@@ -1018,6 +1018,7 @@ Files that several items touch:
     - The store schema test.
   - **Acceptance:** texts byte-identical (prototype: 0 of 129 changed); work identical after T2.
   - **Expected effect:** SQLite −6 to −7 s on top of T1 (measured).
+  - **Done (T3):** SQLite lane (114 functions, one process): repeat preparations 695 → 152 (preparations 1201 → 658, same binary with the old predicate behind a scratch switch); lane texts and per-function work identical to `od-main-bf6f43f` (0 of 114 sqlite texts or work counts differ); in the same-binary pair wall time 188 s → 147 s (load average 28 → 16, so noisy), user CPU 26 m → 16.7 m. Summary format 5.
   - **Depends on:** T2.
 
 ### T4: Do not load effects-only native dependencies
