@@ -305,7 +305,7 @@ Files that several items touch:
 
 ### V2: Closed-world caller consensus makes a function `void`
 
-- [ ] **Problem.** 19 void-source functions print a value or `unknown_result`. The body alone cannot tell `f(); }` from `return f();`. Mechanisms:
+- [x] **Problem.** 19 void-source functions print a value or `unknown_result`. The body alone cannot tell `f(); }` from `return f();`. Mechanisms: _(done: `callerResultConsensus` + `caller_consensus` record/premise; OD lane `od-rm4-v2` prints the 13 acceptance functions and `sqlite3WhereExplainBloomFilter` as `void` with `return;`/`f(...);`, no other text changes, checked view identical on 7 compared functions; the 4 optional ones abstain (windows end at unknown effects / indirect exits); cost: an incidental-result gate plus an outward refutation sweep charge only what the decision needs: proofs pay the full sweep (~+345k on the 14 changed functions), refuted static functions up to the refuting site (`jsonAppendRaw` +218k, 34 functions > +500), `isDate` +1.8k, `sqlite3Fts3Incrmerge` +29.7k, brotli `main` +22)_
   - a tail call into an in-image callee whose interface never carries `returns_void`: `codeOffset`, `sqlite3DropTrigger`, `pcache1RemoveFromHash`, `sqlite3RowidConstraint`, `analyzeDatabase`, …;
   - a final call establishing the result: `verifyDbFile` (`sqlite3_log`), `fts5StructureWrite` (`sqlite3_free`, which OD prints as `void` on its own), `sqlite3AddDefaultValue`, …;
   - a kept stored value: `fts3EvalAllocateReaders`.
@@ -370,7 +370,7 @@ Files that several items touch:
 
 ### K1: Darwin variadic stack arguments across tail calls and joined slots
 
-- [ ] **Problem.** 35 Darwin variadic sites with a literal format, plus at least 8 with a variable format, print their anonymous arguments as frame stores: `frame.local_70 = (uintptr_t)address_3; sqlite3ErrorMsg(address, "no such trigger: %S");`. Those slots keep 17 frame structs alive. The callee's S8 footprint is present even when the CLI says "cut by budget", so budget is not the blocker (measured at 4× and 10×).
+- [x] **Problem.** 35 Darwin variadic sites with a literal format, plus at least 8 with a variable format, print their anonymous arguments as frame stores: `frame.local_70 = (uintptr_t)address_3; sqlite3ErrorMsg(address, "no such trigger: %S");`. Those slots keep 17 frame structs alive. The callee's S8 footprint is present even when the CLI says "cut by budget", so budget is not the blocker (measured at 4× and 10×).
   - **Root cause** (instrumented `planVariadicStackArguments`, `src/reconstruction/source-variadic.ts:30-293`):
     - (R1a) every indirect tail exit counts as a boundary that reads the slot (`:175-181`, `:253-262`), although at a tail call SP is back at the entry SP;
     - (R1c) a slot written on several branches has no single owner (`:220-237`);
@@ -388,6 +388,7 @@ Files that several items touch:
     - Part 1 measured: `sqlite3DropTrigger` prints `sqlite3ErrorMsg(address, "no such trigger: %S", address_3);` and loses its frame struct. `sqlite3RowidConstraint` prints `sqlite3MPrintf(address_2, "%s.%s", …)` without a frame. `parserDoubleLinkSelect` loses its frame. `sqlite3CreateForeignKey` binds 2/2 sites.
     - Part 2: `verifyDbFile` (needs K7 as well), `selectInnerLoop`, `generateSortTail`.
     - Every other text is byte-identical. Checked view unchanged.
+  - **Done (K1, reconstruction 88):** tail boundaries with SP at or above a slot no longer observe it; a slot written on every incoming edge binds through the existing join value or a source-only join parameter (`variadic_stack_join`). OD lane: exactly `sqlite3DropTrigger`, `sqlite3RowidConstraint`, `parserDoubleLinkSelect` (frames gone) and `sqlite3CreateForeignKey` (2/2 sites) change; checked view identical. Part 2 fires on no full-tier text yet: `generateSortTail` (`sqlite3VdbeExplain`, two branches) is blocked by R1d (the next ambiguous `sqlite3VdbeAddOp3` sees the slot); `verifyDbFile` and `selectInnerLoop` abort on an escaped frame address (K7). With that abort lifted, `verifyDbFile` binds its 4-edge join (`sqlite3_log(28, value5, value4)`), while `selectInnerLoop`'s slot at both `sqlite3VdbeComment` calls is an unowned unknown fact in the escaped/aliased snapshot, so K7 must also keep store facts below its floor.
 
 ### K2: Consume outgoing stores that a bound stack argument already shows
 
@@ -564,7 +565,7 @@ Files that several items touch:
 
 ### F3: The source view drops the FP-environment note; the premise is recorded
 
-- [ ] **Problem.** 55 functions print `/* assumes nearest-even rounding and masked FP traps (requirement_…) */` (4,730 comment bytes). 12 of them have no FP operation at all, only a callee that requires it (`sqlite3_finalize`, `fts3DestroyMethod`, …). The note causes 3–4 wrong claims ("source has no such comment") and appears in 14 noise reasons. The FP requirement propagates through callee summaries (`source-requirements.ts:338-340`, `source-facts.ts:623-628, 1437-1441`), so fuller summaries spread the note further: +40 texts at 10× budget.
+- [x] **Problem.** 55 functions print `/* assumes nearest-even rounding and masked FP traps (requirement_…) */` (4,730 comment bytes). 12 of them have no FP operation at all, only a callee that requires it (`sqlite3_finalize`, `fts3DestroyMethod`, …). The note causes 3–4 wrong claims ("source has no such comment") and appears in 14 noise reasons. The FP requirement propagates through callee summaries (`source-requirements.ts:338-340`, `source-facts.ts:623-628, 1437-1441`), so fuller summaries spread the note further: +40 texts at 10× budget.
   - **Change** (`renderer.ts:8823-8843`, source view):
     - Print no note. Record `validation.requireAbi('fp_default_environment', [function id], …)` whenever an `fp_environment` requirement exists.
     - Map omitted-guard provenance (`mapSites`, `:8797-8811`) to the signature span.
@@ -579,6 +580,7 @@ Files that several items touch:
     - checked view byte-identical.
   - **Acceptance:** the 55 texts lose exactly the trailing signature comment. No other change.
   - **Expected effect:** Claude tokens geomean about −0.03 [estimate]; wrong claims −3 to −4; noise on about 13 functions. Lexical tokens are unchanged.
+  - **Evidence (rm4-f3):** OD lane `od-rm4-f3` vs a lane of `main` 307644d (`od-rm4-f3-base`): exactly the 57 texts carrying the note at that base changed (55 at `od-rm3-final`), each only by the trailing signature comment; coverage and failures identical; checked view byte-identical on 4 functions in both dialects. The premise's provenance is the listed FP-environment site citing the fewest instructions (the function origin only as fallback): work Δ ≤ +157 everywhere (`isDate` +157, brotli `main` +37, `sqlite3Fts3Incrmerge` +39).
 
 ### F4: Native FP where NaN-freedom is provable; value-preserving conversion spelling
 
@@ -663,7 +665,7 @@ Files that several items touch:
 
 ### A2: Lift A64 single-lane SIMD loads and stores (`ST1`/`LD1`, `asisdlso`/`asisdlsop`)
 
-- [ ] **Problem.** After A1, `unicodeNext` keeps its 14 save lines and an exposed frame, because `ST1_asisdlsop_S1_i1s` (`st1 {v.s}[i], [xn], #4`) is a real store that A1 must not bound.
+- [x] **Problem.** _Done (`wt/rm4-a2`, lane `od-rm4-a2` vs `od-main-fdba101`): only `unicodeNext` changed (13,188 → 10,300 bytes, 19 → 4 matches of `non-argument entry`/`__unknown_effect`/`frame_save`: the 14 `non-argument entry register` stores and the ST1 `__unknown_effect` are gone, 29 `frame_save` records, work 4,108,387 → 4,129,452; the 4 remaining `__unknown_effect` are the memory-free bounded USHL/INS/XTN/UZP1); its checked view changes (43,843 → 38,332 bytes); no other text, work or coverage change; the decoder shows these operands as opaque text, so the lift reads the canonical fields._ After A1, `unicodeNext` keeps its 14 save lines and an exposed frame, because `ST1_asisdlsop_S1_i1s` (`st1 {v.s}[i], [xn], #4`) is a real store that A1 must not bound.
   - **Change:** in `ArmSemantics.execute()`, lift the single-lane forms from the structured operands, never from operand text:
     - the memory operand gives base, writeback (`post`/`none`), `access_bits` and register offset;
     - the vector operand gives the lane;
@@ -732,7 +734,7 @@ Files that several items touch:
 
 ### E2: A formal is a scalar-element pointer only when its accesses are array-shaped
 
-- [ ] **Problem.** Struct pointers print as `uint64_t*` with constant subscripts: `stmtClose(uint64_t* address) … address[2]`, brotli `InitDecoder` `address[41]`, `PrintFileProcessingProgress` `address[59]`. This causes 6 wrong claims in 4 functions ("takes a uint64_t array pointer"). 20 formals use only non-zero constant subscripts.
+- [x] **Problem.** _Done (E2): OD lane `od-rm4-e2` vs `od-main-bf6f43f`: 29 texts changed (+480 regex-lexer tokens: typedef/struct lines); `stmtClose` prints `address->field_0x10`, `InitDecoder` `address->field_0x148`, `PrintFileProcessingProgress` fields; real arrays unchanged; 5 texts print `*p->field_0xN`._ Struct pointers print as `uint64_t*` with constant subscripts: `stmtClose(uint64_t* address) … address[2]`, brotli `InitDecoder` `address[41]`, `PrintFileProcessingProgress` `address[59]`. This causes 6 wrong claims in 4 functions ("takes a uint64_t array pointer"). 20 formals use only non-zero constant subscripts.
   - **Root cause:** `formal_pointer` (`src/reconstruction/source-signature.ts:744-783`) checks only element width and kind. `scalarArray`'s contiguity gate (`src/emitters/source-structs.ts:132-182`) is not applied to formals.
   - **Change:**
     - Record per-root constant displacements (`:617-626`). Grant `formal_pointer` only when the formal is indexed or stepped, or its constant offsets are contiguous from 0. Otherwise keep the analysis structure (or a byte pointer).

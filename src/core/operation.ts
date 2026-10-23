@@ -41,6 +41,19 @@ export function buildOnce<T extends object>(
   context: OperationContext,
   build: (context: OperationContext) => T,
 ): T {
+  const value = buildDeferred(context, build);
+  payBuild(context, value);
+  return value;
+}
+
+/** `buildOnce` without the payment: the caller charges what its operation uses, the
+ * whole recorded cost through `useBuilt` or a part it derives from the structure and
+ * its own subject alone (so that charge too is the same whether it built the
+ * structure or found it built). */
+export function buildDeferred<T extends object>(
+  context: OperationContext,
+  build: (context: OperationContext) => T,
+): T {
   let cost = 0;
   const value = build({
     ...context,
@@ -50,7 +63,6 @@ export function buildOnce<T extends object>(
     },
   });
   buildCosts.set(value, cost);
-  payBuild(context, value);
   return value;
 }
 

@@ -152,18 +152,20 @@ for (const bits of [8, 16, 32, 64] as const) {
     }
   });
   test(`typed index: ${bits}-bit constant displacements print element subscripts`, () => {
+    // Constant displacements alone are record fields; the indexed access makes the
+    // lineage array-shaped (a byte pointer's index is the narrow, zero-extended one).
     const accesses: Access[] = [
       { bytes: 3n * width, indexed: false },
       { bytes: -2n * width, indexed: false },
       { bytes: 0n, indexed: true },
     ];
-    const c = check(bits, accesses, 'c-like');
+    const c = check(bits, accesses, 'c-like', width === 1n);
     assert.deepEqual(
       subscripts(c.text).sort(),
       ['-2', '3', subscripts(c.text).find((text) => /^[A-Za-z_]\w*$/.test(text))!].sort(),
     );
     assert.ok(subscripts(c.text).some((text) => /^[A-Za-z_]\w*$/.test(text)));
-    check(bits, accesses, 'python-like');
+    check(bits, accesses, 'python-like', width === 1n);
   });
   test(`typed index: ${bits}-bit stores and loads share the subscript`, () => {
     const accesses: Access[] = [
@@ -172,11 +174,11 @@ for (const bits of [8, 16, 32, 64] as const) {
       { bytes: -width, indexed: false, store: true },
       { bytes: -width, indexed: false },
     ];
-    const c = check(bits, accesses, 'c-like');
+    const c = check(bits, accesses, 'c-like', width === 1n);
     assert.match(c.text, /\w+\[\w+ \+ 4\] = /);
     assert.match(c.text, /\w+\[-1\] = /);
     assert.doesNotMatch(c.text, /uintptr_t/);
-    check(bits, accesses, 'python-like');
+    check(bits, accesses, 'python-like', width === 1n);
   });
 }
 

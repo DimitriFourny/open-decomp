@@ -1354,3 +1354,239 @@ test('caller demand types a tail whose callee has no result types', () => {
     }
   }
 });
+
+/** The `caller-result-use-source.c` V2 cases through the IR-builder path. Darwin
+ * `static void g(p) { *p = 5; h(p); }` compiled as a tail transfer to `h` (an observed
+ * callee with no result types), so the body alone reads as `return h(p);`.
+ * `recursive`: `if (p[1]) { g(p[1]); return; } h(p);`, the self-call result left in x0.
+ * `table` and `exported` are the same body whose closed-world consensus abstains (its
+ * address is stored, or it is exported): no `function_result_use` answer. */
+function consensusTail(variant: 'ignored' | 'recursive' | 'table' | 'exported') {
+  const abi = darwinArm64Abi;
+  const x0 = register(
+    abi.classifyCall({
+      returns: word,
+      parameters: [word],
+      variadic: false,
+      fixed_parameter_count: 1,
+    }).returns[0],
+  );
+  const target = { image_id: image, space: 'va' as const, value: 0x2000n };
+  const b = builder(`consensus-tail-${variant}`),
+    entry = b.block('entry'),
+    tail = b.block('tail');
+  const p = entry.readRegister(x0);
+  entry.store(p, entry.constant(u64, 5n));
+  if (variant === 'recursive') {
+    const again = b.block('again');
+    const x19 = abi.preserved.find((item) => item.root === 'arm64:x19' && item.width_bits === 64)!;
+    const next = entry.load(u64, entry.int('add', p, entry.constant(u64, 8n)));
+    entry.writeRegister(x19, next);
+    entry.branch(
+      entry.compare('eq', next, entry.constant(u64, 0n)),
+      entry.edge(tail),
+      entry.edge(again),
+    );
+    again.writeRegister(x0, again.readRegister(x19));
+    again.call(
+      { kind: 'direct', address: { image_id: image, space: 'va', value: 0x1000n } },
+      [],
+      [],
+      abi.unknown_call_clobbers,
+    );
+    again.return([]);
+  } else entry.jump(tail);
+  tail.terminate({
+    kind: 'indirect',
+    target: tail.address(target),
+    tail_call: true,
+    reason: 'Discovered tail-call exit',
+  });
+  const ir = constructSSA(b.finish(entry, [])).value as SSAForm;
+  const control = ir.blocks.find((block) => block.terminator.kind === 'indirect')!.terminator;
+  const self = ir.blocks
+    .flatMap((block) => block.instructions)
+    .find((node) => node.kind === 'call');
+  const asked: boolean[] = [];
+  const source: SourceEvidence = {
+    abi,
+    addresses: [],
+    callees: [
+      {
+        call_id: control.id,
+        target,
+        parameter_state: 'observed',
+        parameters: [x0],
+        returns: [],
+        argument_list_complete: true,
+        evidence_ids: [],
+      },
+      ...(self
+        ? [
+            {
+              call_id: self.id,
+              target: { image_id: image, space: 'va' as const, value: 0x1000n },
+              parameter_state: 'observed' as const,
+              parameters: [x0],
+              returns: [],
+              argument_list_complete: true,
+              evidence_ids: [],
+            },
+          ]
+        : []),
+    ],
+    function_result_use: (_context, floating) => {
+      asked.push(floating);
+      return variant === 'ignored' || variant === 'recursive'
+        ? {
+            consensus: 'ignored',
+            sites: [{ image_id: image, space: 'va', value: 0x3000n }],
+          }
+        : undefined;
+    },
+  };
+  const view = (kind: 'source' | 'checked') =>
+    reconstruct(
+      { function: structureControlFlow(ir, createOperationContext()).value!, source },
+      createOperationContext(),
+      kind,
+    );
+  return { ir, source, view, asked };
+}
+
+for (const variant of ['ignored', 'recursive', 'table', 'exported'] as const)
+  test(`caller consensus: ${variant} tail-only void function`, () => {
+    const fixture = consensusTail(variant);
+    const program = fixture.view('source');
+    const consensus = variant === 'ignored' || variant === 'recursive';
+    // The observed tail callee writes no FP result and the FP carrier is untouched:
+    // only the integer result register is followed into callers.
+    assert.deepEqual(fixture.asked, [false]);
+    assert.equal(program.source?.return_type ?? null, null);
+    assert.equal(program.source?.void_like_result, consensus ? 'caller_consensus' : undefined);
+    assert.equal(
+      program.local_validation?.some((record) => record.rule === 'caller_consensus') ?? false,
+      consensus,
+    );
+    assert.equal(
+      program.local_validation_session?.abiConformance.some(
+        (site) => site.rule === 'caller_consensus',
+      ) ?? false,
+      consensus,
+    );
+    for (const tail of program.tails.values()) assert.equal(tail.result_void === true, consensus);
+    // The checked view never reads the consensus.
+    const { function_result_use: _unused, ...plain } = fixture.source;
+    for (const language of ['c-like', 'python-like'] as const)
+      assert.equal(
+        emit(fixture.ir, { source: fixture.source }, language, 'checked').emission.text,
+        emit(fixture.ir, { source: plain }, language, 'checked').emission.text,
+      );
+    for (const language of ['c-like', 'python-like'] as const) {
+      const { emission } = emit(fixture.ir, { source: fixture.source }, language);
+      if (consensus)
+        assert.match(emission.text, language === 'c-like' ? /^void \w+\(/m : /\) -> void:$/m);
+      else assert.doesNotMatch(emission.text, /^void \w+\(|\) -> void:$/m);
+      const formals = emittedFormals(emission);
+      const pointer = 0x4000n;
+      for (const next of variant === 'recursive' ? [0n, 0x5000n] : [0n]) {
+        const memory = new Map<bigint, number>();
+        for (let byte = 0n; byte < 8n; byte++) {
+          memory.set(pointer + byte, 0);
+          memory.set(pointer + 8n + byte, Number((next >> (8n * byte)) & 0xffn));
+        }
+        const calls: string[] = [];
+        const oracle =
+          (name: string) =>
+          (args: readonly bigint[]): bigint => {
+            calls.push(`${name}(${args.map((arg) => `0x${arg.toString(16)}`).join(', ')})`);
+            return 0x77n;
+          };
+        const observed = execute(
+          emission,
+          new Map([[formals[0]!.statement_id, pointer]]),
+          memory,
+          0n,
+          new Map(),
+          new Map(),
+          new Map([
+            ['sub_2000', oracle('h')],
+            ['0x2000', oracle('h')],
+            ['sub_1000', oracle('g')],
+            ['0x1000', oracle('g')],
+          ]),
+        );
+        // `*p = 5`, then `h(p)` or the recursive `g(p[1])`; a void function yields nothing.
+        assert.equal(observed.memory.get(pointer), 5);
+        assert.deepEqual(calls, next ? ['g(0x5000)'] : ['h(0x4000)']);
+        if (consensus) assert.deepEqual(observed.values, []);
+      }
+    }
+  });
+
+/** Caller consensus sweeps callers only where the result may be incidental on every
+ * return exit path (the planner's `candidate`, run by the service before any sweep).
+ * `int f(int *p) { *p = 5; return 7; }` and `return p[1] + 1;` compute their value for
+ * the exit alone: the candidate test fails, the (stub) consensus does not apply and
+ * the integer result stays. */
+for (const variant of ['literal', 'computed'] as const)
+  test(`caller consensus candidate: ${variant} result`, () => {
+    const abi = darwinArm64Abi;
+    const x0 = register(
+      abi.classifyCall({
+        returns: word,
+        parameters: [word],
+        variadic: false,
+        fixed_parameter_count: 1,
+      }).returns[0],
+    );
+    const b = builder(`consensus-gate-${variant}`),
+      block = b.block('entry');
+    const p = block.readRegister(x0);
+    block.store(p, block.constant(u64, 5n));
+    block.writeRegister(
+      x0,
+      variant === 'computed'
+        ? block.int(
+            'add',
+            block.load(u64, block.int('add', p, block.constant(u64, 8n))),
+            block.constant(u64, 1n),
+          )
+        : block.constant(u64, 7n),
+    );
+    block.return([]);
+    const ir = constructSSA(b.finish(block, [])).value as SSAForm;
+    const candidates: boolean[] = [];
+    const source: SourceEvidence = {
+      abi,
+      callees: [],
+      addresses: [],
+      function_result_use: (_context, _floating, candidate) => {
+        candidates.push(candidate());
+        return candidates.at(-1)
+          ? { consensus: 'ignored', sites: [{ image_id: image, space: 'va', value: 0x3000n }] }
+          : undefined;
+      },
+    };
+    const program = reconstruct(
+      { function: structureControlFlow(ir, createOperationContext()).value!, source },
+      createOperationContext(),
+      'source',
+    );
+    assert.deepEqual(candidates, [false]);
+    assert.equal(program.source?.void_like_result, undefined);
+    for (const projection of program.returns.values())
+      assert.equal(projection.results[0]?.type.kind, 'integer');
+    for (const language of ['c-like', 'python-like'] as const) {
+      const { emission } = emit(ir, { source }, language);
+      const memory = new Map<bigint, number>();
+      for (let byte = 0n; byte < 16n; byte++) memory.set(0x4000n + byte, byte === 8n ? 41 : 0);
+      const observed = execute(
+        emission,
+        new Map([[emittedFormals(emission)[0]!.statement_id, 0x4000n]]),
+        memory,
+      );
+      assert.equal(observed.memory.get(0x4000n), 5);
+      assert.deepEqual(observed.values, [variant === 'literal' ? 7n : 42n]);
+    }
+  });

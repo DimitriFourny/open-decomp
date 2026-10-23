@@ -32,12 +32,11 @@ import {
   unchangedStorage,
   type StorageCopy,
 } from './source-register-types.js';
-import { sourceStackArgumentParts, type StackArgumentJoins } from './source-stack-arguments.js';
+import { createStackArgumentJoins, sourceStackArgumentParts } from './source-stack-arguments.js';
 import { planSourceRequirements } from './source-requirements.js';
 import { possibleAbiReturnStorage } from '../analysis/calls/return-storage.js';
 import { LocalValidationSession } from './local-validation.js';
 import { selectSourcePrimaryResult, type SourcePrimaryResult } from './source-results.js';
-import { identityOperand } from './expressions.js';
 import { createVariadicCallBinder } from './source-variadic.js';
 
 /** Source ABI abstraction: architectural snapshots are retained in the input,
@@ -63,6 +62,8 @@ export function planSource(
     calls = new Map<string, BoundaryProjection>(),
     returns = new Map<string, BoundaryProjection>();
   const tails = new Map<string, TailProjection>();
+  /** Tails whose observed callee writes no FP result register (caller consensus). */
+  const floatingInertTails = new Set<string>();
   const callResults = new Map<string, readonly Value[]>(),
     parameterNames = new Map<string, string>();
   const demotedParameters = new Set<string>();
@@ -279,55 +280,7 @@ export function planSource(
   const stores = new Map<string, Value>();
   for (const block of blocks.values())
     for (const node of block.statements) if (node.kind === 'store') stores.set(node.id, node.value);
-  const statementBlocks = new Map<string, string>(),
-    concats = new Map<string, readonly Value[]>(),
-    aliases = new Map<string, Value>(),
-    constants = new Map<string, bigint>(),
-    incomingEdges = new Map<
-      string,
-      { exit: string; copies: readonly { destination: Value; source: Value }[] }[]
-    >();
-  for (const block of blocks.values()) {
-    for (const node of block.statements) {
-      statementBlocks.set(node.id, block.id);
-      if (node.kind !== 'assign') continue;
-      if (node.expression.kind === 'constant') constants.set(node.result.id, node.expression.bits);
-      if (node.expression.kind === 'concat') concats.set(node.result.id, node.expression.values);
-      const alias = identityOperand(node.result.type, node.expression);
-      if (alias) aliases.set(node.result.id, alias);
-    }
-    const control = block.control;
-    const outgoing =
-      control.kind === 'jump'
-        ? [control.transfer]
-        : control.kind === 'if'
-          ? [control.when_true.transfer, control.when_false.transfer]
-          : control.kind === 'switch'
-            ? [...control.cases.map((item) => item.arm.transfer), control.otherwise.transfer]
-            : [];
-    for (const transfer of outgoing) {
-      const edges = incomingEdges.get(transfer.target) ?? [];
-      edges.push({ exit: control.id, copies: transfer.copies });
-      incomingEdges.set(transfer.target, edges);
-    }
-  }
-  const stackJoins: StackArgumentJoins = {
-    block(boundary) {
-      const block = blocks.get(statementBlocks.get(boundary) ?? '');
-      if (!block || block.id === input.function.entry) return undefined;
-      const index = block.statements.findIndex((node) => node.id === boundary);
-      return {
-        statements: block.statements.slice(0, index + 1).map((node) => ({
-          id: node.id,
-          pure: node.kind !== 'store' && node.kind !== 'call' && node.kind !== 'unknown_effect',
-        })),
-        incoming: incomingEdges.get(block.id) ?? [],
-      };
-    },
-    concat: (value) => concats.get(value.id),
-    alias: (value) => aliases.get(value.id),
-    constant: (value) => constants.get(value.id),
-  };
+  const stackJoins = createStackArgumentJoins(blocks, input.function.entry);
   const bindStack = (
     key: string,
     boundary: string,
@@ -773,6 +726,14 @@ export function planSource(
       view === 'source' && !args.missing && !variadic && callee.argument_list_closure === undefined
         ? evidence.likely_arity?.get(control.id)
         : undefined;
+    // An observed callee interface whose result storage holds no FP register leaves
+    // the FP carrier unchanged or clobbered: it forwards no FP result.
+    if (
+      callee.parameter_state === 'observed' &&
+      callee.returns.every((register) => register.bank === 'integer') &&
+      (callee.return_types ?? []).every((type) => type.kind === 'integer')
+    )
+      floatingInertTails.add(control.id);
     tails.set(control.id, {
       target: callee.target,
       result_types:
@@ -1260,6 +1221,78 @@ export function planSource(
         )
       )
         primaryResult = { kind: 'explicit', written: true, reason: 'presentation record bound' };
+    }
+  }
+  // Closed-world caller consensus (premise D1): no caller in the image observes a
+  // result register, so the function returns nothing on any path, tails included.
+  // Asked only where the result may be incidental and the function would otherwise
+  // present one: tail transfers only (no return exit to select from), or an integer
+  // selection (or no selected register while a tail or the native interface
+  // forwards a result) whose every return exit path may hold an incidental value:
+  // the entry value, a call output, a value also stored or used otherwise
+  // (`incidental_paths`, passed as `candidate` and run by the service after its free
+  // checks). A path computing its value only for the exit returns it deliberately:
+  // callers are not swept for it (the gate only skips an attempt; it proves nothing).
+  const tailIds = [...blocks.values()].flatMap((block) =>
+    block.control.kind === 'indirect' && block.control.tail_call ? [block.control.id] : [],
+  );
+  const tailsOnly =
+    primaryResult === null &&
+    !exitIds.length &&
+    tailIds.length > 0 &&
+    integerReturn?.kind === 'register' &&
+    floatingReturn?.kind === 'register';
+  if (
+    view === 'source' &&
+    !functionSignature &&
+    !indirectResult &&
+    !callerDemand?.length &&
+    tailIds.every((id) => tails.has(id)) &&
+    (tailsOnly ||
+      (primaryResult?.kind === 'none' &&
+        !primaryResult.void_like &&
+        ([...tails.values()].some((tail) => !tail.result_void) ||
+          !!evidence.function_returns?.registers.length)) ||
+      primaryResult?.kind === 'integer')
+  ) {
+    // The FP carrier holds no result of this function when it is unchanged or
+    // undefined (unknown entry value, unprojected call clobber) on every return exit,
+    // or an incidental copy, and every tail callee writes no FP result register:
+    // then only the integer result register is followed into callers.
+    const floatingInert =
+      (tailsOnly ||
+        ((primaryResult?.kind === 'integer' || primaryResult?.kind === 'none') &&
+          (primaryResult.floating_inert === true ||
+            primaryResult.incidental_floating !== undefined))) &&
+      [...tails].every(([id, tail]) => tail.result_void || floatingInertTails.has(id));
+    const candidate = (): boolean =>
+      tailsOnly ||
+      ((primaryResult?.kind === 'integer' || primaryResult?.kind === 'none') &&
+        primaryResult.incidental_paths?.() === true);
+    const consensus = evidence.function_result_use?.(context, !floatingInert, candidate);
+    const anchors = [...exitIds, ...tailIds];
+    if (
+      consensus &&
+      validation.presentation(
+        'caller_consensus',
+        input.function.id,
+        'closed-world caller consensus: the function is not exported, no relocation/rebase/bind/chained fixup targets its entry, no instruction materializes it (ADR, ADRP+ADD; RIP-relative references) or reaches it by a conditional branch or fallthrough, every direct call and tail transfer to it is enumerated and lies in a known function, and after each call the integer result register (and the FP one unless it is unchanged or undefined on every exit and no tail callee writes an FP result) is overwritten before any read or reaches only the return of a caller with the same consensus (tail transfers likewise); the function returns nothing on every path and every tail transfer forwards no result',
+        anchors,
+        `${floatingInert ? 'integer result register' : 'integer and FP result registers'} ignored after ${consensus.sites.map((site) => `0x${site.value.toString(16)}`).join(', ')}`,
+      )
+    ) {
+      validation.requireAbi(
+        'caller_consensus',
+        anchors,
+        'Presenting a void interface assumes a closed world: no code outside the image transfers control to the function (not exported, address never materialized, every direct branch to it enumerated), and callers read results only in the ABI result registers. The result registers keep their exact exit values in the exit metadata and checked view.',
+      );
+      primaryResult = {
+        kind: 'none',
+        written: true,
+        reason: 'every caller ignores the result registers',
+        void_like: 'caller_consensus',
+      };
+      for (const [id, tail] of tails) tails.set(id, { ...tail, result_void: true });
     }
   }
   const primaryScope =

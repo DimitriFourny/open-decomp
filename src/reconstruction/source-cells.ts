@@ -68,7 +68,7 @@ export function recombineSourceCells(
   plan: CellPlan,
   validation: LocalValidationSession,
   context: OperationContext,
-): ReadonlyMap<ParallelTransfer, Copies> {
+): Map<ParallelTransfer, Copies> {
   const replacements = new Map<ParallelTransfer, Copies>();
   const edges = new Map<string, ParallelTransfer[]>();
   for (const { transfer } of transfers) {
