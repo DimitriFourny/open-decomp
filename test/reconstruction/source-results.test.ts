@@ -1524,12 +1524,13 @@ for (const variant of ['ignored', 'recursive', 'table', 'exported'] as const)
     }
   });
 
-/** Caller consensus is asked only where the result may be incidental on every return
- * exit path. `int f(int *p) { *p = 5; return 7; }` and `return p[1] + 1;` compute their
- * value for the exit alone: the planner never sweeps callers for them (a consensus
- * answer would be ignored) and the integer result stays. */
+/** Caller consensus sweeps callers only where the result may be incidental on every
+ * return exit path (the planner's `candidate`, run by the service before any sweep).
+ * `int f(int *p) { *p = 5; return 7; }` and `return p[1] + 1;` compute their value for
+ * the exit alone: the candidate test fails, the (stub) consensus does not apply and
+ * the integer result stays. */
 for (const variant of ['literal', 'computed'] as const)
-  test(`caller consensus is not asked for a ${variant} result`, () => {
+  test(`caller consensus candidate: ${variant} result`, () => {
     const abi = darwinArm64Abi;
     const x0 = register(
       abi.classifyCall({
@@ -1545,24 +1546,26 @@ for (const variant of ['literal', 'computed'] as const)
     block.store(p, block.constant(u64, 5n));
     block.writeRegister(
       x0,
-      variant === 'literal'
-        ? block.constant(u64, 7n)
-        : block.int(
+      variant === 'computed'
+        ? block.int(
             'add',
             block.load(u64, block.int('add', p, block.constant(u64, 8n))),
             block.constant(u64, 1n),
-          ),
+          )
+        : block.constant(u64, 7n),
     );
     block.return([]);
     const ir = constructSSA(b.finish(block, [])).value as SSAForm;
-    const asked: boolean[] = [];
+    const candidates: boolean[] = [];
     const source: SourceEvidence = {
       abi,
       callees: [],
       addresses: [],
-      function_result_use: (_context, floating) => {
-        asked.push(floating);
-        return { consensus: 'ignored', sites: [{ image_id: image, space: 'va', value: 0x3000n }] };
+      function_result_use: (_context, _floating, candidate) => {
+        candidates.push(candidate());
+        return candidates.at(-1)
+          ? { consensus: 'ignored', sites: [{ image_id: image, space: 'va', value: 0x3000n }] }
+          : undefined;
       },
     };
     const program = reconstruct(
@@ -1570,7 +1573,7 @@ for (const variant of ['literal', 'computed'] as const)
       createOperationContext(),
       'source',
     );
-    assert.deepEqual(asked, []);
+    assert.deepEqual(candidates, [false]);
     assert.equal(program.source?.void_like_result, undefined);
     for (const projection of program.returns.values())
       assert.equal(projection.results[0]?.type.kind, 'integer');

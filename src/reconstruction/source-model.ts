@@ -213,11 +213,14 @@ export interface SourceEvidence {
    * materializes it, every direct transfer to it is enumerated, and after each one
    * the integer result register (and the FP one when `floating`) is overwritten
    * before any read, or reaches only the returns of callers with the same
-   * consensus. Computed only when the planner asks; charged to `context`;
-   * undefined when any step abstains. */
+   * consensus. Computed only when the planner asks; `candidate` (the planner's
+   * test whether the result may be incidental on every exit path) runs after the
+   * free checks (an exported entry abstains first) and before any caller is
+   * swept; charged to `context`; undefined when any step abstains. */
   readonly function_result_use?: (
     context: OperationContext,
     floating: boolean,
+    candidate: () => boolean,
   ) => FunctionResultUse | undefined;
   /** Actual proven written result storage, not an inferred author aggregate. */
   readonly function_returns?: {

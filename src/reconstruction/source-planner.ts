@@ -1279,9 +1279,9 @@ export function planSource(
   // selection (or no selected register while a tail or the native interface
   // forwards a result) whose every return exit path may hold an incidental value:
   // the entry value, a call output, a value also stored or used otherwise
-  // (`incidental_paths`).
-  // A path computing its value only for the exit returns it deliberately: callers
-  // are not swept for it (the gate only skips an attempt; it proves nothing).
+  // (`incidental_paths`, passed as `candidate` and run by the service after its free
+  // checks). A path computing its value only for the exit returns it deliberately:
+  // callers are not swept for it (the gate only skips an attempt; it proves nothing).
   const tailIds = [...blocks.values()].flatMap((block) =>
     block.control.kind === 'indirect' && block.control.tail_call ? [block.control.id] : [],
   );
@@ -1298,12 +1298,11 @@ export function planSource(
     !callerDemand?.length &&
     tailIds.every((id) => tails.has(id)) &&
     (tailsOnly ||
-      (((primaryResult?.kind === 'none' &&
+      (primaryResult?.kind === 'none' &&
         !primaryResult.void_like &&
         ([...tails.values()].some((tail) => !tail.result_void) ||
           !!evidence.function_returns?.registers.length)) ||
-        primaryResult?.kind === 'integer') &&
-        primaryResult.incidental_paths?.() === true))
+      primaryResult?.kind === 'integer')
   ) {
     // The FP carrier holds no result of this function when it is unchanged or
     // undefined (unknown entry value, unprojected call clobber) on every return exit,
@@ -1315,7 +1314,11 @@ export function planSource(
           (primaryResult.floating_inert === true ||
             primaryResult.incidental_floating !== undefined))) &&
       [...tails].every(([id, tail]) => tail.result_void || floatingInertTails.has(id));
-    const consensus = evidence.function_result_use?.(context, !floatingInert);
+    const candidate = (): boolean =>
+      tailsOnly ||
+      ((primaryResult?.kind === 'integer' || primaryResult?.kind === 'none') &&
+        primaryResult.incidental_paths?.() === true);
+    const consensus = evidence.function_result_use?.(context, !floatingInert, candidate);
     const anchors = [...exitIds, ...tailIds];
     if (
       consensus &&

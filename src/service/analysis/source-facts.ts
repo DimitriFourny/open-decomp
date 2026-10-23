@@ -2222,10 +2222,11 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
   const functionResultUse = (
     scanContext: OperationContext,
     floating: boolean,
+    candidate: () => boolean,
   ): FunctionResultUse | undefined => {
     let found = resultUse.get(floating);
     if (found === undefined) {
-      found = callerResultConsensus(input, scanContext, floating) ?? null;
+      found = callerResultConsensus(input, scanContext, floating, candidate) ?? null;
       resultUse.set(floating, found);
     }
     return found ?? undefined;

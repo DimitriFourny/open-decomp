@@ -207,7 +207,8 @@ export function callerResultDemands(
  *     into another tail transfer (its callee may read it as an argument), more than
  *     `MAX_CONSENSUS_SITES` sites of one function or `MAX_CONSENSUS_TOTAL_SITES` in
  *     all abstain.
- * An exported F abstains first (the native call index's export map). Then a
+ * An exported F abstains first (the native call index's export map), then one the
+ * planner's `candidate` rejects (its result is deliberate on some exit path). Then a
  * refutation pass: one sweep outward from F's entry meets, nearest first, F's sites
  * and those of every caller F's result is forwarded to once a forwarding site is met.
  * The first site that fails (d) on its own (or a supplied signature or import stub on
@@ -220,6 +221,7 @@ export function callerResultConsensus(
   input: SourceFactsInput,
   context: OperationContext,
   floating: boolean,
+  candidate: () => boolean,
 ): FunctionResultUse | undefined {
   const { image } = input;
   const roots = resultRoots(input.components.abi);
@@ -249,7 +251,7 @@ export function callerResultConsensus(
   // An exported entry abstains at once (the request already holds the native call
   // index's export map).
   const native = nativeCallIndex(image, input.functions, input.references, context);
-  if (native.exports_by_address.has(nativeAddressKey(fn.entry))) return undefined;
+  if (native.exports_by_address.has(nativeAddressKey(fn.entry)) || !candidate()) return undefined;
   const local = shareContext(context, share - indexWork);
   const decoder =
     image.target.architecture === 'arm64'
