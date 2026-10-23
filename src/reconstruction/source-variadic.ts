@@ -14,7 +14,12 @@ import type { EmissionInput } from '../emitters/model.js';
 import type { BoundaryProjection } from './model.js';
 import type { LocalValidationSession } from './local-validation.js';
 import type { InferredCallee } from './source-model.js';
-import type { JoinedSlot, OutgoingSlot, OutgoingStackSlots } from './source-stack-arguments.js';
+import {
+  requireEscapedFrameFloor,
+  type JoinedSlot,
+  type OutgoingSlot,
+  type OutgoingStackSlots,
+} from './source-stack-arguments.js';
 
 /** Darwin arm64 passes every variadic argument in 8-byte outgoing stack slots
  * starting at SP+0. When the callee lets a pointer into its incoming argument
@@ -50,99 +55,102 @@ export function planVariadicStackArguments(
       .filter(([, callee]) => callee.variadic_stack || callee.variadic),
   );
   if (!callees.size) return;
-  const writes = createRegisterWrites(blocks, expressions, input.function.entry, context);
+  let writes: ReturnType<typeof createRegisterWrites> | undefined;
   const integerArguments = argumentRegisters(source.abi, 'integer', 8);
   const outgoing = slots();
   if (!outgoing) return;
   const slot = BigInt(source.abi.layout.pointer_bits / 8);
-  for (const block of blocks.values())
-    for (const node of block.statements) {
+  for (const node of outgoing.calls) {
+    context.checkpoint(1);
+    const callee = callees.get(node.id),
+      projection = calls.get(node.id);
+    // Unnamed arguments follow every fixed one. An observed prefix fixes the
+    // tail's position; an ambiguous callee keeps its fully bound caller-side
+    // prefix, which the rendered note marks as possibly incomplete. Fixed
+    // stack parameters would precede the tail, unless a published `va_start`
+    // footprint (S8) names them: the tail then starts after its named bytes.
+    if (
+      !callee ||
+      (callee.stack_parameters?.length && !callee.variadic) ||
+      !(
+        (projection?.kind === 'inferred' && projection.argument_list_complete === false) ||
+        (projection?.kind === 'physical' &&
+          callee.parameter_state === 'ambiguous' &&
+          projection.arguments.length === callee.parameters.length)
+      )
+    )
+      continue;
+    // S8: a published footprint names no register itself on Darwin; the
+    // anonymous slots follow the bound prefix only when the call writes no
+    // integer argument register beyond it (else a named argument the
+    // callee's observed prefix misses would shift every slot).
+    if (
+      callee.variadic &&
+      integerArguments
+        .slice(callee.parameters.filter((register) => register.bank === 'integer').length)
+        .some((register) =>
+          (writes ??= createRegisterWrites(blocks, expressions, input.function.entry, context))(
+            node.register_inputs,
+            register,
+          ),
+        )
+    )
+      continue;
+    const sp = stack.snapshots.get(node.id)?.stack_pointer.value;
+    if (sp?.kind !== 'stack') continue;
+    const taken: OutgoingSlot[] = [];
+    for (let index = 0n; index < 32n; index++) {
       context.checkpoint(1);
-      if (node.kind !== 'call') continue;
-      const callee = callees.get(node.id),
-        projection = calls.get(node.id);
-      // Unnamed arguments follow every fixed one. An observed prefix fixes the
-      // tail's position; an ambiguous callee keeps its fully bound caller-side
-      // prefix, which the rendered note marks as possibly incomplete. Fixed
-      // stack parameters would precede the tail, unless a published `va_start`
-      // footprint (S8) names them: the tail then starts after its named bytes.
+      const offset = (callee.variadic?.named_stack_bytes ?? 0n) + index * slot,
+        found = outgoing.slot(node.id, offset, slot),
+        join = found?.join;
       if (
-        !callee ||
-        (callee.stack_parameters?.length && !callee.variadic) ||
-        !(
-          (projection?.kind === 'inferred' && projection.argument_list_complete === false) ||
-          (projection?.kind === 'physical' &&
-            callee.parameter_state === 'ambiguous' &&
-            projection.arguments.length === callee.parameters.length)
-        )
+        !found ||
+        (join &&
+          !validation.presentation(
+            'variadic_stack_join',
+            node.id,
+            join.shared
+              ? 'Darwin arm64 variadic outgoing stack slot written on every incoming edge of the call block by one store in the predecessor, unobserved until the call: the argument is the value the join already carries'
+              : 'Darwin arm64 variadic outgoing stack slot written on every incoming edge of the call block by one store in the predecessor, unobserved until the call: the argument is a source-only block parameter each edge assigns its stored value',
+            [
+              ...join.edges.map(({ store }) => store.id),
+              ...new Set(join.edges.map(({ exit }) => exit)),
+            ],
+          ))
       )
-        continue;
-      // S8: a published footprint names no register itself on Darwin; the
-      // anonymous slots follow the bound prefix only when the call writes no
-      // integer argument register beyond it (else a named argument the
-      // callee's observed prefix misses would shift every slot).
-      if (
-        callee.variadic &&
-        integerArguments
-          .slice(callee.parameters.filter((register) => register.bank === 'integer').length)
-          .some((register) => writes(node.register_inputs, register))
-      )
-        continue;
-      const sp = stack.snapshots.get(node.id)?.stack_pointer.value;
-      if (sp?.kind !== 'stack') continue;
-      const taken: OutgoingSlot[] = [];
-      for (let index = 0n; index < 32n; index++) {
-        context.checkpoint(1);
-        const offset = (callee.variadic?.named_stack_bytes ?? 0n) + index * slot,
-          found = outgoing.slot(node.id, offset, slot),
-          join = found?.join;
-        if (
-          !found ||
-          (join &&
-            !validation.presentation(
-              'variadic_stack_join',
-              node.id,
-              join.shared
-                ? 'Darwin arm64 variadic outgoing stack slot written on every incoming edge of the call block by one store in the predecessor, unobserved until the call: the argument is the value the join already carries'
-                : 'Darwin arm64 variadic outgoing stack slot written on every incoming edge of the call block by one store in the predecessor, unobserved until the call: the argument is a source-only block parameter each edge assigns its stored value',
-              [
-                ...join.edges.map(({ store }) => store.id),
-                ...new Set(join.edges.map(({ exit }) => exit)),
-              ],
-            ))
-        )
-          break;
-        taken.push(found);
-      }
-      if (
-        !taken.length ||
-        !validation.presentation(
-          'variadic_stack_arguments',
-          node.id,
-          callee.variadic
-            ? `Darwin arm64 variadic outgoing stack slots presented as the trailing anonymous call arguments after ${callee.variadic.named_stack_bytes} named stack bytes; the callee's va_start footprint is published and the source arity stays open`
-            : 'Darwin arm64 variadic outgoing stack slots presented as observed trailing call arguments; the callee lets an incoming-stack pointer escape and the source arity stays open',
-          taken.flatMap((argument) => argument.stores.map((store) => store.id)),
-        )
-      )
-        continue;
-      validation.requireAbi(
-        'darwin_variadic_stack_arguments',
-        [node.id],
-        `Presenting outgoing stack stores as trailing arguments assumes the Darwin arm64 variadic convention (every unnamed argument in consecutive 8-byte stack slots from SP+${callee.variadic?.named_stack_bytes ?? 0n}) holds for this call.`,
-      );
-      const values: Value[] = taken.map(
-        ({ value, join }) =>
-          value ?? join!.shared ?? joinStackSlot(blocks, storage, node.id, join!),
-      );
-      for (const argument of taken)
-        for (const store of argument.stores) outgoing.consumed.set(store.id, node.id);
-      calls.set(node.id, {
-        ...projection,
-        arguments: [...projection.arguments, ...values],
-        argument_list_complete: false,
-      });
+        break;
+      taken.push(found);
     }
+    if (
+      !taken.length ||
+      !validation.presentation(
+        'variadic_stack_arguments',
+        node.id,
+        callee.variadic
+          ? `Darwin arm64 variadic outgoing stack slots presented as the trailing anonymous call arguments after ${callee.variadic.named_stack_bytes} named stack bytes; the callee's va_start footprint is published and the source arity stays open`
+          : 'Darwin arm64 variadic outgoing stack slots presented as observed trailing call arguments; the callee lets an incoming-stack pointer escape and the source arity stays open',
+        taken.flatMap((argument) => argument.stores.map((store) => store.id)),
+      )
+    )
+      continue;
+    validation.requireAbi(
+      'darwin_variadic_stack_arguments',
+      [node.id],
+      `Presenting outgoing stack stores as trailing arguments assumes the Darwin arm64 variadic convention (every unnamed argument in consecutive 8-byte stack slots from SP+${callee.variadic?.named_stack_bytes ?? 0n}) holds for this call.`,
+    );
+    const values: Value[] = taken.map(
+      ({ value, join }) => value ?? join!.shared ?? joinStackSlot(blocks, storage, node.id, join!),
+    );
+    const stores = taken.flatMap((argument) => argument.stores);
+    requireEscapedFrameFloor(outgoing, node.id, stores, validation);
+    for (const store of stores) outgoing.consumed.set(store.id, node.id);
+    calls.set(node.id, {
+      ...projection,
+      arguments: [...projection.arguments, ...values],
+      argument_list_complete: false,
+    });
+  }
 }
 
 /** Source-view reconstruction state a joined variadic slot extends: every

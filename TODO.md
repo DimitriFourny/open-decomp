@@ -495,7 +495,7 @@ Files that several items touch:
 
 ### K7: Escaped frame addresses bound the variadic aliasing floor
 
-- [ ] **Problem.** One escaped frame address anywhere (`fstat(fd, &buf)`) disables variadic binding for the whole function: `source-variadic.ts:70-97` aborts on any stored or register-held stack address (10 of 19 affected functions).
+- [x] **Problem.** One escaped frame address anywhere (`fstat(fd, &buf)`) disables variadic binding for the whole function: `source-variadic.ts:70-97` aborts on any stored or register-held stack address (10 of 19 affected functions). _Done (`wt/rm4-k7`): lane `od-rm4-k7` differs from `od-main-a15b636` in exactly five texts: `fts3DestroyMethod` prints all 11 `fts3DbExec` arguments and loses its 11-member frame, `unixSync` prints its 5 `sqlite3_log` arguments, `verifyDbFile` binds its joined slot (`sqlite3_log(28, value5, value4)`), brotli `main` loses its 17 duplicated `frame.local_2a0/2a8/2b0` stores (an inexact `&local | 4` escape is bounded by its exact origin), `fts5FlushSecureDelete` loses 1; checked views unchanged; `selectInnerLoop` still unbound (store identity lost to a same-fact loop merge in the stack analysis, then the next iteration's call sees the slot); work: brotli `main` −13,112, `isDate` +5,414 (the eligibility scan no longer stops at the first escape), `sqlite3Fts3Incrmerge` 0._
   - **Change:**
     - Do not abort on an exact `stack`/`stack_fragment` escape. Record the lowest escaped offset as `escapeFloor`, and admit only slots with `start + size ≤ escapeFloor`.
     - Keep aborting on `dynamic_stack` and on missing snapshots.

@@ -1361,8 +1361,10 @@ export class Renderer {
   }
 
   /** C type of the scalar a source load reads through `storage`: a struct
-   * member's declared integer type, a declared scalar pointer's pointee, or the
-   * unsigned integer of the access width. Unknown for another member path. */
+   * member's declared integer type, a declared scalar pointer's pointee (also
+   * one known only by its declared spelling, such as a library call result's
+   * `int32_t *`, when `storage` dereferences it), or the unsigned integer of the
+   * access width. Unknown for another member path. */
   private loadCType(
     load: Extract<Instruction, { kind: 'load' }>,
     storage: string,
@@ -1372,7 +1374,14 @@ export class Renderer {
     if (storage.includes('->')) return null;
     const id = this.variableTypeId(load.address);
     const pointee = id && !this.inline.has(load.address.id) ? this.scalarPointee(id) : null;
-    return pointee ?? { bits: bitWidth(load.result.type), signed: false };
+    if (pointee) return pointee;
+    const bits = bitWidth(load.result.type),
+      address = this.uncast(load.address, ['bitcast']),
+      declared =
+        !this.inline.has(address.id) && storage === `*${this.local(address)}`
+          ? this.declaredPointer(address)
+          : null;
+    return declared?.bits === bits ? declared : { bits, signed: false };
   }
 
   /** Byte size of the scalar a declared source pointer type points to. */
