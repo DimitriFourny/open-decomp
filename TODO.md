@@ -33,6 +33,21 @@ Each item is sized for one agent. The causes come from an investigation on 2026-
 | QA Claude tokens per correct answer                  | 4,785                                                       | 3,528                                                     | not a goal (D9)                   | token items, C2, K2–K4      |
 | decompile time after open vs Ghidra's whole run (D8) | SQLite 121.4 s, brotli 7.7 s, matrix 0.7–1.9 s; total 140 s | SQLite 38.7 s, brotli 3.9 s, matrix 3.5–7.3 s; total 87 s | behind (SQLite 3.1×, brotli 2.0×) | M2, T1–T9, C4               |
 
+### Result after roadmap 4 (lane `od-rm4-final` = `main` `1239ec9`, measured 2026-10-23)
+
+45 of 47 items merged; T4 was measured and not merged (no saving, see T4) and T5 needs it. Full numbers and method: docs/PERFORMANCE.md "Roadmap 4: round result"; report `.odbench/reports/2026-10-23-094214-od-rm4-final-full/report.md` (local).
+
+| row                                                 | before (od-rm3-final) | after (od-rm4-final)                                                                           | Ghidra | status         |
+| --------------------------------------------------- | --------------------- | ---------------------------------------------------------------------------------------------- | ------ | -------------- |
+| functions with text (of 237)                        | 232                   | 235 (`sqlite3Select`, `sqlite3Pragma` fail at the work limit)                                  | 237    | behind by 2    |
+| readability overall (vs Ghidra)                     | 0.727                 | 0.878 (180 / 46 / 6)                                                                           | —      | ahead          |
+| readability noise / control_flow                    | 0.381 / 0.572         | 0.564 / 0.698                                                                                  | —      | ahead          |
+| comprehension coverage − Ghidra (paired)            | −0.092                | +0.033 [−0.036, 0.101]                                                                         | —      | level          |
+| wrong claims per function                           | 2.65                  | 2.34                                                                                           | 2.22   | behind by 0.12 |
+| QA correct                                          | 78%                   | 77%                                                                                            | 67%    | ahead          |
+| decompile time after open ÷ Ghidra's whole run (D8) | 1.62× (1 worker)      | 0.52× with 4 workers (SQLite 0.86×, brotli 0.79×; first 10 SQLite 4.55 s); 1.16× with 1 worker | 1      | met            |
+| lexical / Claude tokens vs Ghidra (D9, not a goal)  | 1.337 / 1.477         | 1.176 / 1.252                                                                                  | 1      | —              |
+
 ### Where the gap comes from
 
 **1. Return types (largest wrong-claim class in SQLite).** Counted from the lane texts against the source declarations:

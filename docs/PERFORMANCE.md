@@ -96,6 +96,36 @@ Roadmap 3 (TODO.md: M1, R1–R6, S1–S9, J1–J4; every item merged) measured o
 - Counted work (M1), limit 10,000,000: brotli `main` 9,223,523 → 9,237,911; `whereLoopAddBtreeIndex` (not in the corpus; CLI, fresh cache) 9,429,670 → 9,450,352; closest partial functions `sqlite3Fts3Incrmerge` 9,857,187 → 9,869,464 and `isDate` 9,678,620 → 9,791,279. The same 8 functions are above 80% of the limit as before the roadmap. Lane total +4.5% (512.2 M → 535.2 M): the largest increases are functions whose own graph grew (`jsonTranslateTextToBlob` +2.61 M, `selectInnerLoop` +2.54 M) and about 20 SQLite functions at +0.7 M each whose callees now include their case bodies (J2); S8's gated callee `reconstruct` adds about 2 M across the lane.
 - Timings come from one run started at load average 7.0 on 12 cores, so they are inflated; compare them only roughly.
 
+### Roadmap 4: round result (2026-10-23)
+
+Roadmap 4 (TODO.md: 45 of 47 items merged; T4 measured and not merged, T5 not started, see TODO.md) measured once, after the last merge: lane `od-rm4-final` = `main` `1239ec9`, full tier, `--repeat 2`, 4 request workers (T9), open-time unit job on (T8), against `od-rm3-final` and Ghidra 12.1.4. Judge Haiku via `omp`, `--comprehension-samples 3` (14.7 M input tokens, $3.47, 39 min). Report: `.odbench/reports/2026-10-23-094214-od-rm4-final-full/report.md` (local). Texts and per-function work are identical across both repeats and between 4 workers and one (`od-rm4-final-j1`).
+
+| measure (232 paired functions)             |               roadmap 3 |             roadmap 4 |        Ghidra |
+| ------------------------------------------ | ----------------------: | --------------------: | ------------: |
+| functions with text (of 237)               |                     232 |                   235 |           237 |
+| artifact patterns (report section 5)       |                     495 |                   141 |         1,239 |
+| lexical tokens vs Ghidra (geomean, 95% CI) |    1.337 [1.278, 1.397] |  1.176 [1.133, 1.220] |             1 |
+| Claude tokens vs Ghidra                    |    1.477 [1.399, 1.558] |  1.252 [1.194, 1.309] |             1 |
+| readability vs Ghidra (overall)            |    0.727 [0.680, 0.776] |  0.878 [0.845, 0.907] |             — |
+| strict wins / ties / losses vs Ghidra      |           137 / 62 / 33 |          180 / 46 / 6 |             — |
+| readability noise dimension                |                   0.381 |                 0.564 |             — |
+| comprehension coverage (0–4)               |                   2.664 |                 2.790 |         2.757 |
+| comprehension coverage − Ghidra (paired)   | −0.092 [−0.165, −0.016] | 0.033 [−0.036, 0.101] |             — |
+| wrong claims per function                  |                    2.65 |                  2.34 |          2.22 |
+| QA correct rate (126 samples)              |                     78% |                   77% |           67% |
+| QA Claude tokens per correct answer        |                   4,785 |                 3,879 |         3,528 |
+| void-source printed `void` (of 42)         |                      17 |                    32 |            40 |
+| value-source printed `void` (of 190)       |                       9 |                     5 |            14 |
+| decompile time after open, all binaries    |      140.0 s (1 worker) |    44.7 s (4 workers) | 86.7 s (cold) |
+| decompile after open ÷ Ghidra cold (D8)    |                   1.62× |                 0.52× |             — |
+
+- Readability dimensions against Ghidra, roadmap 3 → roadmap 4: control flow 0.572 → 0.698, data 0.798 → 0.888, expressions 0.684 → 0.816, noise 0.381 → 0.564. Open Decomp now wins every dimension; the comprehension gap is closed (CI spans 0); wrong claims remain 0.12 per function above Ghidra's.
+- Roadmap 4 against roadmap 3 directly: 0.688 [0.647, 0.731], strict 110 wins / 99 ties / 22 losses (31 identical texts, 200 judged, 1 too large), sign test p < 0.001. 201 texts differ.
+- Two functions still fail at the work limit (`sqlite3Select`, `sqlite3Pragma`: their mandatory prefix before rendering exceeds 10M); C1 and C3 gave text to `sqlite3CodeRowTrigger`, `sqlite3WhereCodeOneLoopStart` and `sqlite3_str_vappendf`.
+- Static counters, roadmap 3 → 4 (Ghidra): `while (true)` 217 → 172 (66), loops with a test 220 → 265 (343), `break` 379 → 329 (146), `goto` 758 → 717 (781), casts 7,286 → 5,863 (5,428), 64-bit cell reassemblies 242 → 56, functions with a frame struct 66 → 52, `boundary(` 59 → 0, `requirement_predicate(` 46 → 0, `unknown_value(` 88 → 11, casts with `...` 77 → 0, comment bytes 33,534 → 29,038 (1,378).
+- Speed (D8, decompile time after open against Ghidra's whole run, 4 workers, load average 6.7 at start): SQLite 33.4 s vs 38.7 s (0.86×), brotli 3.1 s vs 3.9 s (0.79×), every matrix cell ≤ 0.33×; first 10 SQLite functions 4.55 s (target 5 s). Open time 12.9 s on SQLite, of which the open-time unit job 10.8 s (327 M work, 256 MiB store cap); peak RSS 2.0 GB for the largest process. One worker (`od-rm4-final-j1`, load 3.6): SQLite 86.0 s (roadmap 3: 121.4 s at load 7), all binaries 100.4 s (1.16×).
+- Counted work, limit 10,000,000: lane total 539.7 M → 529.1 M; `isDate` 9,791,279 → 9,727,662, `sqlite3Fts3Incrmerge` 9,869,464 → 9,439,405, brotli `main` 9,237,911 → 9,349,614 (C4 freed work that its image-type stage now uses). 7 functions are above 80% of the limit (8 before).
+
 ## Evidence archive setup
 
 The 15 retained `.tar.gz` bundles are external assets, not git content. `scripts/bench/evidence-assets.json` pins every original repo-relative path, byte size and SHA256. The canonical store is `$OPEN_DECOMP_EVIDENCE_DIR`, or `<repo>/.local/evidence` when unset, preserving those paths; `.local/` is gitignored, so back the store up yourself. `fetch-evidence.ts` populates it from another copy of the archives; exactly one of `--from DIR` or `--url-base URL` is required. No public download location is currently configured.
