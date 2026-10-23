@@ -10,11 +10,37 @@ import {
   type RegisterBinding,
   type Value,
 } from '../ir/index.js';
-import type { BlockRegion } from '../presentation/index.js';
+import type { BlockRegion, Control, ParallelTransfer } from '../presentation/index.js';
 import { registerTypes, type RegisterTypeSlice } from './source-register-types.js';
 import { createSlotTyper } from './source-slot-types.js';
 
 type RegisterLocation = Extract<AbiLocation, { kind: 'register' }>;
+
+type ResultArm = { readonly transfer: Pick<ParallelTransfer, 'target' | 'copies'> };
+/** The control a primary-result selection reads: transfer targets with their phi
+ * copies, branch/switch operands, returns and tail transfers. A structured
+ * `BlockRegion` is one; native SSA blocks map onto it (`nativeIncidentalResult`). */
+export type ResultControl =
+  | { readonly kind: 'jump'; readonly id: string; readonly transfer: ResultArm['transfer'] }
+  | {
+      readonly kind: 'if';
+      readonly id: string;
+      readonly condition: Value;
+      readonly when_true: ResultArm;
+      readonly when_false: ResultArm;
+    }
+  | {
+      readonly kind: 'switch';
+      readonly id: string;
+      readonly value: Value;
+      readonly cases: readonly { readonly arm: ResultArm }[];
+      readonly otherwise: ResultArm;
+    }
+  | Extract<Control, { readonly kind: 'return' | 'indirect' | 'trap' | 'unknown' }>;
+export type ResultBlock = Pick<
+  BlockRegion,
+  'id' | 'parameters' | 'register_entry' | 'register_exit' | 'statements'
+> & { readonly control: ResultControl };
 
 /** Evidence-based choice between the ABI integer and FP primary result
  * registers of an undeclared function. `float` binds the FP register on every
@@ -65,6 +91,10 @@ export type SourcePrimaryResult =
       readonly floating_inert?: true;
       /** `none` without a void-like rule: as for `integer`. */
       readonly incidental_paths?: () => boolean;
+      /** `none` without a void-like rule: the integer result register is undefined
+       * (unknown entry value or unprojected call clobber) on some exit, so no result
+       * of this function's own is defined there. */
+      readonly integer_undefined?: true;
     };
 
 type ExitState =
@@ -72,8 +102,8 @@ type ExitState =
   | { readonly kind: 'unchanged' | 'written' | 'constant'; readonly type?: DataType };
 
 export interface SourcePrimaryResultInput {
-  readonly blocks: ReadonlyMap<string, BlockRegion>;
-  readonly entry: BlockRegion;
+  readonly blocks: ReadonlyMap<string, ResultBlock>;
+  readonly entry: ResultBlock;
   readonly expressions: ReadonlyMap<string, Expression>;
   /** Phi/edge-copy sources of block parameters. */
   readonly sources: ReadonlyMap<string, readonly Value[]>;
@@ -92,6 +122,14 @@ export interface SourcePrimaryResultInput {
   /** Native written-result interface; consulted only when write order is mixed. */
   readonly observed: readonly RegisterDescriptor[];
   readonly context: OperationContext;
+  /** Tail transfers (by control id) that forward no result: the callee's interface
+   * returns nothing (`result_void`). Incidental classification is open only when
+   * every tail transfer is one of them. */
+  readonly voidTails?: ReadonlySet<string>;
+  /** Whether a call's callee is itself void-like (`result_incidental`, the same
+   * `incidental_result` premise applied transitively): its result left in the
+   * register as the final action establishes nothing. */
+  readonly incidentalCall?: (call: string) => boolean;
 }
 
 const transportCasts = ['bitcast', 'zero_extend', 'sign_extend', 'truncate'];
@@ -118,11 +156,14 @@ export function selectSourcePrimaryResult(
   const exits = [...blocks.values()].filter((block) => block.control.kind === 'return');
   if (!exits.length) return null;
   // Call results, projected or native: their incidental use is the classic
-  // leftover of a void function ending in a call.
+  // leftover of a void function ending in a call. Outputs map to their call.
   const callResults = new Set<string>(),
-    callOutputs = new Set<string>();
-  for (const values of input.callResults.values())
-    for (const value of values) callResults.add(value.id);
+    callOutputs = new Map<string, string>();
+  for (const [call, values] of input.callResults)
+    for (const value of values) {
+      callResults.add(value.id);
+      callOutputs.set(value.id, call);
+    }
   const loads = new Map<string, Value>(),
     storeValues = new Map<string, Value>(),
     computed = new Set<string>();
@@ -135,10 +176,9 @@ export function selectSourcePrimaryResult(
       if (node.kind === 'call')
         for (const value of node.results) {
           computed.add(value.id);
-          callOutputs.add(value.id);
+          callOutputs.set(value.id, node.id);
         }
     }
-  for (const id of callResults) callOutputs.add(id);
   const entryParameters = new Set(entry.parameters.map((value) => value.id));
   const frame = (value: Value): boolean => {
     const kind = stack?.values.get(value.id)?.value.kind;
@@ -549,7 +589,8 @@ export function selectSourcePrimaryResult(
   // undefined when some path establishes it deliberately: every slice leaf is
   // moved back after a clobber, is another argument copied into the register,
   // is a projected call result that is the path's final action (the callee's
-  // result contract passed through), or is a constant/load/computation
+  // result contract passed through, unless the callee is itself void-like:
+  // `incidentalCall`), or is a constant/load/computation
   // consumed by nothing but function exits and stores. A call result left in
   // place before later effects, an untouched argument and a value that also
   // addresses memory or feeds calls or branches (an index, cursor or base
@@ -574,11 +615,13 @@ export function selectSourcePrimaryResult(
         for (const value of [...walked.leaves, ...walked.constants]) {
           if (parameters.has(value.id)) established = true;
           else if (callOutputs.has(value.id)) {
-            if (finalCall(value, path.target, block.id)) established = true;
-            else {
+            if (!finalCall(value, path.target, block.id)) {
               shared = true;
               kinds.add('a call result left in place before later effects');
-            }
+            } else if (input.incidentalCall?.(callOutputs.get(value.id)!)) {
+              shared = true;
+              kinds.add('the final result of a void-like callee');
+            } else established = true;
           } else if (observedElsewhere(value)) {
             shared = true;
             kinds.add('a value that also addresses memory or feeds calls or branches');
@@ -802,13 +845,13 @@ export function selectSourcePrimaryResult(
     }
     return width === undefined ? undefined : floating(width as 32 | 64);
   };
-  const exitValue = (block: BlockRegion, location: RegisterLocation): Value | undefined =>
+  const exitValue = (block: ResultBlock, location: RegisterLocation): Value | undefined =>
     block.register_exit.find(
       (binding) =>
         binding.register.root === location.register.root &&
         binding.register.offset_bits === location.register.offset_bits,
     )?.value;
-  const state = (block: BlockRegion, location: RegisterLocation, floating: boolean): ExitState => {
+  const state = (block: ResultBlock, location: RegisterLocation, floating: boolean): ExitState => {
     const root = location.register.root,
       offset = location.register.offset_bits;
     const cell = block.register_exit.find(
@@ -979,11 +1022,15 @@ export function selectSourcePrimaryResult(
       };
     }
     // A tail transfer passes its callee's result through; its storage is not
-    // classified here, so only return-only functions become void-like.
+    // classified here, so only functions whose every tail transfer forwards no
+    // result (`voidTails`) may become void-like.
     const incidental =
       !integerDemanded &&
-      ![...blocks.values()].some(
-        (block) => block.control.kind === 'indirect' && block.control.tail_call,
+      [...blocks.values()].every(
+        (block) =>
+          block.control.kind !== 'indirect' ||
+          !block.control.tail_call ||
+          input.voidTails?.has(block.control.id) === true,
       ) &&
       (floatingIncidental !== undefined ||
         floatingStates.every((item) => item.kind === 'unchanged' || item.kind === 'undefined'))
@@ -1005,6 +1052,9 @@ export function selectSourcePrimaryResult(
       written,
       reason: `neither ${integerName} nor typed ${floatingName} is defined by this function on every exit`,
       ...inert,
+      ...(integerStates.some((item) => item.kind === 'undefined')
+        ? { integer_undefined: true as const }
+        : {}),
       incidental_paths: incidentalPaths,
     };
   return choice === 'float'

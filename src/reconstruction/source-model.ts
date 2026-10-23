@@ -98,6 +98,12 @@ export interface InferredCallee {
   /** An established contract or method type encoding declares a void result:
    * empty `returns` is then proven no result, not an unknown result interface. */
   readonly returns_void?: true;
+  /** The callee's complete native summary classifies its integer result register as
+   * incidental (`incidental_result`, evaluated over its native SSA with only semantic
+   * caller demand, through its own tails and final calls; recursion coinductive): the
+   * callee is void-like under that premise, applied transitively. `returns` still
+   * names the written storage; a source-view tail into it forwards no result. */
+  readonly result_incidental?: true;
   /** Lane types observed independently of architectural register capacity. */
   readonly parameter_types?: readonly DataType[];
   readonly return_types?: readonly DataType[];

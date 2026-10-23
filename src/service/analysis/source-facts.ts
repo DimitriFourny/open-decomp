@@ -89,6 +89,7 @@ import {
   nativeCallInputs,
   nativeIncomingStackEscapes,
   nativeReturnInterface,
+  nativeIncidentalResult,
   nativeStackParameters,
   nativeTypeSlices,
 } from './native-transfer.js';
@@ -1531,6 +1532,28 @@ function localEnvironmentWriter(
   return false;
 }
 
+/** A unit's callee interfaces by call id: dependency summaries merged with the
+ * call contracts the unit observed itself (libraries, imports). */
+function unitInterfaces(
+  input: SourceFactsInput,
+  unit: PreparedNativeUnit,
+  dependencies: ReadonlyMap<string, NativeInterface>,
+  context: OperationContext,
+): Map<string, NativeInterface> {
+  const interfaces = new Map(dependencies);
+  for (const observed of unit.observed_calls)
+    interfaces.set(
+      observed.call_id,
+      mergeNativeInterface(
+        interfaces.get(observed.call_id),
+        observed,
+        input.components.abi,
+        context,
+      ),
+    );
+  return interfaces;
+}
+
 function observeNativeUnit(
   input: SourceFactsInput,
   unit: PreparedNativeUnit,
@@ -1548,17 +1571,7 @@ function observeNativeUnit(
         argument_list_complete: false,
       }
     );
-  const interfaces = new Map(dependencies);
-  for (const observed of unit.observed_calls)
-    interfaces.set(
-      observed.call_id,
-      mergeNativeInterface(
-        interfaces.get(observed.call_id),
-        observed,
-        input.components.abi,
-        context,
-      ),
-    );
+  const interfaces = unitInterfaces(input, unit, dependencies, context);
   let observed: NativeInterface;
   if (unit.analysis)
     observed = observeParameters(
@@ -1959,7 +1972,31 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
       equal: (left, right) =>
         fingerprint(left as unknown as CanonicalValue) ===
         fingerprint(right as unknown as CanonicalValue),
+      incidental: (unit, observed, summaries, demands, voidLike, boundedContext) =>
+        unit.ir !== null &&
+        unit.analysis !== null &&
+        nativeIncidentalResult(
+          unit.ir,
+          abi,
+          unit.analysis,
+          unitInterfaces(input, unit, summaries, boundedContext),
+          observed,
+          demands,
+          voidLike,
+          boundedContext,
+          unit.interface_index,
+        ) !== undefined,
     });
+    // A callee's void-likeness matters to this body only where its result reaches
+    // this body's own exit: a tail transfer, or a call whose result demand is
+    // forwarded to the exit alone (semantic demand already refutes it).
+    const tailIds = new Set(
+      input.ir.blocks.flatMap((block) =>
+        block.terminator.kind === 'indirect' && block.terminator.tail_call
+          ? [block.terminator.id]
+          : [],
+      ),
+    );
     partialUnits = result.units;
     for (const unit of result.units.values()) evidence.push(...unit.evidence);
     const interfaces = new Map<string, NativeInterface>();
@@ -1975,6 +2012,14 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
         summaryContext,
       );
       interfaces.set(dependency.call_id, observed);
+      const incidental =
+        summary !== undefined &&
+        (tailIds.has(dependency.call_id) ||
+          (dependency.return_demand ?? []).some(
+            (register) =>
+              !dependency.return_demand_semantic?.some((item) => item.root === register.root),
+          )) &&
+        result.result_incidental(key);
       if (summary) nativeSummaries.set(dependency.call_id, summary.observed);
       if (
         likelyMode &&
@@ -2029,6 +2074,7 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
         target: dependency.target.entry,
         target_subject_id: dependency.target.id,
         ...interface_,
+        ...(incidental ? { result_incidental: true as const } : {}),
         // Optional source metadata can remain partial (for example absent DWARF)
         // while the bounded machine call/stack summary proves complete reads.
         ...(argument_list_closure && summary?.arity_complete ? { argument_list_closure } : {}),

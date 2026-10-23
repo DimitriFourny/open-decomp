@@ -1704,6 +1704,35 @@ on every path (`void_like_result: 'caller_consensus'`), every tail transfer gets
 `exit_scratch` with their exact values, and the `caller_consensus` presentation
 record names the direct sites. The checked view is unchanged.
 
+Void-like callee summaries (`result_incidental`; source view only; the
+`incidental_result` premise applied transitively). After the native dependency
+worklist, a callee whose result reaches the requesting function's own exit (a
+tail transfer, or a call whose result demand is forwarded to the exit alone) is
+classified on demand by the same result selection over its native SSA
+(`nativeIncidentalResult`): only callers' semantic result demand counts (a caller
+forwarding the result to its own exit is circular, as for a self-call); its
+callee interfaces project only proven written results; every tail of its own must
+forward no result (a void contract or a void-like callee) and a final call into a
+void-like callee establishes nothing; the FP carrier must be unchanged or
+undefined on every exit. The callee is void-like when its integer result register
+is incidental on every exit path, or undefined on some exit (unknown entry value,
+unprojected call clobber) with no proven written result storage: the cases in
+which its own source view presents no result. A context-specialized body
+qualifies for exactly the call that supplies its constants. Only bodies whose own
+graph, stack and call analysis are complete (no own reason, budget cut, refinement
+limit, closed parameter state) qualify; gaps deeper in their callees reach them
+only through proven written results and those callees' own flags. Recursion is
+coinductive: a callee under evaluation is assumed void-like, and an assumption
+that fails settles it non-void-like and reruns. In the requesting function, a
+tail into such a callee gets `result_void` where the function presents no result
+either (only tail transfers, or a void-like or result-free selection), recorded as
+an `incidental_result` presentation listing the callee ids plus an
+`abi_conformance` requirement; beside a returned value it keeps forwarding.
+`incidental_result` itself is open when every tail transfer forwards no result
+(also through a void library contract), and a final call into a void-like callee
+no longer establishes the result; the record's scope then lists those callee
+ids. `jsonAppendRaw` and `codeOffset` print `void` this way. The checked view is unchanged.
+
 A context-specialized callee summary (constant/alias call-site assumptions)
 keeps the callee's result root. The context unit carries the baseline body's
 result, proven on every baseline exit, where an FP/vector exit whose write is

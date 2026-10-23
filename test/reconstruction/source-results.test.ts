@@ -1590,3 +1590,207 @@ for (const variant of ['literal', 'computed'] as const)
       assert.deepEqual(observed.values, [variant === 'literal' ? 7n : 42n]);
     }
   });
+
+/** V3: Darwin `g(p) { q = p[1]; if (!q) return h(p); *q = 5; }` lifted with x0 = q
+ * left on the return exit and a tail transfer to `h`. `h`'s summary is void-like
+ * (`result_incidental`, its x0 written but incidental) or a value callee. Only a
+ * void-like `h` makes the tail forward no result, and then the incidental x0 on the
+ * return exit leaves `g` void (`incidental_result`, applied transitively). */
+function voidLikeTail(incidental: boolean) {
+  const abi = darwinArm64Abi;
+  const x0 = register(
+    abi.classifyCall({
+      returns: word,
+      parameters: [word],
+      variadic: false,
+      fixed_parameter_count: 1,
+    }).returns[0],
+  );
+  const target = { image_id: image, space: 'va' as const, value: 0x2000n };
+  const b = builder(`void-like-tail-${incidental}`),
+    entry = b.block('entry'),
+    tail = b.block('tail'),
+    store = b.block('store');
+  const p = entry.readRegister(x0);
+  const q = entry.load(u64, entry.int('add', p, entry.constant(u64, 8n)));
+  entry.branch(
+    entry.compare('eq', q, entry.constant(u64, 0n)),
+    entry.edge(tail),
+    entry.edge(store),
+  );
+  tail.terminate({
+    kind: 'indirect',
+    target: tail.address(target),
+    tail_call: true,
+    reason: 'Discovered tail-call exit',
+  });
+  const stored = store.readRegister(x0);
+  const cursor = store.load(u64, store.int('add', stored, store.constant(u64, 8n)));
+  store.store(cursor, store.constant(u64, 5n));
+  store.writeRegister(x0, cursor);
+  store.return([]);
+  const ir = constructSSA(b.finish(entry, [])).value as SSAForm;
+  const control = ir.blocks.find((block) => block.terminator.kind === 'indirect')!.terminator;
+  const callee = {
+    call_id: control.id,
+    target,
+    parameter_state: 'observed' as const,
+    parameters: [x0],
+    returns: [x0],
+    return_types: [u64],
+    argument_list_complete: true,
+    evidence_ids: [],
+  };
+  const source: SourceEvidence = {
+    abi,
+    addresses: [],
+    callees: [incidental ? { ...callee, result_incidental: true } : callee],
+  };
+  const plain: SourceEvidence = { ...source, callees: [callee] };
+  return { ir, source, plain };
+}
+
+for (const incidental of [true, false])
+  test(`a tail into a ${incidental ? 'void-like' : 'value'} callee ${incidental ? 'leaves the function void' : 'keeps its result'}`, () => {
+    const fixture = voidLikeTail(incidental);
+    const program = reconstruct(
+      {
+        function: structureControlFlow(fixture.ir, createOperationContext()).value!,
+        source: fixture.source,
+      },
+      createOperationContext(),
+      'source',
+    );
+    for (const tail of program.tails.values()) assert.equal(tail.result_void === true, incidental);
+    assert.equal(program.source?.void_like_result, incidental ? 'incidental_result' : undefined);
+    assert.equal(
+      program.local_validation?.some(
+        (record) =>
+          record.rule === 'incidental_result' &&
+          record.scope.startsWith('void-like tail callee') &&
+          record.scope.includes('void-like callees:'),
+      ) ?? false,
+      incidental,
+    );
+    for (const language of ['c-like', 'python-like'] as const) {
+      // The checked view never reads the flag.
+      assert.equal(
+        emit(fixture.ir, { source: fixture.source }, language, 'checked').emission.text,
+        emit(fixture.ir, { source: fixture.plain }, language, 'checked').emission.text,
+      );
+      const { emission } = emit(fixture.ir, { source: fixture.source }, language);
+      if (incidental)
+        assert.match(emission.text, language === 'c-like' ? /^void \w+\(/m : /\) -> void:$/m);
+      else assert.doesNotMatch(emission.text, /^void \w+\(|\) -> void:$|unknown_result/m);
+      const formals = emittedFormals(emission);
+      const pointer = 0x4000n,
+        cell = 0x5000n;
+      for (const q of [0n, cell]) {
+        const memory = new Map<bigint, number>();
+        for (let byte = 0n; byte < 8n; byte++) {
+          memory.set(pointer + byte, 0);
+          memory.set(pointer + 8n + byte, Number((q >> (8n * byte)) & 0xffn));
+          memory.set(cell + byte, 0);
+        }
+        const calls: bigint[][] = [];
+        const h = (args: readonly bigint[]): bigint => {
+          calls.push([...args]);
+          return 0x77n;
+        };
+        const observed = execute(
+          emission,
+          new Map([[formals[0]!.statement_id, pointer]]),
+          memory,
+          0n,
+          new Map(),
+          new Map(),
+          new Map([
+            ['sub_2000', h],
+            ['0x2000', h],
+          ]),
+        );
+        assert.deepEqual(calls, q ? [] : [[pointer]]);
+        if (q) assert.equal(observed.memory.get(cell), 5);
+        assert.deepEqual(observed.values, incidental ? [] : [q ? cell : 0x77n]);
+      }
+    }
+  });
+
+/** V3: Darwin `g(p) { *p = 5; f(p); }` whose call to `f` is the final action and
+ * leaves `f`'s result in x0. A value `f` passes its result through (`return f(p);`);
+ * a void-like `f` (`result_incidental`) establishes nothing, so `g` is void. */
+for (const incidental of [true, false])
+  test(`a final call into a ${incidental ? 'void-like' : 'value'} callee ${incidental ? 'establishes no result' : 'is the result'}`, () => {
+    const abi = darwinArm64Abi;
+    const x0 = register(
+      abi.classifyCall({
+        returns: word,
+        parameters: [word],
+        variadic: false,
+        fixed_parameter_count: 1,
+      }).returns[0],
+    );
+    const b = builder(`final-call-${incidental}`),
+      block = b.block('entry');
+    const p = block.readRegister(x0);
+    block.store(p, block.constant(u64, 5n));
+    block.call(
+      { kind: 'direct', address: { image_id: image, space: 'va', value: 0x2000n } },
+      [],
+      [],
+      abi.unknown_call_clobbers,
+    );
+    block.return([]);
+    const ir = constructSSA(b.finish(block, [])).value as SSAForm;
+    const call = ir.blocks
+      .flatMap((item) => item.instructions)
+      .find((node) => node.kind === 'call')!;
+    const callee = {
+      call_id: call.id,
+      target: { image_id: image, space: 'va' as const, value: 0x2000n },
+      parameter_state: 'observed' as const,
+      parameters: [x0],
+      returns: [x0],
+      return_types: [u64],
+      argument_list_complete: true,
+      evidence_ids: [],
+    };
+    const source: SourceEvidence = {
+      abi,
+      addresses: [],
+      callees: [incidental ? { ...callee, result_incidental: true } : callee],
+    };
+    const program = reconstruct(
+      { function: structureControlFlow(ir, createOperationContext()).value!, source },
+      createOperationContext(),
+      'source',
+    );
+    assert.equal(program.source?.void_like_result, incidental ? 'incidental_result' : undefined);
+    for (const language of ['c-like', 'python-like'] as const) {
+      assert.equal(
+        emit(ir, { source }, language, 'checked').emission.text,
+        emit(ir, { source: { ...source, callees: [callee] } }, language, 'checked').emission.text,
+      );
+      const { emission } = emit(ir, { source }, language);
+      if (incidental)
+        assert.match(emission.text, language === 'c-like' ? /^void \w+\(/m : /\) -> void:$/m);
+      else assert.doesNotMatch(emission.text, /^void \w+\(|\) -> void:$/m);
+      const memory = new Map<bigint, number>();
+      for (let byte = 0n; byte < 8n; byte++) memory.set(0x4000n + byte, 0);
+      const f = (args: readonly bigint[]): bigint => (assert.deepEqual(args, [0x4000n]), 0x77n);
+      const observed = execute(
+        emission,
+        new Map([[emittedFormals(emission)[0]!.statement_id, 0x4000n]]),
+        memory,
+        0n,
+        new Map(),
+        new Map(),
+        new Map([
+          ['sub_2000', f],
+          ['0x2000', f],
+        ]),
+      );
+      assert.equal(observed.memory.get(0x4000n), 5);
+      assert.deepEqual(observed.values, incidental ? [] : [0x77n]);
+    }
+  });
