@@ -1045,6 +1045,7 @@ Files that several items touch:
     - SQLite and brotli texts byte-identical. `createFunctionApi` must keep `uint8_t* address_1` through the shape edge.
     - `partial(budget)` drops by up to 22.
   - **Expected effect** (measured, upper bound with all deferred loads skipped): SQLite work −9.3%, time −7%.
+  - **Outcome (not merged; branch `wt/rm4-t4` at `d92d226`):** the classification works and keeps every text byte-identical (lazy classes: the demanded closure runs only the arity probe; a body is classified once, only when a deferred dependency would load), but it saves nothing: SQLite work +0.22%, `partial(budget)` 62 → 62. The deferred phase always runs until its half-allowance stop, so every skipped effects-only load frees work that deeper result and shape loads then spend (`sqlite3DbMallocRawNN` +227k reaching `sqlite3Fp10Convert2` and `sqlite3Initialize`). The first prototype's −2.1% came from its own classification cost tripping that stop one load earlier, which also dropped three texts' struct locals (`fts3UpdateMethod` lost `sqlite3_reset`'s shape transfer). A real saving needs loads gated on a fact some caller up the chain needs, or a smaller deferred allowance; both change texts and are a new item.
 
 ### T5: Budget labels name the fact that is actually missing
 
@@ -1057,6 +1058,7 @@ Files that several items touch:
   - **Tests:** `native-worklist.test.ts` (per-fact propagation); `test/core/diagnostic-summary.test.ts`.
   - **Acceptance:** texts and checked view byte-identical; budget-labelled states 62 → about 38–40 [estimate].
   - **Depends on:** T4.
+  - **Outcome:** not started; it needs T4's per-fact edge classes, which are not on `main` (see T4).
 
 ### T6: Memoize the allowance-independent prefix of unit preparation
 
