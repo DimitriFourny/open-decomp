@@ -1160,7 +1160,7 @@ larger ones with an established extent print one 16-byte row and `/* ... K more 
 under the declared `[N]`. The note reads `VA 0x..., read-only; N elements`. Writable
 storage, storage with a relocation slot and a per-function budget of 1536 content bytes
 keep the `extern` view. Synthesized
-struct members are `field_0xOFFSET` and gaps `pad_0xOFFSET` (hexadecimal, never `f_36`).
+struct members are `field_0xOFFSET` and gaps `pad_0xOFFSET`, printed in external declarations and `types.h` (hexadecimal, never `f_36`).
 
 Source-only `constant_pool_literal` replaces exact-width, aligned, nonvolatile
 scalar reads when their constant address names available bytes in one read-only,
@@ -1258,9 +1258,11 @@ Source type views interpret unchanged machine storage only when complete, compat
 
 Source-view locals take their printed pointer type from every definition and use of a connected set of integer locals (phi copies): typed library/prototype parameters, header-declared pointer globals and results (`char *`/`const char *`/`FILE *`), identity tests against null or a same-typed pointer, and member or slot reads. `local_source_type` records the choice. A set becomes pointers only when typed uses and definitions save more printed conversions than integer uses (arithmetic, comparison, raw dereference, stores, untyped definitions) add; conflicting pointee types, scalar-typed members and ties keep the integer declaration. A pointer read as an integer prints `(uintptr_t)p`, so pointer-typed locals never change arithmetic or scaling. The printer drops conversions that C's own rules make no-ops for the printed operand types: a declared pointer passed where its own (or `void *`, or a `const`-adding) pointer type is wanted, pointer identity tests, a signed variable passed to a signed parameter or compared for equality (C converts the mixed pair to the unsigned type of the same bits; Python-like keeps its explicit reduction), and reductions of a struct member read to its own declared integer type; ordered comparisons keep their signed/unsigned conversion. A constant that reaches a `return` through a variable that is dead after it (`index = 0; return index;`) prints as `return 0;` whenever the return is entered by exactly one printed edge (`return_constant`); a join entered by several arms keeps its carrier. A trailing bare `return;` of a `void` function is not printed (falling off the end returns).
 
+C source-view integer locals take a signed or narrow type by conversion cost (`local_integer_spelling`, `planIntegerSpellings`). For a set of 8/16/32-bit locals connected by copies, each read is priced under both spellings: a signed comparison, sign extension, arithmetic shift or signed division/remainder by a constant prints `(intN_t)x` for `uintN_t` and nothing for `intN_t`; every other read of an `intN_t` local prints `(uintN_t)x`, so addition, subtraction, multiplication and shifts stay unsigned arithmetic (no signed-overflow UB), and unsigned comparisons, zero extensions and logical shifts keep their exact operand. Reads inside a return or tail block count once per entering edge (tail duplication). The set is declared `intN_t` only when strictly cheaper; a set zero-extended into shared storage, or copied from or to another printed variable (a formal, a typed local), keeps `uintN_t`. A 64-bit set whose every read, through same-width reinterpretations, is a truncation or an extract inside the low 32 bits is declared at that slice's width (`uint32_t call_result; if (call_result != 0)`), signed when that is strictly cheaper. C assignment converts each definition to the declared type (the same modular conversion of the same bits the explicit read conversion performed), so definitions print no cast; each variable holds one such set only. Python-like keeps the machine spellings: its values are unbounded integers, so a signed or narrow declaration would need a reduction at every definition and keeps `int32(uint32(x))` at signed reads. Checked rendering is unchanged.
+
 Synthetic source structure views use deterministic `struct_N` names, unified by
 observed member types and offsets within the function. Their C typedefs expose
-`f_<hex offset>` members and explicit byte gaps, with a `/* partial; N fns */` note (`partial`: only the members the text uses; `N fns`: merged from that many functions; conflicts are listed): a function declares only the members its text accesses (byte gaps keep every offset; a structure the text never accesses stays an incomplete typedef), the image-wide layout lives in the types view / `types.h`. `observed_struct_layout` records nonoverlap and exact
+`f_<hex offset>` members and explicit byte gaps, with a `/* partial; N fns */` note (`partial`: only the members the text uses; `N fns`: merged from that many functions; conflicts are listed): a function declares only the members its text accesses (the inline body omits the byte gaps: a member named `field_0xOFFSET` states its own offset, recorded as the `compact_struct_members` presentation rule with the omitted gaps; the access-stride comment states the element size instead of a trailing pad; an Objective-C ivar, whose name carries no offset, keeps its pad; `structures: external` declarations and `types.h` keep every gap as a `pad_0xOFFSET` member; a structure the text never accesses stays an incomplete typedef), the image-wide layout lives in the types view / `types.h`. `observed_struct_layout` records nonoverlap and exact
 width checks and a target-layout ABI requirement; overlapping, unsupported or
 budget-exhausted layouts stay opaque. Nested pointer types retain their complete
 declaration closure. Proven scalar array strides produce array members without
@@ -1342,6 +1344,18 @@ cast, an integer destination or operand `(uintptr_t)"..."` (Python-like:
 operands keep the integer. Strings longer than 200 characters show their prefix
 and a marker keeping the address and the omitted byte count. Escapes follow each
 dialect (control, format and bidirectional characters are never printed raw).
+A literal needs a string fact, and source-fact discovery recovers one only for
+addresses in the function's candidate set (`recoverDataAddress` still demands
+immutable, terminated, section-bounded bytes). Besides every pointer-width
+constant, observed call argument and format pointer, the set takes the whole
+pointer-width constants of register cells (`source-literal-candidates.ts`): the
+cells at each `indirect` exit (a tail call) and at each call that tile a whole
+register, each cell's bounded constant set (`constantCandidates`, at most 8
+values, through phis, selects and pure operations), and, per incoming edge, the
+constants of a pointer-width block parameter or of a concat of cell parameters of
+one block. An edge with an unknown cell (a loaded value) contributes nothing, so
+the constant edge of `{literal, loaded}` still prints the literal (`value0 =
+"unknown error"`) while the loaded edge keeps the load.
 `character_literal` prints a constant as `'/'`, `'\\'`, `'.'` or `'\0'` (Python-like
 `ord('/')`) only with character evidence: a byte loaded through a pointer to
 bytes (inferred formal, declared `char`/`uint8_t` pointer, library `char*`

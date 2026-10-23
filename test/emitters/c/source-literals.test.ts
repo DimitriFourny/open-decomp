@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { sysvAMD64Abi } from '../../../src/abi/sysv-amd64/index.js';
 import { windowsX64Abi } from '../../../src/abi/windows-x64/index.js';
+import { observePreparedTailInterfaces } from '../../../src/analysis/calls/observed.js';
 import { recoverTypes } from '../../../src/analysis/types/index.js';
 import { recoverLibraryContracts } from '../../../src/metadata/library-contracts/index.js';
 import { recoverDataAddress } from '../../../src/analysis/strings/source-data.js';
@@ -11,7 +12,10 @@ import { createOperationContext, type Address } from '../../../src/core/index.js
 import { characterLiteral, stringLiteral } from '../../../src/emitters/string-literals.js';
 import { integer, type IRBuilder, type RegisterIR, type SSAForm } from '../../../src/ir/index.js';
 import type { SourceAddress } from '../../../src/reconstruction/source-model.js';
-import { builder, image, register } from '../../ir/support.js';
+import { constantCandidates } from '../../../src/service/analysis/source-variadic.js';
+import { registerConstantCandidates } from '../../../src/service/analysis/source-literal-candidates.js';
+import { sourceConstantValues } from '../../../src/reconstruction/source-data.js';
+import { builder, image, register, slice } from '../../ir/support.js';
 import { emit } from './support.js';
 
 const languages = ['c-like', 'python-like'] as const;
@@ -279,3 +283,115 @@ test('library character parameters take character constants; other int parameter
   assert.doesNotMatch(number, /'\/'/);
   assert.match(number, /labs\((?:0x2f|47)/);
 });
+
+/** `rdi` is two 32-bit cells: arm A writes the address `0x2000`, arm B a loaded value. The join
+ * leaves (`g(rdi, rsi, rdx)`: `push rdx; ...; add rsp, 8; jmp rax`) through a tail call that passes
+ * the whole register as its first argument. */
+function partlyConstant() {
+  const low = register('edi', 32, 0, 'preserve_other_bits', 'x86_64:rdi'),
+    high = register('rdi_high', 32, 32, 'preserve_other_bits', 'x86_64:rdi');
+  const rdx = register('rdx', 64, 0, 'replace_root', 'x86_64:rdx'),
+    rax = register('rax', 64, 0, 'replace_root', 'x86_64:rax'),
+    rsp = register('rsp', 64, 0, 'replace_root', 'x86_64:rsp');
+  return ssa((b) => {
+    const entry = b.block('entry'),
+      constant = b.block('constant'),
+      other = b.block('other'),
+      done = b.block('done');
+    const sp0 = entry.readRegister(rsp);
+    const pushed = entry.int('sub', sp0, entry.constant(i64, 8n));
+    entry.writeRegister(rsp, pushed);
+    entry.store(pushed, entry.readRegister(rdx));
+    const p = entry.readRegister(rsi);
+    entry.branch(
+      entry.compare('eq', p, entry.constant(i64, 0n)),
+      entry.edge(constant),
+      entry.edge(other),
+    );
+    constant.writeRegister(low, constant.constant(i32, 0x2000n));
+    constant.writeRegister(high, constant.constant(i32, 0n));
+    constant.jump(done);
+    const loadedValue = other.load(i64, other.readRegister(rsi));
+    other.writeRegister(low, other.extract(loadedValue, 0, 32));
+    other.writeRegister(high, other.extract(loadedValue, 32, 32));
+    other.jump(done);
+    done.writeRegister(rax, done.readRegister(rsi));
+    done.writeRegister(rsp, sp0);
+    done.terminate({
+      kind: 'indirect',
+      target: done.readRegister(rax),
+      reason: 'Indirect branch target is unresolved',
+    });
+    return b.finish(entry, []);
+  }, 'partly-constant');
+}
+
+/** The string fact of `0x2000` the way the pipeline recovers it: only addresses of the
+ * function's own candidate set are looked up, and only immutable terminated bytes qualify. */
+function candidateFacts(ir: SSAForm): SourceAddress[] {
+  const base = navigationBytes(Uint8Array.of(0xc3), Buffer.from('partly\0'));
+  const loaded = {
+    ...base,
+    mappings: base.mappings.map((mapping) => ({ ...mapping, permissions: ['read'] as const })),
+    sections: base.sections.map((section) => ({ ...section, permissions: ['read'] as const })),
+  };
+  const context = createOperationContext();
+  const expressions = new Map(
+    ir.blocks.flatMap((block) =>
+      block.instructions.flatMap((node) =>
+        node.kind === 'assign' ? [[node.result.id, node.expression] as const] : [],
+      ),
+    ),
+  );
+  return registerConstantCandidates({
+    ir,
+    image: loaded,
+    expressions,
+    constant: sourceConstantValues(expressions, context, loaded.id),
+    candidates: constantCandidates(ir, null, context),
+    context,
+  }).flatMap((address) => {
+    const item = recoverDataAddress(loaded, address, context);
+    // The IR's constants are in the fixture image's own address space.
+    return item ? [{ ...item, address: at(address.value) }] : [];
+  });
+}
+
+/** A tail call of an unknown target through `rdi` (the `partlyConstant` join), as the pipeline
+ * prepares it: stack-aware types and the tail interface `recoverSourceEvidence` publishes. */
+function tailText(ir: SSAForm, facts: SourceAddress[], language: (typeof languages)[number]) {
+  const types = recoverTypes(ir, sysvAMD64Abi, createOperationContext(), {
+    image_id: image,
+    slice_id: slice,
+    revision: 0,
+  });
+  return emit(
+    ir,
+    {
+      types,
+      source: {
+        abi: sysvAMD64Abi,
+        callees: [],
+        source_callees: observePreparedTailInterfaces(ir, sysvAMD64Abi, createOperationContext()),
+        addresses: facts,
+        executable_ranges: [{ start: 0x1000n, end: 0x1001n }],
+      },
+    },
+    language,
+  ).emission.text;
+}
+
+for (const language of languages)
+  test(`${language} a tail call with a phi of a literal and a loaded value prints the literal on the constant edge`, () => {
+    const ir = partlyConstant();
+    const facts = candidateFacts(ir);
+    assert.deepEqual(
+      facts.map((item) => item.string),
+      ['partly'],
+    );
+    const text = tailText(ir, facts, language);
+    assert.match(text, /"partly"/, text);
+    assert.doesNotMatch(text, /0x2000\b|\b8192\b/, text);
+    // The edge that loads a value keeps printing the load, not a literal.
+    assert.equal(text.match(/"partly"/g)?.length, 1, text);
+  });
