@@ -9,6 +9,7 @@ import {
   DEFAULT_BUDGET,
   SCHEMA_VERSION,
   createOperationContext,
+  encodeEvidence,
   entityIdentity,
   fingerprint,
   newIdentity,
@@ -957,4 +958,79 @@ test('a real SQLite index insertion failure rolls back artifact and terminal-job
     [],
   );
   assert.equal(readdirSync(join(p.state.path, 'artifacts')).length, 0);
+});
+
+test('a computed result is validated once and delivered like its stored hit', async (t) => {
+  const p = await project(t);
+  const computed = await p.run();
+  const hit = await p.run();
+  assert.ok('data' in computed.result && 'data' in hit.result);
+  if (!('data' in computed.result) || !('data' in hit.result)) return;
+  assert.equal(computed.result.data.cache, 'computed');
+  assert.equal(hit.result.data.cache, 'hit');
+  const strip = (value: unknown): string =>
+    JSON.stringify(value, (key, item: unknown) =>
+      key === 'cache' || key === 'work' || key === 'artifacts' || key === 'artifact_id'
+        ? undefined
+        : item,
+    );
+  // Same key order and content: the computed path no longer re-parses what it just built, so
+  // the wrapped result must still be exactly the schema's form.
+  assert.equal(strip(computed.result), strip(hit.result));
+  assert.deepEqual(Object.keys(computed.result.data), Object.keys(hit.result.data));
+  assert.equal(computed.result.artifacts.length, 1);
+  assert.equal(computed.result.artifacts[0]?.id, p.state.store.findArtifact(p.identity)?.id);
+  validateToolResponse('function_decompile', computed.result, {
+    project_id: p.state.store.project_id,
+    revision: 2,
+    function_id: p.fn.id,
+    wait: true,
+    delivery: 'auto' as const,
+    options: p.identity.options,
+    budget: p.identity.budget,
+  });
+});
+
+test('one proof identity must mean one proof in a computation: equal copies pass, differing ones are refused', async (t) => {
+  const p = await project(t);
+  const base = p.computation();
+  const proof = base.catalog.evidence[0]!;
+  // The same proof carried by the catalog and by the result (a distinct decoded copy) is fine.
+  const equal = await p.run(p.identity, 65536, () => ({
+    ...base,
+    result: { ...base.result, evidence: [encodeEvidence({ ...proof })] },
+  }));
+  assert.ok('data' in equal.result);
+  const stored = p.state.store.findArtifact(p.identity);
+  assert.ok(stored);
+  // Re-running under another budget keys a new artifact, so the check runs again.
+  const other = {
+    ...p.identity,
+    budget: { ...p.identity.budget, work: p.identity.budget.work - 1 },
+  };
+  const forged = p.job(other);
+  await assert.rejects(
+    runCachedDecompilation(
+      {
+        store: p.state.store,
+        job_id: forged.id,
+        identity: other,
+        context: createOperationContext({ budget: other.budget }),
+        inline_limit: 65536,
+      },
+      () => {
+        const value = p.computation(other);
+        return {
+          ...value,
+          result: {
+            ...value.result,
+            evidence: [encodeEvidence({ ...proof, claim: 'A different claim under the same id' })],
+          },
+        };
+      },
+    ),
+    { code: 'invalid_input', message: 'Analysis evidence identity is ambiguous' },
+  );
+  assert.equal(p.state.store.findArtifact(other), null);
+  assert.equal(p.state.store.readJob(forged.id)?.state, 'running');
 });
