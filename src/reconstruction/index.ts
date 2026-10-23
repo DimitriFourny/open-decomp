@@ -753,14 +753,16 @@ function reconstructView(
     // `caller_consensus` found that no caller in the closed image observes a
     // result register, so its tails forward nothing either.
     const voidLike = sourcePlan.presentation.void_like_result;
-    // A tail into a known callee may forward its result; the runtime target of
-    // an indirect tail is no result evidence, like the unresolved exit it was.
+    // A tail into a known callee may forward its result unless it forwards none
+    // (`result_void`); the runtime target of an indirect tail is no result
+    // evidence, like the unresolved exit it was.
     const voidPrimary =
       permitsVoidSourceSignature(
         input,
         sourcePlan.presentation,
         returns,
-        voidLike !== 'caller_consensus' && [...tails.values()].some((tail) => tail.target !== null),
+        voidLike !== 'caller_consensus' &&
+          [...tails.values()].some((tail) => tail.target !== null && !tail.result_void),
       ) &&
       [...returns.values()].every((projection) =>
         projection.outputs.every(

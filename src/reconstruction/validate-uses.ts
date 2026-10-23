@@ -1,8 +1,22 @@
 import { OperationError, type OperationContext } from '../core/index.js';
 import { expressionOperands, type Origin, type Value } from '../ir/index.js';
-import type { ParallelTransfer } from '../presentation/index.js';
+import type { BlockRegion, ParallelTransfer } from '../presentation/index.js';
 import type { Reconstruction } from './model.js';
 import { registerOutputs } from './source-model.js';
+
+/** The values a block's incoming edges bind. A block's own first source
+ * definition `x = p` of one of its parameters x (a rotated loop header,
+ * loop_copy_rotation) makes every edge write the fresh value p instead: p is
+ * the block parameter, and x the copy that starts the block. */
+export function boundParameters(program: Reconstruction, block: BlockRegion): readonly Value[] {
+  const definitions = program.source?.definitions?.get(block.id);
+  if (!definitions?.length) return block.parameters;
+  const pseudo = new Map<string, Value>();
+  for (const { result, expression } of definitions)
+    if (expression.kind === 'cast' && expression.op === 'bitcast')
+      pseudo.set(result.id, expression.value);
+  return block.parameters.map((parameter) => pseudo.get(parameter.id) ?? parameter);
+}
 
 /** SSA values may be used in any dominated block, and source rewrites (the
  * variable partition, tail duplication, shared locals) move or share emission sites.
@@ -20,7 +34,11 @@ export function validateEmittedUses(
   };
   for (const id of reachable) {
     const block = program.blocks.get(id)!;
+    // Edges bind first; the block's own definitions follow, then its statements.
+    for (const parameter of boundParameters(program, block)) define(parameter, id, -2);
     for (const parameter of block.parameters) define(parameter, id, -1);
+    for (const definition of program.source?.definitions?.get(id) ?? [])
+      define(definition.result, id, -1);
     for (let index = 0; index < block.statements.length; index++) {
       const node = block.statements[index]!,
         order = index * 2;
@@ -100,6 +118,9 @@ export function validateEmittedUses(
   };
   for (const id of reachable) {
     const block = program.blocks.get(id)!;
+    for (const definition of program.source?.definitions?.get(id) ?? [])
+      for (const operand of expressionOperands(definition.expression))
+        use(operand, id, -1, definition);
     for (let index = 0; index < block.statements.length; index++) {
       const node = block.statements[index]!,
         order = index * 2;

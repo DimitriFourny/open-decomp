@@ -560,6 +560,133 @@ for (const language of ['c-like', 'python-like'] as const)
       }
     });
 
+    /** Little-endian 64-bit words at 0x1000 + 8 * index. */
+    const words64 = (values: readonly bigint[]): Map<bigint, number> => {
+      const bytes = new Map<bigint, number>();
+      values.forEach((value, index) => {
+        for (let byte = 0; byte < 8; byte++)
+          bytes.set(0x1000n + BigInt(index * 8 + byte), Number((value >> BigInt(8 * byte)) & 255n));
+      });
+      return bytes;
+    };
+
+    test('a list walk whose last node is used after the loop rotates its copy to the loop top and prints do/while', () => {
+      const b = program('source-control-rotate-walk'),
+        entry = b.block('entry', [i64]),
+        loop = b.block('loop', [i64, i32]),
+        exit = b.block('exit');
+      const head = entry.parameters[0]!;
+      entry.jump(loop, [head, entry.constant(i32, 0n)]);
+      const [node, count] = loop.parameters as [Value, Value];
+      const next = loop.load(i64, node),
+        counted = loop.int('add', count, loop.constant(i32, 1n));
+      loop.branch(
+        loop.compare('ne', next, loop.constant(i64, 0n)),
+        loop.edge(loop, [next, counted]),
+        loop.edge(exit),
+      );
+      // The last node (the phi, still live after its successor is loaded) and the count.
+      exit.return([
+        exit.int(
+          'add',
+          exit.cast('truncate', i32, node),
+          exit.int('shl', counted, exit.constant(i32, 16n)),
+        ),
+      ]);
+      const input = b.finish(entry, [i32]);
+      const output = emit(input, language, 'source', true),
+        checked = emit(input, language, 'checked', true);
+      const text = output.emission.text;
+      if (c) {
+        assert.match(text, /\n {2}do \{\n {4}\w+ = [^\n]+;\n[^]*\n {2}\} while \([^\n]+\);\n/);
+        assert.doesNotMatch(text, /while \(true\)|\bbreak\b/);
+      }
+      assert.equal(rules(output).includes('loop_copy_rotation'), c);
+      assert.equal(rules(checked).includes('loop_copy_rotation'), false);
+      // Lists of one, two and four nodes at 0x1000, each node's first word its successor.
+      for (const links of [[0n], [0x1008n, 0n], [0x1010n, 0x1018n, 0x1008n, 0n]]) {
+        let at = 0x1000n,
+          steps = 1n;
+        while (links[Number((at - 0x1000n) / 8n)]) {
+          at = links[Number((at - 0x1000n) / 8n)]!;
+          steps++;
+        }
+        const expected = BigInt.asUintN(32, (at & 0xffffffffn) + (steps << 16n));
+        for (const result of [output, checked]) {
+          const observed = execute(result.emission, new Map([[head.id, 0x1000n]]), words64(links));
+          assert.deepEqual(observed.values, [expected], `${links.length}`);
+        }
+      }
+    });
+
+    test('a countdown whose pre-decrement value is used after the loop rotates its copy and prints do/while', () => {
+      const b = program('source-control-rotate-countdown'),
+        entry = b.block('entry', [i32]),
+        loop = b.block('loop', [i32, i32]),
+        exit = b.block('exit');
+      const n = entry.parameters[0]!;
+      entry.jump(loop, [n, entry.constant(i32, 0n)]);
+      const [x, acc] = loop.parameters as [Value, Value];
+      const y = loop.int('sub', x, loop.constant(i32, 1n)),
+        sum = loop.int('add', acc, loop.int('mul', x, x));
+      loop.store(loop.constant(i64, 0x1000n), y);
+      loop.branch(
+        loop.compare('ne', y, loop.constant(i32, 0n)),
+        loop.edge(loop, [y, sum]),
+        loop.edge(exit),
+      );
+      // x is the value before the last decrement (1 unless the count wrapped).
+      exit.return([exit.int('add', exit.int('shl', x, exit.constant(i32, 20n)), sum)]);
+      const input = b.finish(entry, [i32]);
+      const output = emit(input, language, 'source', true),
+        checked = emit(input, language, 'checked', true);
+      const text = output.emission.text;
+      if (c) {
+        assert.match(text, /\n {2}do \{\n[^]*\n {2}\} while \([^\n]+\);\n/);
+        assert.doesNotMatch(text, /while \(true\)|\bbreak\b/);
+      }
+      assert.equal(rules(output).includes('loop_copy_rotation'), c);
+      for (const start of [1n, 2n, 5n]) {
+        let squares = 0n;
+        for (let value = start; value > 0n; value--) squares += value * value;
+        for (const result of [output, checked]) {
+          const observed = execute(result.emission, new Map([[n.id, start]]), memory());
+          assert.deepEqual(
+            observed.values,
+            [BigInt.asUintN(32, (1n << 20n) + squares)],
+            `${start}`,
+          );
+          assert.equal(observed.memory.get(0x1000n), 0, `${start}`);
+        }
+      }
+    });
+
+    test('a repeat copy of a value live into the loop header from outside is not rotated', () => {
+      const b = program('source-control-rotate-outside'),
+        entry = b.block('entry', [i32]),
+        loop = b.block('loop', [i32, i32]),
+        exit = b.block('exit');
+      const n = entry.parameters[0]!;
+      const y = entry.int('add', n, entry.constant(i32, 5n));
+      entry.jump(loop, [n, entry.constant(i32, 0n)]);
+      const [x, i] = loop.parameters as [Value, Value];
+      const next = loop.int('add', i, loop.constant(i32, 1n));
+      loop.store(loop.constant(i64, 0x1000n), loop.int('add', x, i));
+      loop.branch(
+        loop.compare('ne', next, loop.constant(i32, 3n)),
+        loop.edge(loop, [y, next]),
+        loop.edge(exit),
+      );
+      exit.return([exit.int('add', x, exit.int('shl', y, exit.constant(i32, 8n)))]);
+      const output = emit(b.finish(entry, [i32]), language, 'source', true);
+      assert.equal(rules(output).includes('loop_copy_rotation'), false);
+      for (const start of [0n, 7n]) {
+        const observed = execute(output.emission, new Map([[n.id, start]]), memory());
+        assert.deepEqual(observed.values, [start + 5n + ((start + 5n) << 8n)], `${start}`);
+        assert.equal(observed.memory.get(0x1000n), Number((start + 5n + 2n) & 255n));
+      }
+    });
+
     test('a loop exit edge with copies prints them after the loop only when it is the sole exit', () => {
       for (const second of [false, true]) {
         const b = program(`source-control-exit-copies-${second}`),
