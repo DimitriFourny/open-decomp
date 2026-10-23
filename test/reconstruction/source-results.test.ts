@@ -1715,3 +1715,82 @@ for (const incidental of [true, false])
       }
     }
   });
+
+/** V3: Darwin `g(p) { *p = 5; f(p); }` whose call to `f` is the final action and
+ * leaves `f`'s result in x0. A value `f` passes its result through (`return f(p);`);
+ * a void-like `f` (`result_incidental`) establishes nothing, so `g` is void. */
+for (const incidental of [true, false])
+  test(`a final call into a ${incidental ? 'void-like' : 'value'} callee ${incidental ? 'establishes no result' : 'is the result'}`, () => {
+    const abi = darwinArm64Abi;
+    const x0 = register(
+      abi.classifyCall({
+        returns: word,
+        parameters: [word],
+        variadic: false,
+        fixed_parameter_count: 1,
+      }).returns[0],
+    );
+    const b = builder(`final-call-${incidental}`),
+      block = b.block('entry');
+    const p = block.readRegister(x0);
+    block.store(p, block.constant(u64, 5n));
+    block.call(
+      { kind: 'direct', address: { image_id: image, space: 'va', value: 0x2000n } },
+      [],
+      [],
+      abi.unknown_call_clobbers,
+    );
+    block.return([]);
+    const ir = constructSSA(b.finish(block, [])).value as SSAForm;
+    const call = ir.blocks
+      .flatMap((item) => item.instructions)
+      .find((node) => node.kind === 'call')!;
+    const callee = {
+      call_id: call.id,
+      target: { image_id: image, space: 'va' as const, value: 0x2000n },
+      parameter_state: 'observed' as const,
+      parameters: [x0],
+      returns: [x0],
+      return_types: [u64],
+      argument_list_complete: true,
+      evidence_ids: [],
+    };
+    const source: SourceEvidence = {
+      abi,
+      addresses: [],
+      callees: [incidental ? { ...callee, result_incidental: true } : callee],
+    };
+    const program = reconstruct(
+      { function: structureControlFlow(ir, createOperationContext()).value!, source },
+      createOperationContext(),
+      'source',
+    );
+    assert.equal(program.source?.void_like_result, incidental ? 'incidental_result' : undefined);
+    for (const language of ['c-like', 'python-like'] as const) {
+      assert.equal(
+        emit(ir, { source }, language, 'checked').emission.text,
+        emit(ir, { source: { ...source, callees: [callee] } }, language, 'checked').emission.text,
+      );
+      const { emission } = emit(ir, { source }, language);
+      if (incidental)
+        assert.match(emission.text, language === 'c-like' ? /^void \w+\(/m : /\) -> void:$/m);
+      else assert.doesNotMatch(emission.text, /^void \w+\(|\) -> void:$/m);
+      const memory = new Map<bigint, number>();
+      for (let byte = 0n; byte < 8n; byte++) memory.set(0x4000n + byte, 0);
+      const f = (args: readonly bigint[]): bigint => (assert.deepEqual(args, [0x4000n]), 0x77n);
+      const observed = execute(
+        emission,
+        new Map([[emittedFormals(emission)[0]!.statement_id, 0x4000n]]),
+        memory,
+        0n,
+        new Map(),
+        new Map(),
+        new Map([
+          ['sub_2000', f],
+          ['0x2000', f],
+        ]),
+      );
+      assert.equal(observed.memory.get(0x4000n), 5);
+      assert.deepEqual(observed.values, incidental ? [] : [0x77n]);
+    }
+  });
