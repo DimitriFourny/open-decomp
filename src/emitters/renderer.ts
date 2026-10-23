@@ -163,7 +163,12 @@ import {
   type ObservedMember,
 } from './source-structs.js';
 import { planFlagTests, type FlagTest } from './source-flags.js';
-import { planLocalTypes, type Fact, type PointerFact } from './source-local-types.js';
+import {
+  planIntegerSpellings,
+  planLocalTypes,
+  type Fact,
+  type PointerFact,
+} from './source-local-types.js';
 
 type Options = Parameters<Emitter<EmissionInput>['emit']>[1];
 /** Objective-C selector syntax: `name`, or keyword parts each ending in `:`. */
@@ -178,7 +183,7 @@ type Nest =
     }
   | { readonly kind: 'switch'; readonly id: string; readonly follow: string | null };
 /** A statement a `for` header prints as its init or step. */
-type HeaderStatement = Extract<Instruction, { kind: 'assign' | 'load' }>;
+type HeaderStatement = Extract<Instruction, { kind: 'assign' | 'load' | 'store' }>;
 /** Source view: one stack object kept as memory (the frame object, or the
  * incoming object of S4) in entry-SP coordinates, with its member naming. */
 interface StackObjectView {
@@ -220,6 +225,15 @@ interface Displacement {
  * those of unestablished extent, show one row of TABLE_PREFIX_BYTES. */
 const TABLE_FULL_BYTES = 64n;
 const TABLE_PREFIX_BYTES = 16;
+/** One structure declaration of the finished text: its lines, and the byte gaps a
+ * compact (inline) body omits (external text prints them as pad members). */
+interface StructureBody {
+  readonly name: string;
+  readonly lines: string[];
+  readonly gaps: { readonly offset: bigint; readonly length: bigint }[];
+}
+const COMPACT_STRUCT_MEMBERS_SCOPE =
+  'inline structure bodies print only the members the text accesses; byte gaps before a member whose name states its offset (field_0xN) and after the last member up to an access stride are not printed, so every printed member stays at its named offset (external declarations keep the gaps as pad members)';
 const STRING_LITERAL_SCOPE =
   'pointer-width constants addressing an immutable NUL-terminated string with established encoding (an interior address denotes its suffix bytes), printed as that string literal where the constant is a value: argument, store, return, copy, select arm or identity comparison';
 const CALL_EFFECTS_SCOPE =
@@ -453,6 +467,10 @@ export class Renderer {
   private readonly memberTypes = new Map<string, IntegerCType>();
   /** Offsets of each structure's members this function's text accesses, by structure name. */
   private readonly usedMembers = new Map<string, Set<string>>();
+  /** One IR access node per structure name that printed a member: the subject of
+   * the structure's presentation records (a function-wide subject would cite every
+   * instruction of the function). */
+  private readonly structAccess = new Map<string, string>();
   /** Where the structure bodies are inserted once the accessed members are known. */
   private structureSlot: { readonly at: number; readonly ids: readonly string[] } | null = null;
   private readonly sourceStructs: SourceStructs;
@@ -483,6 +501,11 @@ export class Renderer {
   private readonly callResults = new Map<string, BoundaryProjection>();
   /** Pointer spellings chosen for locals from their definitions and uses. */
   private readonly localSpellings = new Map<string, string>();
+  /** C integer types chosen for locals by conversion cost (see
+   * planIntegerSpellings): signed, or narrower than the value's machine width. */
+  private readonly localIntegers = new Map<string, IntegerCType>();
+  /** Each such local's set (its first member): a variable holds one set only. */
+  private readonly localIntegerSets = new Map<string, string>();
   /** Load/store nodes accessing a declared pointer member: that pointer type. */
   private readonly memberPointers = new Map<string, string>();
   /** Source view: the last named formal before `...` (`va_start`'s second argument). */
@@ -1142,7 +1165,9 @@ export class Renderer {
     if (spelling === 'bool') return value.type.bits === 1 ? { bits: 1, signed: false } : null;
     const match = /^(u?)int(\d+)_t$/.exec(spelling);
     return match &&
-      (Number(match[2]) === value.type.bits || this.program.source?.formal_types?.has(value.id))
+      (Number(match[2]) === value.type.bits ||
+        this.program.source?.formal_types?.has(value.id) ||
+        this.localIntegers.has(value.id))
       ? { bits: Number(match[2]), signed: !match[1] }
       : null;
   }
@@ -1238,7 +1263,12 @@ export class Renderer {
       this.program.source.value_types?.get(value.id)?.type_id;
     const type = id && this.typeRecords.get(id)?.definition;
     const spelled = given === undefined ? this.localSpellings.get(value.id) : undefined;
-    if (!type && spelled !== undefined && value.type.kind === 'integer') {
+    if (
+      !type &&
+      spelled !== undefined &&
+      value.type.kind === 'integer' &&
+      !this.localIntegers.has(value.id)
+    ) {
       // A local that only a pointer spelling types (no type record): same
       // conversion of the exact address bits.
       if (this.language === 'python-like')
@@ -1680,6 +1710,14 @@ export class Renderer {
 
   private assigned(destination: Value, value: Printed): string {
     const declared = this.declaredInteger(destination, this.declaredSpelling(destination));
+    const chosen = this.localIntegers.has((this.variables.get(destination.id) ?? destination).id);
+    // A local signed by conversion cost: C assignment converts to it, so the
+    // signed variable a same-width reinterpretation re-read passes unchanged.
+    if (chosen && declared?.signed) return this.signedContext(value, declared.bits);
+    // A narrow local keeps the low bits of any assigned value: the operand of
+    // its final reduction or zero extension has the same low bits.
+    if (chosen && declared && declared.bits < bitWidth(destination.type))
+      return (value.unreduced ?? value.widened ?? value).text;
     return this.converted(
       value,
       declared && !declared.signed && declared.bits === bitWidth(destination.type)
@@ -3352,6 +3390,7 @@ export class Renderer {
     const offsets = this.usedMembers.get(used) ?? new Set<string>();
     offsets.add(usedMemberKey(member));
     this.usedMembers.set(used, offsets);
+    if (node && !this.structAccess.has(used)) this.structAccess.set(used, node);
     let access = indexedStruct
       ? `${baseText}[${this.value(index!)}].${field}`
       : `${baseText}->${field}`;
@@ -3454,11 +3493,15 @@ export class Renderer {
   }
 
   /** The declarations of the structures the finished text accesses, one entry per
-   * structure: only the members it prints (byte gaps keep every offset), never the
-   * image-wide layout, which stays in the types view / types.h. A structure the text
-   * never indexes stays an incomplete type. */
-  private structureBodies(): { readonly name: string; readonly lines: string[] }[] {
-    const bodies: { readonly name: string; readonly lines: string[] }[] = [];
+   * structure: only the members it prints, never the image-wide layout, which stays
+   * in the types view / types.h. A structure the text never indexes stays an
+   * incomplete type. External text (`compact` false) keeps every offset as byte
+   * gaps (`uint8_t pad_0xN[K];`); compact (inline) text omits the gaps before members
+   * whose name states their offset (`field_0x14`), returning them in `gaps`: only a
+   * declared member name (an Objective-C ivar) keeps its pad, as the name does not
+   * carry the offset. The access stride comment states what a trailing pad would. */
+  private structureBodies(compact: boolean): StructureBody[] {
+    const bodies: StructureBody[] = [];
     for (const id of this.structureSlot?.ids ?? []) {
       this.context.checkpoint(1);
       const members = this.partialLayout(id);
@@ -3467,7 +3510,8 @@ export class Renderer {
         used = this.usedMembers.get(name);
       if (!used) continue;
       const parts: string[] = [],
-        lines: string[] = [];
+        lines: string[] = [],
+        gaps: StructureBody['gaps'][number][] = [];
       let end = 0n,
         packed = false;
       const declare = (member: ObservedMember): string => {
@@ -3495,7 +3539,12 @@ export class Renderer {
           used.has(usedMemberKey(item)),
         );
         if (!printed.length) continue;
-        if (member.offset > end) parts.push(`uint8_t ${paddingName(end)}[${member.offset - end}];`);
+        // A member named by its offset states where it is: compact text omits the gap.
+        if (member.offset > end) {
+          if (compact && member.name === undefined)
+            gaps.push({ offset: end, length: member.offset - end });
+          else parts.push(`uint8_t ${paddingName(end)}[${member.offset - end}];`);
+        }
         parts.push(
           printed.length === 2
             ? `union { ${printed.map(declare).join(' ')} };`
@@ -3506,7 +3555,10 @@ export class Renderer {
       }
       const stride = this.sourceStructs.strides.get(id);
       if (stride) {
-        if (stride > end) parts.push(`uint8_t ${paddingName(end)}[${stride - end}];`);
+        if (stride > end) {
+          if (compact) gaps.push({ offset: end, length: stride - end });
+          else parts.push(`uint8_t ${paddingName(end)}[${stride - end}];`);
+        }
         packed ||= members.some((member) => stride % BigInt(member.bits / 8) !== 0n);
         lines.push(`/* access stride ${stride}, not size */`);
       }
@@ -3520,7 +3572,7 @@ export class Renderer {
             } */`,
         `struct ${name} { ${parts.join(' ')} }${packed ? ' __attribute__((packed))' : ''};`,
       );
-      bodies.push({ name, lines });
+      bodies.push({ name, lines, gaps });
     }
     return bodies;
   }
@@ -5011,6 +5063,37 @@ export class Renderer {
     return `((${signature})${enclosed || /^[A-Za-z_]\w*$/.test(target) ? target : `(${target})`})`;
   }
 
+  /** Source view: `storage = value` for a store (promoted local, frame member
+   * or dereference), converting to the lvalue's own type. */
+  private storeText(node: Extract<Instruction, { kind: 'store' }>, storage: string): string {
+    const punned = this.punnedLocal(node);
+    if (punned)
+      return `${storage} = ${this.reinterpret(this.value(node.value), node.value.type, punned.type, node.id, true)!.text}`;
+    if (this.vaPointerStores.has(node.id))
+      return `${storage} = ${this.pointerValue(this.printed(node.value), 'void *')}`;
+    // Storing converts to the lvalue's own width (a local is declared
+    // unsigned; a dereference has exactly the stored width).
+    const typed = this.language === 'c-like' ? this.slotType(node.id) : undefined;
+    const floating = this.floatSlot(node.id);
+    const pointer = typed && this.pointerText(node.value, typed);
+    const member = this.memberPointers.get(node.id);
+    const literal =
+      !floating && !pointer && !member
+        ? this.valueLiteral(node.value, typed ? this.formalSpelling(typed) : undefined)
+        : undefined;
+    return `${storage} = ${
+      pointer ??
+      (member && this.memberPointerValue(node.value, member)) ??
+      (floating
+        ? this.floatingValue(node.value, floating).text
+        : literal
+          ? literal.text
+          : typed
+            ? this.pointerValue(this.printed(node.value), this.formalSpelling(typed))
+            : this.converted(this.printed(node.value), bitWidth(node.value.type)))
+    }`;
+  }
+
   /** Shared assignment spelling for retained pure definitions and source loads.
    * Source view: the target is always a declared variable; a pure definition
    * of any other value prints nothing, and a load of one prints as a bare
@@ -5164,38 +5247,10 @@ export class Renderer {
         }
         if (this.program.source) {
           const storage = this.storage(node);
-          const punned = this.punnedLocal(node);
-          if (node.kind === 'store' && punned) {
-            text = `${storage} = ${this.reinterpret(this.value(node.value), node.value.type, punned.type, node.id, true)!.text}`;
-            break;
-          }
-          if (node.kind === 'store' && this.vaPointerStores.has(node.id)) {
-            text = `${storage} = ${this.pointerValue(this.printed(node.value), 'void *')}`;
-            break;
-          }
-          if (node.kind === 'store') {
-            // Storing converts to the lvalue's own width (a local is declared
-            // unsigned; a dereference has exactly the stored width).
-            const typed = this.language === 'c-like' ? this.slotType(node.id) : undefined;
-            const floating = this.floatSlot(node.id);
-            const pointer = typed && this.pointerText(node.value, typed);
-            const member = this.memberPointers.get(node.id);
-            const literal =
-              !floating && !pointer && !member
-                ? this.valueLiteral(node.value, typed ? this.formalSpelling(typed) : undefined)
-                : undefined;
-            text = `${storage} = ${
-              pointer ??
-              (member && this.memberPointerValue(node.value, member)) ??
-              (floating
-                ? this.floatingValue(node.value, floating).text
-                : literal
-                  ? literal.text
-                  : typed
-                    ? this.pointerValue(this.printed(node.value), this.formalSpelling(typed))
-                    : this.converted(this.printed(node.value), bitWidth(node.value.type)))
-            }`;
-          } else text = this.assignmentText(node, storage);
+          text =
+            node.kind === 'store'
+              ? this.storeText(node, storage)
+              : this.assignmentText(node, storage);
           break;
         }
         let address = this.value(node.address);
@@ -5882,6 +5937,7 @@ export class Renderer {
     if (!liveness || loop.bottom) return false;
     const step = this.trailingStatement(loop.step);
     if (!step) return false;
+    if (step.kind === 'store') return this.acceptSlotFor(loop, step, held);
     const variable = this.variableKey(step.result);
     const writes = (ids: readonly number[]): boolean =>
       ids.some((index) => this.variableKey(liveness.values[index]!) === variable);
@@ -5904,7 +5960,10 @@ export class Renderer {
     }
     if (definitions !== 1) return false;
     const entry = this.trailingStatement(loop.init);
-    const init = entry && this.variableKey(entry.result) === variable ? entry : undefined;
+    const init =
+      entry && entry.kind !== 'store' && this.variableKey(entry.result) === variable
+        ? entry
+        : undefined;
     // Otherwise the entry edge's copy into the variable, when it reads no other
     // destination of that edge (it then runs after them, in the header).
     const copies = this.printedCopies(loop.init);
@@ -5930,6 +5989,64 @@ export class Renderer {
     return true;
   }
 
+  /** `acceptStatementFor` for a store step into a promoted private stack slot
+   * (an `-O0` induction variable kept in memory): the slot is the variable. It
+   * qualifies when the test reads it, no other store to it exists in the loop
+   * (private slots are written only by their own stores: no frame address
+   * reaches them), and the entry block's last statement is its init store. */
+  private acceptSlotFor(
+    loop: Parameters<LoopFacts['induction']>[0],
+    step: Extract<HeaderStatement, { kind: 'store' }>,
+    held?: Instruction,
+  ): boolean {
+    const locals = this.program.source?.locals,
+      local = locals?.get(step.id);
+    if (!locals || !local) return false;
+    // The test reads the slot through a load printed inside it, or through the
+    // load its header holds.
+    const reads = [loop.test.condition, ...(held ? this.liveness!.operands(held) : [])];
+    const heldLoad = held?.kind === 'load' ? locals.get(held.id) : undefined;
+    if (heldLoad?.id !== local.id && !this.slotReads(reads).has(local.id)) return false;
+    for (const id of loop.inside) {
+      const block = this.program.blocks.get(id);
+      if (!block) return false;
+      for (const node of block.statements)
+        if (node !== step && node.kind === 'store' && locals.get(node.id)?.id === local.id)
+          return false;
+    }
+    const init = this.trailingStatement(loop.init);
+    if (init?.kind !== 'store' || locals.get(init.id)?.id !== local.id) return false;
+    this.forStatements.set(loop.test.id, { init, step });
+    this.headerStatements.add(step.id);
+    this.headerStatements.add(init.id);
+    return true;
+  }
+
+  /** The promoted slots (by local id) whose inlined loads printing `values`
+   * reads (the leaves walk of VariableLiveness, which stops at variables). */
+  private slotReads(values: readonly Value[]): Set<string> {
+    const locals = this.program.source!.locals,
+      liveness = this.liveness!,
+      found = new Set<string>(),
+      seen = new Set<string>(),
+      pending = [...values];
+    while (pending.length) {
+      const current = pending.pop()!;
+      if (seen.has(current.id)) continue;
+      seen.add(current.id);
+      const load = this.inlined.get(current.id)?.node;
+      if (load?.kind === 'load') {
+        const local = locals.get(load.id);
+        if (local) found.add(local.id);
+        continue;
+      }
+      if (liveness.index.has(current.id) && !this.program.inline.has(current.id)) continue;
+      const expression = this.program.expressions.get(current.id);
+      if (expression) pending.push(...expressionOperands(expression));
+    }
+    return found;
+  }
+
   /** The last statement of the block that ends by taking `transfer`, when that
    * edge prints nothing and the statement prints exactly one plain assignment. */
   private trailingStatement(transfer: ParallelTransfer): HeaderStatement | undefined {
@@ -5939,21 +6056,31 @@ export class Renderer {
       const node = block.statements.at(-1);
       if (
         !node ||
-        (node.kind !== 'assign' && node.kind !== 'load') ||
+        (node.kind !== 'assign' && node.kind !== 'load' && node.kind !== 'store') ||
         !this.program.retained.has(node.id) ||
-        !this.program.live.has(node.result.id) ||
-        this.inlined.has(node.result.id) ||
+        (node.kind !== 'store' &&
+          (!this.program.live.has(node.result.id) || this.inlined.has(node.result.id))) ||
         this.deferredStores.has(node.id) ||
         this.flagAccesses.has(node.id) ||
         this.deferred.get(node.id)?.length ||
         this.notes.get(node.id)?.length ||
+        // A store qualifies only into a promoted private slot printed as its
+        // own local; the other loads and stores keep their own statements.
+        (node.kind === 'store' &&
+          (!this.sourceView ||
+            !this.program.source?.locals.has(node.id) ||
+            this.punnedLocal(node) ||
+            this.vaPointerStores.has(node.id))) ||
         (node.kind === 'load' &&
           (!this.program.source ||
             this.globals.import_loads.has(node.id) ||
             this.punnedLocal(node))) ||
-        (node.kind === 'assign' ? expressionOperands(node.expression) : [node.address]).some(
-          (value) => this.inlinedCalls.has(value.id),
-        ) ||
+        (node.kind === 'assign'
+          ? expressionOperands(node.expression)
+          : node.kind === 'store'
+            ? [node.value]
+            : [node.address]
+        ).some((value) => this.inlinedCalls.has(value.id)) ||
         [node.id, block.control.id].some((anchor) =>
           (this.program.source?.definitions?.get(anchor) ?? []).some(
             (definition) => !this.inlined.has(definition.result.id),
@@ -5970,7 +6097,9 @@ export class Renderer {
   private headerStatement(node: HeaderStatement): string {
     return node.kind === 'assign'
       ? this.assignmentText(node)
-      : this.assignmentText(node, this.storage(node));
+      : node.kind === 'store'
+        ? this.storeText(node, this.storage(node))
+        : this.assignmentText(node, this.storage(node));
   }
 
   /** A bottom test also runs before the first iteration of a `for`: an
@@ -7546,6 +7675,68 @@ export class Renderer {
         else this.localSpellings.delete(id);
       }
     }
+    this.chooseLocalIntegers(formals);
+  }
+
+  /** The value has no source type, or the unsigned integer type of its width. */
+  private plainIntegerType(value: Value): boolean {
+    const id =
+      this.sourceValueTypes.get(value.id) ??
+      this.program.source?.value_types?.get(value.id)?.type_id;
+    const type = id === undefined ? undefined : this.typeRecords.get(id)?.definition;
+    return (
+      id === undefined ||
+      (type?.kind === 'integer' && !type.signed && type.bits === bitWidth(value.type))
+    );
+  }
+
+  /** C source view: give each set of integer locals connected by copies the
+   * signed or narrow C type that prints strictly fewer conversions (see
+   * planIntegerSpellings). Python-like values are unbounded integers: a signed
+   * or narrow declaration there needs a reduction at every definition and keeps
+   * `int32(uint32(x))` at signed reads, so it never saves one. */
+  private chooseLocalIntegers(formals: ReadonlySet<string>): void {
+    const program = this.program,
+      source = program.source;
+    if (!source || !this.sourceView || this.language !== 'c-like' || this.nativeIntegerStorage)
+      return;
+    const choices = planIntegerSpellings({
+      program,
+      context: this.context,
+      inline: this.inline,
+      constant: this.constantOf,
+      variable: (value) =>
+        value.type.kind === 'integer' &&
+        [8, 16, 32, 64].includes(value.type.bits) &&
+        program.live.has(value.id) &&
+        !this.inline.has(value.id) &&
+        !this.inlined.has(value.id) &&
+        !this.inlinedCalls.has(value.id) &&
+        !formals.has(value.id) &&
+        !source.stack_addresses.has(value.id) &&
+        !source.float_values?.has(value.id) &&
+        !this.fpPresentation.unobserved.has(value.id) &&
+        !this.localSpellings.has(value.id) &&
+        this.valueType(value) === this.dataType(value.type) &&
+        this.plainIntegerType(value),
+    });
+    for (const choice of choices.values()) {
+      const spelling = `${choice.signed ? 'int' : 'uint'}${choice.bits}_t`;
+      if (
+        !this.localValidation.presentation(
+          'local_integer_spelling',
+          choice.members[0]!,
+          `integer locals connected by copies are declared ${spelling}${choice.narrow ? ': every read, through same-width reinterpretations, reads only that low slice (a truncation or an extract inside it)' : ''}, because their reads print ${choice.after} conversions that way against ${choice.before} with the machine spelling (signed comparisons, sign extensions, arithmetic shifts and signed constant divisions read a signed local unconverted; every other read converts it to its unsigned type, so arithmetic stays unsigned and free of signed overflow); C assignment converts each definition to the declared type exactly as the explicit conversion at the read did, so values, widths and evaluation order are unchanged`,
+          choice.members.slice(0, 64),
+        )
+      )
+        continue;
+      for (const id of choice.members) {
+        this.localSpellings.set(id, spelling);
+        this.localIntegers.set(id, { bits: choice.bits, signed: choice.signed });
+        this.localIntegerSets.set(id, choice.members[0]!);
+      }
+    }
   }
 
   /** Source view: structure the reconstruction's CFG again now that block
@@ -7613,6 +7804,14 @@ export class Renderer {
         this.context,
         {
           max_work: this.context.budget.work,
+          // The goto search runs from a sub-allowance that leaves the text
+          // render's reserve (`TEXT_RENDER_WORK`); past it stuck scopes keep
+          // dependency order, as past the search's own selection allowance.
+          search_work: Math.max(
+            0,
+            (this.context.remainingWork?.() ?? Infinity) -
+              TEXT_RENDER_WORK * renderUnits(this.input.function),
+          ),
           transfers: (block, slot) => edges.get(`${block}:${slot}`),
           conditions: {
             operand: (block) => {
@@ -7967,7 +8166,7 @@ export class Renderer {
         storage:
           formal && !program.source
             ? `formal ${value.id}`
-            : `${storageType(value)} ${floating ?? ''}`,
+            : `${storageType(value)} ${floating ?? ''}${this.localIntegerSets.get(value.id) ?? ''}`,
         flexible: flexible.has(value.id) && !formal,
         scalar,
         plain:
@@ -8304,7 +8503,7 @@ export class Renderer {
         this.localValidation.presentation(
           'for_loop',
           subject,
-          'a while/do-while prints as for (init; test; step) when its single entry and single repeat edges only initialize and step (x = x ± c) induction variables nothing else in the loop writes, and its test reads one; a bottom test must hold on entry; a while whose sole repeat edge prints nothing may take as step the body’s last statement assigning a variable its test reads and nothing else in the loop writes, and as init the statement assigning it that ends the entry block',
+          'a while/do-while prints as for (init; test; step) when its single entry and single repeat edges only initialize and step (x = x ± c) induction variables nothing else in the loop writes, and its test reads one; a bottom test must hold on entry; a while whose sole repeat edge prints nothing may take as step the body’s last statement assigning a variable its test reads and nothing else in the loop writes, and as init the statement assigning it that ends the entry block; the same holds for a store into a promoted private stack slot (no frame address reaches it) that the test reads through a load, when no other store to the slot exists in the loop and its init store ends the entry block',
           fors,
         )) &&
       (!exits.length ||
@@ -9700,8 +9899,33 @@ export class Renderer {
     };
     this.declareGlobals(globalsAt, insert);
     this.declareFunctionValues(globalsAt, insert);
-    const bodies = this.structureSlot ? this.structureBodies() : [];
     const external = supportAt !== undefined && this.options.structures === 'external';
+    let bodies = this.structureSlot ? this.structureBodies(!external) : [];
+    const compacted = bodies.filter((body) => body.gaps.length);
+    if (compacted.length) {
+      const nodes = [
+        ...new Set(compacted.flatMap((body) => this.structAccess.get(body.name) ?? [])),
+      ];
+      const gaps = `omitted gaps (offset+length): ${compacted
+        .map(
+          (body) =>
+            `${body.name} ${body.gaps
+              .map((gap) => `0x${gap.offset.toString(16)}+${gap.length}`)
+              .join(' ')}`,
+        )
+        .join('; ')}`;
+      // Without the record the rewrite may not apply: keep every gap as a pad member.
+      if (
+        !this.localValidation.presentation(
+          'compact_struct_members',
+          nodes[0] ?? this.input.function.id,
+          COMPACT_STRUCT_MEMBERS_SCOPE,
+          nodes,
+          gaps,
+        )
+      )
+        bodies = this.structureBodies(false);
+    }
     if (this.structureSlot && !external)
       insert(
         this.structureSlot.at,
@@ -9901,9 +10125,29 @@ export class Renderer {
   }
 }
 
+/** Render units of a structured body: three per block plus its statements (about
+ * 0.7 of the selected body's IR nodes), the measure the render's work grows with. */
+function renderUnits(fn: StructuredFunction): number {
+  return fn.coverage.reduce((count, block) => count + 3 + block.statement_ids.length, 0);
+}
+
+/** Work per render unit (`renderUnits`) the text-only (`omitted` metadata) render
+ * needs after the goto search: the rest of the attempt, the render, its validation
+ * and the publication that follows (74–75 per unit measured on
+ * `sqlite3WhereCodeOneLoopStart` and `sqlite3_str_vappendf`, with margin). The
+ * source view's goto search never reaches into it. */
+const TEXT_RENDER_WORK = 120;
+/** Work per render unit of a full-metadata attempt beyond the text reserve: a full
+ * attempt from reconstruction to publication measured 395–407 per unit (`isDate`,
+ * `sqlite3Fts3Incrmerge`); the largest bodies reach the metadata bound later still. */
+const FULL_RENDER_WORK = 330;
+
 /** Render with single-use call inlining; a held call that does not reach its
  * reader as laid out prints as a statement in the next attempt. After four
- * failed attempts every call prints as a statement. */
+ * failed attempts every call prints as a statement. When the request's remaining
+ * work cannot pay a full render plus the text-only render that replaces a failed
+ * one, the text renders first, without provenance metadata (omitted with reason
+ * `budget`): the text is the one the full render prints. */
 export function renderSource(
   input: EmissionInput,
   options: ConstructorParameters<typeof Renderer>[1],
@@ -9940,6 +10184,19 @@ export function renderSource(
       }
     }
   };
+  // A function of the request's own counters: deterministic under every budget.
+  const remaining = context.remainingWork?.();
+  if (
+    remaining !== undefined &&
+    remaining < (FULL_RENDER_WORK + TEXT_RENDER_WORK) * renderUnits(input.function)
+  ) {
+    const result = attempt('omitted');
+    const omitted = result.emission.omitted?.map((item) => ({
+      ...item,
+      reason: 'budget' as const,
+    }));
+    return { ...result, emission: { ...result.emission, ...(omitted ? { omitted } : {}) } };
+  }
   try {
     return attempt('full');
   } catch (error) {

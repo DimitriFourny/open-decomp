@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { DarwinArm64Abi } from '../../../src/abi/darwin-arm64/index.js';
 import { windowsX64Abi } from '../../../src/abi/windows-x64/index.js';
 import { recoverTypes } from '../../../src/analysis/types/index.js';
 import { constructSSA } from '../../../src/analysis/ssa/index.js';
@@ -7,7 +8,7 @@ import { createOperationContext, type Address, type Emission } from '../../../sr
 import { integer, type SSAForm, type Value } from '../../../src/ir/index.js';
 import { recoverLibraryContracts } from '../../../src/metadata/library-contracts/index.js';
 import { navigationBytes } from '../../analysis/navigation-fixture.js';
-import { builder, register } from '../../ir/support.js';
+import { builder, image, register } from '../../ir/support.js';
 import { pointerAssignable } from '../../../src/emitters/expressions.js';
 import type { IntegerPredicate } from '../../../src/ir/index.js';
 import { emit, emittedFormals, execute, type SourceCallOracle } from './support.js';
@@ -294,3 +295,93 @@ test('implicit pointer conversions: same type, void and added const only', () =>
   assert.ok(pointerAssignable('void*', 'FILE*'));
   assert.ok(!pointerAssignable('uint8_t*', 'char*'), 'distinct pointee types convert explicitly');
 });
+
+const x0 = register('arm64:x0', 64, 0, 'replace_root', 'arm64:x0');
+const writing = { registers: [], flags: [], memory: 'unknown_read_write' as const };
+const callee = (value: bigint) => ({
+  kind: 'direct' as const,
+  address: { image_id: image, space: 'va' as const, value },
+});
+
+/** `r = sub_4000(p); if ((uint32_t)r == 0) return 7; sub_5000(p); return (uint32_t)r + 1;`
+ * (`wide`: the second arm returns all 64 bits of `r` instead). */
+function lowResult(wide: boolean): SSAForm {
+  const b = builder(`local-low-result-${wide}`),
+    entry = b.block('entry'),
+    zero = b.block('zero'),
+    other = b.block('other');
+  const pointer = entry.readRegister(x0);
+  const [result] = entry.call(callee(0x4000n), [pointer], [i64], writing);
+  entry.branch(
+    entry.compare(
+      'eq',
+      entry.cast('truncate', integer(32), result!),
+      entry.constant(integer(32), 0n),
+    ),
+    entry.edge(zero),
+    entry.edge(other),
+  );
+  zero.return([zero.constant(i64, 7n)]);
+  other.call(callee(0x5000n), [pointer], [], writing);
+  other.return([
+    wide
+      ? result!
+      : other.cast(
+          'zero_extend',
+          i64,
+          other.int(
+            'add',
+            other.cast('truncate', integer(32), result!),
+            other.constant(integer(32), 1n),
+          ),
+        ),
+  ]);
+  return constructSSA(b.finish(entry, [i64])).value as SSAForm;
+}
+
+for (const language of ['c-like', 'python-like'] as const)
+  test(`${language} a 64-bit call result read only through its low 32 bits is declared narrow in C`, () => {
+    const source = { abi: new DarwinArm64Abi(), callees: [], addresses: [] };
+    const run = (emission: Emission, returned: bigint) =>
+      execute(
+        emission,
+        new Map(emittedFormals(emission)[0]!.semantic_ids.map((id) => [id, 0x1234n])),
+        new Map(),
+        0n,
+        new Map(),
+        new Map(),
+        new Map<string, SourceCallOracle>([
+          ['sub_4000', () => returned],
+          ['sub_5000', () => 0n],
+        ]),
+      ).values;
+    const narrow = emit(lowResult(false), { source }, language).emission;
+    const recorded = narrow.local_validation?.some(
+      (record) => record.rule === 'local_integer_spelling',
+    );
+    if (language === 'c-like') {
+      // C assignment keeps exactly the low 32 bits; every read is that slice.
+      assert.match(narrow.text, /^\s+uint32_t (call_result\w*);$/m, narrow.text);
+      assert.doesNotMatch(narrow.text, /\(uint32_t\)call_result/, narrow.text);
+      assert.ok(recorded, narrow.text);
+    } else {
+      assert.match(narrow.text, /call_result\w*: uint64_t$/m, narrow.text);
+      assert.ok(!recorded, narrow.text);
+    }
+    // Oracle: the source program above on the callee's 64-bit result.
+    for (const [returned, expected] of [
+      [0x100000000n, 7n],
+      [0n, 7n],
+      [0xffffffff00000005n, 6n],
+      [0xffffffffn, 0n],
+    ] as const)
+      assert.deepEqual(run(narrow, returned), [expected], `${returned}\n${narrow.text}`);
+    // A read of the high bits keeps the 64-bit declaration.
+    const wide = emit(lowResult(true), { source }, language).emission;
+    assert.match(
+      wide.text,
+      language === 'c-like' ? /^\s+uint64_t call_result\w*;$/m : /call_result\w*: uint64_t$/m,
+      wide.text,
+    );
+    assert.deepEqual(run(wide, 0xffffffff00000005n), [0xffffffff00000005n], wide.text);
+  });
