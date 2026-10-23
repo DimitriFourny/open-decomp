@@ -557,6 +557,22 @@ derivations over the IR; while the shared allowance remains, the bit-vector
 checker re-proves them over the copy's source value and may veto. Python-like
 keeps `while True` for bottom tests.
 
+A C loop whose lexically last test is its sole repeat edge, entered otherwise
+only by falling into it, whose only copy blocker is a repeat copy `x = y` live
+on exit (or read by the exit copies) of a value `y` defined in the loop (not
+live into the header), rotates that copy to the loop top
+(`loop_copy_rotation`, roadmap 4 L4): the header binds a fresh value `p`
+instead of the phi `x`, every incoming edge writes `p` (the entry value, `y` on
+the repeat edge) and the header's first statement is `x = p`. `p` is dead after
+that statement and `y` is defined later, so the partition gives them one
+variable (pseudo pairs join first) and the repeat edge prints no copy:
+`do { x = p; ... p = next(x); } while (p != 0);`. Copy placement only, no
+premise; the reconstruction validator treats `p` as the header's bound
+parameter and `x = p` as its first definition, and the parallel-copy check maps
+each edge's `x` to `p`. Not rotated: headers that test for the loop
+continuation with at most one printed statement (they may print as `while`),
+Python-like (no do-while) and the checked view.
+
 Return-tail copies remain owned by the edge that enters them. When all incoming
 edges use copies and a tail's original home is removed, its copied continuation
 is removed with it; no orphan return remains after a terminal statement.

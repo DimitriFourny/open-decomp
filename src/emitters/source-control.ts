@@ -917,10 +917,11 @@ export function loopCopyRotations(
       return;
     result.push(...found);
   };
+  // Charged per loop: the walk between loops only follows region links.
   const visit = (region: Region): void => {
-    context.checkpoint(1);
     if (region.kind === 'sequence') region.regions.forEach(visit);
     else if (region.kind === 'loop') {
+      context.checkpoint(1);
       consider(region);
       visit(region.body);
     } else for (const arm of controlArms(region.control)) if (arm.body) visit(arm.body);
