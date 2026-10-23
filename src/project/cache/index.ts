@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import {
   OperationError,
@@ -233,7 +234,14 @@ function validateComputation(
   for (const proof of [...catalog.evidence, ...result.evidence.map(decodeEvidence)]) {
     context.checkpoint(1);
     const prior = proofs.get(proof.id);
-    if (prior && fingerprint(encodeEvidence(prior)) !== fingerprint(encodeEvidence(proof)))
+    // Structurally equal decoded proofs encode alike, so they need no digest; any other pair
+    // is judged by the digest of its wire form exactly as before.
+    if (
+      prior &&
+      prior !== proof &&
+      !isDeepStrictEqual(prior, proof) &&
+      fingerprint(encodeEvidence(prior)) !== fingerprint(encodeEvidence(proof))
+    )
       fail('invalid_input', 'Analysis evidence identity is ambiguous');
     if (
       proof.revision > revision ||
@@ -513,7 +521,11 @@ export async function runCachedDecompilation(
     reused = true;
     break;
   }
-  let computation = validateComputation(store, identity, candidate ?? (await compute()), context);
+  // A reuse candidate is a stored payload `loadPayload` parsed and validated against its own
+  // snapshot; only the current snapshot's checks remain. A computed result is validated once.
+  let computation = candidate
+    ? validateComputation(store, identity, candidate, context, true)
+    : validateComputation(store, identity, await compute(), context);
   if (enabled && !reused && input.dependencies !== undefined)
     computation = { ...computation, dependencies: input.dependencies.finish() };
   if (reused) context.progress('dependency-reuse', 1, 1);
@@ -535,6 +547,9 @@ export async function runCachedDecompilation(
       }),
     );
   let bytes = serialize(computation);
+  // `computation.result` is the output of `functionDecompileResultSchema.parse` (the hit path's
+  // parsed payload for a reuse); only shedding below replaces it with an unparsed value.
+  let shed = false;
   // The artifact bound never costs the pseudocode. Derived data is shed in order: the
   // incremental-reuse readset (the artifact then serves only its exact revision), then
   // whole provenance classes of the emission, each named in `emission.omitted` and in a
@@ -547,6 +562,7 @@ export async function runCachedDecompilation(
   for (const kinds of EMISSION_METADATA_SHED_ORDER) {
     if (bytes.length <= MAX_ANALYSIS_ARTIFACT_BYTES) break;
     computation = { ...computation, result: shedStoredMetadata(computation.result, kinds) };
+    shed = true;
     bytes = serialize(computation);
   }
   if (bytes.length > MAX_ANALYSIS_ARTIFACT_BYTES)
@@ -573,6 +589,7 @@ export async function runCachedDecompilation(
     (context.root ?? context).consumedWork?.(),
     limit,
     input.delivery ?? 'auto',
+    !shed,
   );
   if (!('data' in response)) fail('invalid_input', 'Invalid prepared analysis delivery');
   activeJob(store, job_id, identity, context);

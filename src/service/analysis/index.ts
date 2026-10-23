@@ -6,6 +6,8 @@ import {
   encodeEvidence,
   boundDiagnostics,
   fingerprint,
+  mergeOmissions,
+  shedEmissionMetadata,
   signatureSchema,
   toolSchemas,
   type CacheIdentity,
@@ -54,12 +56,7 @@ import { withMetadataOmissions } from '../../project/cache/limits.js';
 import { loadFunctionGraph, loadFunctionIndex, loadFunctionScope } from '../queries/scope.js';
 import { MAX_FRAME_BYTES } from '../../workers/protocol.js';
 import { callDeclarations, nativeCallIndex, resolveCalls } from './calls.js';
-import {
-  closeEvidence,
-  emissionEvidenceReferences,
-  evidenceReferences,
-  semanticCatalog,
-} from './catalog.js';
+import { boundedEvidence, semanticCatalog } from './catalog.js';
 import { pipelineComponents, pipelineVersions } from './versions.js';
 import { boundIR, requirePass } from './passes.js';
 import { recoverSourceEvidence } from './source-facts.js';
@@ -718,26 +715,13 @@ export async function executeDecompilation(
         );
         if (keys.size === 1) signature = signatures[0]!.signature;
       }
-      const catalog =
+      const semanticTypes =
         types === baseline ? baselineCatalog : semanticCatalog(image, ir, types, context);
-      const proofIds = evidenceReferences(
-        [
-          catalog.types,
-          types.associations,
-          types.signatures,
-          types.shapes,
-          uniqueDiagnostics,
-          active.annotations,
-          signature,
-        ],
-        context,
-      );
-      emissionEvidenceReferences(emitted.emission, context, proofIds);
-      const evidence = closeEvidence(
+      // Proofs past a catalog bound never cost the text: they are left out and counted.
+      const bounded = boundedEvidence({
         store,
-        args.revision,
-        proofIds,
-        [
+        revision: args.revision,
+        available: [
           ...image.evidence,
           ...(graph.evidence ?? []),
           ...(source.evidence ?? []),
@@ -749,7 +733,25 @@ export async function executeDecompilation(
           ...suppliedCalls.evidence,
         ],
         context,
-      );
+        types: semanticTypes.types,
+        optional: [types.associations, types.signatures, types.shapes],
+        required: [uniqueDiagnostics, active.annotations, signature],
+        emission: emitted.emission,
+      });
+      const catalog = { ...semanticTypes, types: bounded.types };
+      const evidence = bounded.evidence;
+      const encoded = encodeEmission(emitted.emission);
+      const shed = bounded.emission
+        ? encoded
+        : shedEmissionMetadata(encoded, ['inferences', 'mappings', 'requirements']);
+      const emission = bounded.omitted
+        ? {
+            ...shed,
+            omitted: mergeOmissions(shed.omitted, [
+              { kind: 'evidence', reason: 'output_limit', omitted: bounded.omitted },
+            ]),
+          }
+        : shed;
       const metadata: ResultMetadata = {
         schema_version: SCHEMA_VERSION,
         project_id: store.project_id,
@@ -766,7 +768,7 @@ export async function executeDecompilation(
         delivery: 'inline' as const,
         function_id: ir.id,
         signature: signature ? signatureSchema.parse(signature) : null,
-        emission: encodeEmission(emitted.emission),
+        emission,
         capabilities: [
           ...image.capabilities,
           ...coverage
