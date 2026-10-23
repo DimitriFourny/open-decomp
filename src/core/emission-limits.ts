@@ -3,7 +3,9 @@ import type { Diagnostic, coverageSchema } from './primitives.js';
 import type { WireEmission } from './tools.js';
 
 export type EmissionOmission = NonNullable<WireEmission['omitted']>[number];
-export type EmissionMetadataKind = EmissionOmission['kind'];
+/** Metadata classes a size bound can shed from an emission; `evidence` (proof
+ * references outside the catalog bound) is recorded, never shed by class. */
+export type EmissionMetadataKind = Exclude<EmissionOmission['kind'], 'evidence'>;
 
 /** Metadata classes in the order a size bound sheds them: the largest, most
  * derivative records first. The pseudocode text itself is never shed. */
@@ -13,17 +15,18 @@ export const EMISSION_METADATA_SHED_ORDER: readonly (readonly EmissionMetadataKi
   ['requirements'],
 ];
 
-const DESCRIPTION: Readonly<Record<EmissionMetadataKind, string>> = {
+const DESCRIPTION: Readonly<Record<EmissionOmission['kind'], string>> = {
   mappings: 'source mappings',
   inferences: 'inference records',
   requirements: 'requirement proofs',
+  evidence: 'proof references',
 };
 
 /** Merge omission records of one emission; a known count never hides an unknown one. */
 export function mergeOmissions(
   ...lists: readonly (readonly EmissionOmission[] | undefined)[]
 ): EmissionOmission[] {
-  const merged = new Map<EmissionMetadataKind, EmissionOmission>();
+  const merged = new Map<EmissionOmission['kind'], EmissionOmission>();
   for (const list of lists)
     for (const item of list ?? []) {
       const previous = merged.get(item.kind);
@@ -54,7 +57,7 @@ export function provenanceCoverage(
     total_units: 1,
     reasons: omitted.map(
       (item) =>
-        `output_limit: ${item.omitted === null ? 'some' : item.omitted} ${DESCRIPTION[item.kind]} omitted; the pseudocode text is complete`,
+        `${item.reason}: ${item.omitted === null ? 'some' : item.omitted} ${DESCRIPTION[item.kind]} omitted; the pseudocode text is complete`,
     ),
   };
 }
