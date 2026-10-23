@@ -1331,6 +1331,18 @@ cast, an integer destination or operand `(uintptr_t)"..."` (Python-like:
 operands keep the integer. Strings longer than 200 characters show their prefix
 and a marker keeping the address and the omitted byte count. Escapes follow each
 dialect (control, format and bidirectional characters are never printed raw).
+A literal needs a string fact, and source-fact discovery recovers one only for
+addresses in the function's candidate set (`recoverDataAddress` still demands
+immutable, terminated, section-bounded bytes). Besides every pointer-width
+constant, observed call argument and format pointer, the set takes the whole
+pointer-width constants of register cells (`source-literal-candidates.ts`): the
+cells at each `indirect` exit (a tail call) and at each call that tile a whole
+register, each cell's bounded constant set (`constantCandidates`, at most 8
+values, through phis, selects and pure operations), and, per incoming edge, the
+constants of a pointer-width block parameter or of a concat of cell parameters of
+one block. An edge with an unknown cell (a loaded value) contributes nothing, so
+the constant edge of `{literal, loaded}` still prints the literal (`value0 =
+"unknown error"`) while the loaded edge keeps the load.
 `character_literal` prints a constant as `'/'`, `'\\'`, `'.'` or `'\0'` (Python-like
 `ord('/')`) only with character evidence: a byte loaded through a pointer to
 bytes (inferred formal, declared `char`/`uint8_t` pointer, library `char*`

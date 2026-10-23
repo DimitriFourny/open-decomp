@@ -432,7 +432,7 @@ Files that several items touch:
 
 ### K4: String literals from tail-exit arguments and partly constant phis
 
-- [ ] **Problem.** 78 addresses of `__cstring` strings print as hex (71 non-empty) in 16 functions: brotli `main` 27, `isDate` 23, `codeOffset` `0x100153ba2` where Ghidra prints `"OFFSET"`. Ghidra spells 65 of the 71 as literals.
+- [x] **Problem.** 78 addresses of `__cstring` strings print as hex (71 non-empty) in 16 functions: brotli `main` 27, `isDate` 23, `codeOffset` `0x100153ba2` where Ghidra prints `"OFFSET"`. Ghidra spells 65 of the 71 as literals.
   - **Root cause:** a literal needs a `SourceAddress.string` fact, and only addresses in the candidate set of `sourceAddresses` (`source-facts.ts:663-902`) get one.
     - (a) Tail-exit register constants are never candidates. Only calls are (`:834-876`).
     - (b) The 32-bit-cell concat/phi rule drops every constant when any edge is non-constant (`:772-811`, `:789-790`).
@@ -449,6 +449,7 @@ Files that several items touch:
     - With `constantCandidates`, also `sqlite3_result_error_code` and brotli `main` [estimate].
     - Checked view: report any added `data_address(...)` wrappers.
   - **Expected effect:** comprehension and QA in `isDate`, brotli `main`, `codeOffset`, `sqlite3_result_error_code`.
+  - **Done (K4):** hex `__cstring` addresses over the lane texts 78 (16 functions) → 12 (7 functions: 7 are the empty string `0x10013bef4`, which prints a literal only where a character pointer is established, and 5 are the `/* 0x…: +N bytes */` markers of long brotli literals, not printed addresses). Changed texts: brotli `main` (11 literals), `isDate` (23), `codeOffset` (`"OFFSET"`), `parserDoubleLinkSelect`, `fts5UnicodeCreate`, `sqlite3_result_error_code` (4), `openStatTable`, `sessionRetryConstraints`, `sqlite3VdbeDisplayComment`, `sqlite3WhereExplainBloomFilter`, `generateSortTail`; three texts also name an unnamed data address (`sqlite3VdbeGetOp_dummy`, `aNanInfName`). Checked view identical on the acceptance functions. Work: brotli `main` 9.443M → 9.378M, `isDate` 8.925M → 8.975M.
 
 ### K5: Writable import slots are program storage; interior addresses are named after their symbol
 
