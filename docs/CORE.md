@@ -1205,13 +1205,24 @@ function is declared once before it: C `extern T name;` (one element at offset 0
 `extern T name[];` (one scalar type at element-multiple offsets, never a bound) or
 `extern uint8_t name[];` (anything else, accessed through explicit casts); Python-like
 uses `memory_view`. Native names use their C spelling (Mach-O drops one underscore;
-leading `__` is kept); otherwise a neutral `data_<VA>` names the object. The trailing
+leading `__` is kept); otherwise a neutral `data_<VA>` names the object. Storage that
+no symbol or data record covers is named after the nearest preceding object symbol of
+its section when that symbol is size-less, starts less than 4 KiB before it, and no
+other symbol or data record starts in between (`sqlite3Config_0x80`, comment
+`sqlite3Config+0x80`; source-only `symbol_relative_name` record). This is naming
+only: the symbol's extent stays unknown and no type or layout is claimed. The trailing
 comment carries the VA (omitted when the printed `data_<VA>` name or a `memory_view(0x…)` already states it) and any known byte extent or data kind; declarations are mapped
 with the object's evidence. Checked view still prints the explicit `data_address(...)`
-identity and declares nothing.
+identity (`"_sqlite3Config+0x80"` for a relative name) and declares nothing.
 
-Loader-bound import slots (Mach-O GOT/chained-fixup binds, ELF GLOB_DAT, PE IAT; not
-lazy-bound slots or stub entries) carry `SourceAddress.import`. In the source view a
+Loader-bound import slots carry `SourceAddress.import` only in storage the loader
+alone writes: a Mach-O `S_NON_LAZY_SYMBOL_POINTERS`/`__got`/`__auth_got` section or a
+segment read-only after fixups (`__DATA_CONST`, `SG_READ_ONLY`), an ELF `PT_GNU_RELRO`
+range, the PE IAT, or a mapping without write permission (never lazy-bound slots or stub
+entries). A bind in writable program data (SQLite's `aSyscall[i].pCurrent`, rewritten by
+`unixSetSystemCall`; an ELF lazy `.got.plt` slot) stays plain storage: its read prints as
+a read and its declaration comment adds `initially <symbol>` when the slot holds the
+symbol's exact address at load time. In the source view a
 pointer-width read of such a slot is the imported symbol's address (`&sym`) and a
 read through it is the symbol itself (`sym`), declared once with a compact comment
 (`import from <library basename>`) and the bind records as evidence. The declared type is

@@ -115,6 +115,24 @@ export interface SourceAddress {
   readonly name?: string;
   /** Evidence-backed C spelling of a native symbol; asserted names stay verbatim. */
   readonly source_name?: string;
+  /** No symbol or data record covers the address: the nearest preceding object
+   * symbol of the same section starts `offset` bytes before it, and no other
+   * symbol or data record starts in between. Naming only (`sqlite3Config+0x80`):
+   * the symbol's extent stays unknown and no type or layout is claimed. */
+  readonly symbol_relative?: {
+    readonly symbol_id: string;
+    /** Native name of the preceding symbol. */
+    readonly name: string;
+    /** C spelling of `name`; asserted names stay verbatim. */
+    readonly source_name?: string;
+    readonly offset: bigint;
+    /** The preceding symbol's records; they evidence only a printed relative name. */
+    readonly evidence_ids: readonly string[];
+  };
+  /** The loader binds this pointer slot to an imported symbol (C spelling), but the
+   * slot lies in writable program data: that is its value at load time only, since
+   * program code may rewrite it. A read stays a read of the slot. */
+  readonly initial_import?: string;
   /** Exact immutable image bytes, free of relocation slots and possible local writes. */
   readonly constant_bytes?: readonly number[];
   /** Only immutable, terminated strings with exact image/address provenance. */
@@ -150,10 +168,13 @@ export interface SourceAddress {
     readonly kind: 'bytes' | 'jump_table' | 'literal_pool' | 'unknown';
     readonly evidence_ids: readonly string[];
   };
-  /** The address is the loader-bound slot of an imported symbol (Mach-O bind/GOT,
-   * ELF GLOB_DAT, PE IAT). The dynamic linker alone writes it: an exact
-   * pointer-width read yields the imported symbol's address, so one more
-   * dereference reaches the imported object. Type and extent stay unknown. */
+  /** The address is the loader-bound slot of an imported symbol in storage only the
+   * loader writes: a Mach-O non-lazy pointer section (`__got`, `__auth_got`) or a
+   * segment read-only after fixups (`__DATA_CONST`, `SG_READ_ONLY`), an ELF
+   * `PT_GNU_RELRO` range, the PE IAT, or a mapping without write permission. The
+   * dynamic linker alone writes it: an exact pointer-width read yields the imported
+   * symbol's address, so one more dereference reaches the imported object. Type
+   * and extent stay unknown. A bind in writable program data is `initial_import`. */
   readonly import?: {
     readonly id: string;
     /** Native linkage name of the symbol as the loader recorded it. */

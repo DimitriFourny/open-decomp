@@ -453,7 +453,7 @@ Files that several items touch:
 
 ### K5: Writable import slots are program storage; interior addresses are named after their symbol
 
-- [ ] **Problem:**
+- [x] **Done** (`wt/rm4-k5`; lane `od-rm4-k5` at the branch point vs `od-main-bf6f43f`: exactly 21 texts changed, all SQLite: `verifyDbFile` and `unixSync` load the `aSyscall` slot and call through it (`value0 = (opaque_1*)aSyscall_0x80;`, declaration `/* VA 0x100169580, aSyscall+0x80, initially fstat */`; no `fstat`/`stat`/`fcntl` import fold), and 20 functions rename all 212 `data_1001…` names to `sqlite3Config_0x…`, `pcache1_g_0x…`, `sqlite3BuiltinFunctions_0x…`, `aSyscall_0x…`, `memdb_vfs_0x…`, `mem0_0x10`, `sqlite3azCompileOpt_0x…` (212 → 0); brotli texts byte-identical; states unchanged. Checked view: `data_address` identity becomes `"_sqlite3Config+0x80"`, and the three former binding slots lose their `0x8` extent (`"unknown"`). Work: `isDate` +73, `sqlite3Fts3Incrmerge` +1,288 (the per-function `symbol_relative_name` record). reconstruction 88, C emitter 99, Python-like 96.) **Problem:**
   - **Soundness bug.** Three calls through SQLite's writable `aSyscall[i].pCurrent` print as calls to `fstat`, `stat` and `fcntl` (`verifyDbFile`: `value0 = (uintptr_t)fstat; ((uint64_t (*)(…))value0)(…)`; `unixSync`). SQLite's `unixSetSystemCall` rewrites those slots.
   - **Naming.** 212 `data_1001…` names are interior addresses of named Mach-O symbols: `_sqlite3Config` 156, `_sqlite3BuiltinFunctions` 22, `_pcache1_g` 22, … They include the 49 mutex-method calls the grader misread in 4 claims ("invokes a cleanup trigger through data_100168d70").
   - **Root cause:**
