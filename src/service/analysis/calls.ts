@@ -3,6 +3,7 @@ import {
   fingerprint,
   buildOnce,
   useBuilt,
+  type AbiProfile,
   type Annotation,
   type Address,
   type DataLayout,
@@ -12,7 +13,8 @@ import {
   type OperationContext,
   type ReferenceRecord,
 } from '../../core/index.js';
-import type { SSAForm } from '../../ir/index.js';
+import type { RegisterIR, SSAForm } from '../../ir/index.js';
+import { libraryLookupName } from '../../metadata/symbols/c-names.js';
 import type {
   ContractTarget,
   SuppliedCallContract,
@@ -50,7 +52,28 @@ interface NativeCallIndex {
   >;
   /** Call and tail-call references by exact target address key. */
   readonly callers_by_target: ReadonlyMap<string, readonly ReferenceRecord[]>;
+  /** Imports (by id) whose C name is an FP control-state writer. */
+  readonly environment_writers: ReadonlySet<string>;
 }
+/** C names of library functions that change the FP control state: fenv.h,
+ * the MSVC CRT and BSD `fpset*`. A name only adds the writer clobbers. */
+const ENVIRONMENT_WRITERS: ReadonlySet<string> = new Set([
+  'fesetround',
+  'fesetenv',
+  'feupdateenv',
+  'feholdexcept',
+  'fesetexceptflag',
+  'feenableexcept',
+  'fedisableexcept',
+  '_controlfp',
+  '_control87',
+  '_controlfp_s',
+  '__control87_2',
+  '_set_controlfp',
+  '_fpreset',
+  'fpsetround',
+  'fpsetmask',
+]);
 const nativeIndexes = new WeakMap<LoadedImage, NativeCallIndex>();
 /** The `NativeCallIndex` map key of an address. */
 export const nativeAddressKey = (address: Address): string =>
@@ -102,9 +125,15 @@ function buildNativeCallIndex(
   }
   const importsByAddress = new Map<string, LoadedImage['imports'][number][]>();
   const importsById = new Map<string, LoadedImage['imports'][number]>();
+  const environmentWriters = new Set<string>();
   for (const item of image.imports) {
     context.checkpoint(1);
     importsById.set(item.id, item);
+    if (
+      item.original_name !== null &&
+      ENVIRONMENT_WRITERS.has(libraryLookupName(image.target.format, item.original_name))
+    )
+      environmentWriters.add(item.id);
     if (!item.callable_entry) continue;
     const key = nativeAddressKey(item.callable_entry),
       list = importsByAddress.get(key) ?? [];
@@ -146,6 +175,7 @@ function buildNativeCallIndex(
     imports_by_id: importsById,
     references_by_function: referencesByFunction,
     callers_by_target: callersByTarget,
+    environment_writers: environmentWriters,
   };
   return indexed;
 }
@@ -250,6 +280,119 @@ export function resolveCalls(
         }
     }
   return { resolutions, subjects: [...subjects], calls_by_subject: callsBySubject };
+}
+
+/** Whether the image imports an FP control-state writer: only calls of one carry
+ * `environment_writer_clobbers`. */
+export function imageEnvironmentWriters(
+  image: LoadedImage,
+  functions: readonly FunctionRecord[],
+  references: readonly ReferenceRecord[],
+  context: OperationContext,
+): boolean {
+  return nativeCallIndex(image, functions, references, context).environment_writers.size > 0;
+}
+
+/** Calls and indirect tail exits whose target is an FP control-state writer
+ * import: a callable stub, an import-slot reference or a constant target. */
+export function environmentWriterCalls(
+  ir: RegisterIR | SSAForm,
+  image: LoadedImage,
+  functions: readonly FunctionRecord[],
+  references: readonly ReferenceRecord[],
+  context: OperationContext,
+): ReadonlySet<string> {
+  const indexed = nativeCallIndex(image, functions, references, context);
+  const found = new Set<string>();
+  if (!indexed.environment_writers.size) return found;
+  const byInstruction = indexed.references_by_function.get(ir.id);
+  const addresses = new Map<string, Address>();
+  for (const block of ir.blocks)
+    for (const node of block.instructions) {
+      context.checkpoint(1);
+      if (node.kind !== 'assign') continue;
+      const expression = node.expression;
+      if (expression.kind === 'address') addresses.set(node.result.id, expression.address);
+      else if (expression.kind === 'constant')
+        addresses.set(node.result.id, { image_id: image.id, space: 'va', value: expression.bits });
+    }
+  const writerAt = (address: Address | undefined): boolean =>
+    address !== undefined &&
+    (indexed.imports_by_address.get(nativeAddressKey(address)) ?? []).some((item) =>
+      indexed.environment_writers.has(item.id),
+    );
+  const visit = (
+    id: string,
+    address: Address | undefined,
+    instructions: readonly string[],
+  ): void => {
+    if (writerAt(address)) found.add(id);
+    else
+      for (const instruction of instructions)
+        for (const reference of byInstruction?.get(instruction) ?? []) {
+          context.checkpoint(1);
+          if (
+            reference.status !== 'unresolved' &&
+            ((reference.to_entity !== null &&
+              indexed.environment_writers.has(reference.to_entity)) ||
+              writerAt(reference.to ?? undefined))
+          )
+            found.add(id);
+        }
+  };
+  for (const block of ir.blocks) {
+    for (const node of block.instructions)
+      if (node.kind === 'call')
+        visit(
+          node.id,
+          node.target.kind === 'direct' ? node.target.address : addresses.get(node.target.value.id),
+          node.provenance.instruction_ids,
+        );
+    const control = block.terminator;
+    if (control.kind === 'indirect' && control.tail_call)
+      visit(control.id, addresses.get(control.target.id), control.provenance.instruction_ids);
+  }
+  return found;
+}
+
+/** The register IR with `abi.environment_writer_clobbers` added to every call of
+ * an environment-writer import, before SSA cell construction. */
+export function applyEnvironmentWriters(
+  ir: RegisterIR,
+  image: LoadedImage,
+  functions: readonly FunctionRecord[],
+  references: readonly ReferenceRecord[],
+  abi: AbiProfile,
+  context: OperationContext,
+): RegisterIR {
+  const writers = environmentWriterCalls(ir, image, functions, references, context);
+  if (!writers.size) return ir;
+  return {
+    ...ir,
+    blocks: ir.blocks.map((block) =>
+      block.instructions.some((node) => writers.has(node.id))
+        ? {
+            ...block,
+            instructions: block.instructions.map((node) => {
+              if (node.kind !== 'call' || !writers.has(node.id)) return node;
+              const known = new Set(node.clobbers.registers.map((register) => register.id));
+              return {
+                ...node,
+                clobbers: {
+                  ...node.clobbers,
+                  registers: [
+                    ...node.clobbers.registers,
+                    ...abi.environment_writer_clobbers.filter(
+                      (register) => !known.has(register.id),
+                    ),
+                  ],
+                },
+              };
+            }),
+          }
+        : block,
+    ),
+  };
 }
 
 /** Use the existing source-layout resolver and typed ABI contracts, retaining
