@@ -534,7 +534,7 @@ Files that several items touch:
 
 ### F2: ABI premise: calls preserve the FP control state, except known environment writers
 
-- [ ] **Problem.**
+- [x] **Problem.** _Done (lane od-rm4-f2 vs od-main-07f4b12: only `isDate` text changes, its 8 `call clobbers fpcr` placeholders become entry-state `FPCR environment` reads with all 27 guards kept (A1 owns its unsupported FMADD/FCVTZS effects); `"arm64:fpcr:0:32"` 5 → 8, all in `isDate` unknown-effect lists; checked view drops every call-clobber FPCR value (`rtreeInsertCell` 3, `sqlite3_result_double` 1, `cume_distValueFunc` 1, `isDate` 8) with guard counts unchanged; work: 148 functions down, total −383k, `rtreeInsertCell` +64k (one extra recursive-closure observation now that a callee summary is `observed`), `sqlite3GetVdbe` +27k, `sqlite3Fts3Incrmerge` +1.5k, brotli `main` +0.4k, `isDate` −10k)._
   - Darwin arm64 clobbers FPCR at every call (`src/abi/darwin-arm64/index.ts:310-337`), which creates an epoch per call, phi webs and placeholders. `"arm64:fpcr:0:32"` appears in 64 printed boundary lists.
   - SysV and Win64 already preserve the MXCSR control bits (`sysv-amd64/index.ts:293-302`, `windows-x64/index.ts:64-73`), but they make no exception for `fesetround`/`_controlfp`. A call to one of them is ignored on every target.
   - **Change:**

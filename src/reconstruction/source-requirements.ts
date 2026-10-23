@@ -137,24 +137,64 @@ export function planSourceRequirements(
   });
   // Recognize only the lifter's exact guard/failure contract and original SSA
   // mask source. Similar-looking user predicates are not environment proofs.
-  // The control register's block-exit state is derived along dominators.
+  // The control register's block-exit state is derived along dominators; calls
+  // preserve it, so chains are long and every walked block's state is kept.
   const rows = {
     idom: (id: string) => blocks.get(id)?.dominator ?? null,
     entry: (id: string) => blocks.get(id)?.register_entry ?? [],
     exit: (id: string) => blocks.get(id)?.register_exit ?? [],
   };
+  const armControl = (register: RegisterDescriptor): boolean =>
+      register.root === fpEnvironmentGuard.control_root,
+    x86Control = (register: RegisterDescriptor): boolean =>
+      register.root === x86FpEnvironmentGuard.control_root &&
+      register.offset_bits === x86FpEnvironmentGuard.offset_bits &&
+      register.width_bits === x86FpEnvironmentGuard.width_bits;
+  const exitStates = new Map<
+    (register: RegisterDescriptor) => boolean,
+    { readonly cell: RegisterDescriptor | undefined; readonly states: Map<string, string | null> }
+  >();
   const exitState = (
     block: string,
     matches: (register: RegisterDescriptor) => boolean,
   ): string | undefined => {
-    const cell = blocks.get(input.function.entry)?.register_entry.find((binding) => {
-      context.checkpoint(1);
-      return matches(binding.register);
-    })?.register;
-    return (
-      cell &&
-      registerStateAt(rows, block, cell, 'exit', (work) => context.checkpoint(work))?.value.id
-    );
+    let known = exitStates.get(matches);
+    if (!known) {
+      const cell = blocks.get(input.function.entry)?.register_entry.find((binding) => {
+        context.checkpoint(1);
+        return matches(binding.register);
+      })?.register;
+      exitStates.set(matches, (known = { cell, states: new Map() }));
+    }
+    const { cell, states } = known;
+    if (!cell) return undefined;
+    // A block without a row for the cell has its immediate dominator's exit state.
+    const walked: string[] = [];
+    let current: string | null = block,
+      state: string | null = null;
+    while (current !== null) {
+      const cached = states.get(current);
+      if (cached !== undefined) {
+        context.checkpoint(1);
+        state = cached;
+        break;
+      }
+      walked.push(current);
+      const binding = registerStateAt(
+        { ...rows, idom: () => null },
+        current,
+        cell,
+        'exit',
+        (work) => context.checkpoint(work),
+      );
+      if (binding) {
+        state = binding.value.id;
+        break;
+      }
+      current = rows.idom(current);
+    }
+    for (const id of walked) states.set(id, state);
+    return state ?? undefined;
   };
   for (const block of blocks.values()) {
     context.checkpoint(1);
@@ -190,10 +230,7 @@ export function planSourceRequirements(
       continue;
     const mask = definitions.get(masked.right.id)?.expression;
     if (mask?.kind !== 'constant' || mask.bits !== fpEnvironmentGuard.mask) continue;
-    const controlState = exitState(
-      block.id,
-      (register) => register.root === fpEnvironmentGuard.control_root,
-    );
+    const controlState = exitState(block.id, armControl);
     if (controlState === undefined) continue;
     let state = masked.left;
     const stateOrigins: Origin[] = [];
@@ -250,13 +287,7 @@ export function planSourceRequirements(
     const expected = definitions.get(comparison.right.id)?.expression;
     if (expected?.kind !== 'constant' || expected.bits !== x86FpEnvironmentGuard.supported_bits)
       continue;
-    const controlState = exitState(
-      block.id,
-      (register) =>
-        register.root === x86FpEnvironmentGuard.control_root &&
-        register.offset_bits === x86FpEnvironmentGuard.offset_bits &&
-        register.width_bits === x86FpEnvironmentGuard.width_bits,
-    );
+    const controlState = exitState(block.id, x86Control);
     if (controlState === undefined) continue;
     let state = comparison.left;
     const stateOrigins: Origin[] = [];

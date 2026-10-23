@@ -362,3 +362,28 @@ test('unsupported scalar/vector/layout boundaries remain explicit', () => {
     assert.equal(result.diagnostics[0]?.code, 'invalid_input');
   }
 });
+
+test('Win64 environment writers clobber exactly the nonvolatile FP control state', () => {
+  // MXCSR[6:16] and the x87 control word are nonvolatile; `_controlfp` and the
+  // fenv writers change them, ordinary calls do not clobber them.
+  assert.deepEqual(
+    windowsX64Abi.environment_writer_clobbers.map((register) => [
+      register.id,
+      register.root,
+      register.offset_bits,
+      register.width_bits,
+      register.write_rule,
+    ]),
+    [
+      ['x86_64:fpcsr', 'x86_64:fpcsr', 0, 16, 'replace_root'],
+      ['x86_64:mxcsr[6:16]', 'x86_64:mxcsr', 6, 10, 'preserve_other_bits'],
+    ],
+  );
+  for (const register of windowsX64Abi.environment_writer_clobbers) {
+    registerSchema.parse(register);
+    assert.ok(windowsX64Abi.preserved.includes(register));
+    assert.ok(
+      !windowsX64Abi.unknown_call_clobbers.registers.some((lost) => lost.root === register.root),
+    );
+  }
+});
