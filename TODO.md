@@ -855,7 +855,7 @@ Files that several items touch:
 
 ### P2: Struct bodies without pad members in the inline text
 
-- [ ] **Problem.** Struct bodies cost 7,200 tokens, and 482 of their 1,382 members (35%) are `uint8_t pad_0xOFF[N];`. Every real member name already carries its offset (`field_0x14`). Judges cite pads in 28 reasons.
+- [x] **Problem.** Struct bodies cost 7,200 tokens, and 482 of their 1,382 members (35%) are `uint8_t pad_0xOFF[N];`. Every real member name already carries its offset (`field_0x14`). Judges cite pads in 28 reasons.
   - **Root cause:** `structureBodies` (`renderer.ts:3369-3435`) emits a pad for every gap (`:3407`, `:3418`), because the same lines feed `emission.structures`/`types.h` (`:9350-9355`).
   - **Change:**
     - `structureBodies(compact)`: for `options.structures === 'inline'`, omit pads (`struct X { uint32_t field_0x4; opaque_1* field_0x28; };`). For `external` (export/`types.h`, `src/cli/export.ts:468-478`), keep today's text.
@@ -866,6 +866,7 @@ Files that several items touch:
   - **Tests:** `test/emitters/c/source-structs.test.ts` (inline vs external; pads in `emission.structures`); one test per dialect for `address->field_0x14` with a gap before it, with equal `execute()` results.
   - **Acceptance:** the 99 functions with bodies change. Everything else, including `types.h`, `emission.structures` and the checked view, is byte-identical.
   - **Expected effect:** −2,892 lexical tokens, geomean −0.024 (measured on texts).
+  - **Done (`wt/rm4-p2`).** 489 pads removed from 92 of the 99 body texts (the other 7 have no gap); lane diff against `od-main-ad6a967` is exactly the pad removal, −2,934 lexical tokens (`\w+|\S` tokenizer); coverage and checked view unchanged. One `compact_struct_members` record per function (cites one access node per structure) costs +33…+898 work (mean +180; `isDate` +612, `sqlite3Fts3Incrmerge` +642). Objective-C ivars (declared names carry no offset) keep their pad; a trailing stride pad is replaced by the `/* access stride N, not size */` comment. At the 256-record validation bound the record is refused and the body keeps its pads.
 
 ### P3: Header comment diet
 

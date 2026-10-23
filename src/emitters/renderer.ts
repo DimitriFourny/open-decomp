@@ -225,6 +225,15 @@ interface Displacement {
  * those of unestablished extent, show one row of TABLE_PREFIX_BYTES. */
 const TABLE_FULL_BYTES = 64n;
 const TABLE_PREFIX_BYTES = 16;
+/** One structure declaration of the finished text: its lines, and the byte gaps a
+ * compact (inline) body omits (external text prints them as pad members). */
+interface StructureBody {
+  readonly name: string;
+  readonly lines: string[];
+  readonly gaps: { readonly offset: bigint; readonly length: bigint }[];
+}
+const COMPACT_STRUCT_MEMBERS_SCOPE =
+  'inline structure bodies print only the members the text accesses; byte gaps before a member whose name states its offset (field_0xN) and after the last member up to an access stride are not printed, so every printed member stays at its named offset (external declarations keep the gaps as pad members)';
 const STRING_LITERAL_SCOPE =
   'pointer-width constants addressing an immutable NUL-terminated string with established encoding (an interior address denotes its suffix bytes), printed as that string literal where the constant is a value: argument, store, return, copy, select arm or identity comparison';
 const CALL_EFFECTS_SCOPE =
@@ -458,6 +467,10 @@ export class Renderer {
   private readonly memberTypes = new Map<string, IntegerCType>();
   /** Offsets of each structure's members this function's text accesses, by structure name. */
   private readonly usedMembers = new Map<string, Set<string>>();
+  /** One IR access node per structure name that printed a member: the subject of
+   * the structure's presentation records (a function-wide subject would cite every
+   * instruction of the function). */
+  private readonly structAccess = new Map<string, string>();
   /** Where the structure bodies are inserted once the accessed members are known. */
   private structureSlot: { readonly at: number; readonly ids: readonly string[] } | null = null;
   private readonly sourceStructs: SourceStructs;
@@ -3377,6 +3390,7 @@ export class Renderer {
     const offsets = this.usedMembers.get(used) ?? new Set<string>();
     offsets.add(usedMemberKey(member));
     this.usedMembers.set(used, offsets);
+    if (node && !this.structAccess.has(used)) this.structAccess.set(used, node);
     let access = indexedStruct
       ? `${baseText}[${this.value(index!)}].${field}`
       : `${baseText}->${field}`;
@@ -3479,11 +3493,15 @@ export class Renderer {
   }
 
   /** The declarations of the structures the finished text accesses, one entry per
-   * structure: only the members it prints (byte gaps keep every offset), never the
-   * image-wide layout, which stays in the types view / types.h. A structure the text
-   * never indexes stays an incomplete type. */
-  private structureBodies(): { readonly name: string; readonly lines: string[] }[] {
-    const bodies: { readonly name: string; readonly lines: string[] }[] = [];
+   * structure: only the members it prints, never the image-wide layout, which stays
+   * in the types view / types.h. A structure the text never indexes stays an
+   * incomplete type. External text (`compact` false) keeps every offset as byte
+   * gaps (`uint8_t pad_0xN[K];`); compact (inline) text omits the gaps before members
+   * whose name states their offset (`field_0x14`), returning them in `gaps`: only a
+   * declared member name (an Objective-C ivar) keeps its pad, as the name does not
+   * carry the offset. The access stride comment states what a trailing pad would. */
+  private structureBodies(compact: boolean): StructureBody[] {
+    const bodies: StructureBody[] = [];
     for (const id of this.structureSlot?.ids ?? []) {
       this.context.checkpoint(1);
       const members = this.partialLayout(id);
@@ -3492,7 +3510,8 @@ export class Renderer {
         used = this.usedMembers.get(name);
       if (!used) continue;
       const parts: string[] = [],
-        lines: string[] = [];
+        lines: string[] = [],
+        gaps: StructureBody['gaps'][number][] = [];
       let end = 0n,
         packed = false;
       const declare = (member: ObservedMember): string => {
@@ -3520,7 +3539,12 @@ export class Renderer {
           used.has(usedMemberKey(item)),
         );
         if (!printed.length) continue;
-        if (member.offset > end) parts.push(`uint8_t ${paddingName(end)}[${member.offset - end}];`);
+        // A member named by its offset states where it is: compact text omits the gap.
+        if (member.offset > end) {
+          if (compact && member.name === undefined)
+            gaps.push({ offset: end, length: member.offset - end });
+          else parts.push(`uint8_t ${paddingName(end)}[${member.offset - end}];`);
+        }
         parts.push(
           printed.length === 2
             ? `union { ${printed.map(declare).join(' ')} };`
@@ -3531,7 +3555,10 @@ export class Renderer {
       }
       const stride = this.sourceStructs.strides.get(id);
       if (stride) {
-        if (stride > end) parts.push(`uint8_t ${paddingName(end)}[${stride - end}];`);
+        if (stride > end) {
+          if (compact) gaps.push({ offset: end, length: stride - end });
+          else parts.push(`uint8_t ${paddingName(end)}[${stride - end}];`);
+        }
         packed ||= members.some((member) => stride % BigInt(member.bits / 8) !== 0n);
         lines.push(`/* access stride ${stride}, not size */`);
       }
@@ -3545,7 +3572,7 @@ export class Renderer {
             } */`,
         `struct ${name} { ${parts.join(' ')} }${packed ? ' __attribute__((packed))' : ''};`,
       );
-      bodies.push({ name, lines });
+      bodies.push({ name, lines, gaps });
     }
     return bodies;
   }
@@ -9768,8 +9795,33 @@ export class Renderer {
     };
     this.declareGlobals(globalsAt, insert);
     this.declareFunctionValues(globalsAt, insert);
-    const bodies = this.structureSlot ? this.structureBodies() : [];
     const external = supportAt !== undefined && this.options.structures === 'external';
+    let bodies = this.structureSlot ? this.structureBodies(!external) : [];
+    const compacted = bodies.filter((body) => body.gaps.length);
+    if (compacted.length) {
+      const nodes = [
+        ...new Set(compacted.flatMap((body) => this.structAccess.get(body.name) ?? [])),
+      ];
+      const gaps = `omitted gaps (offset+length): ${compacted
+        .map(
+          (body) =>
+            `${body.name} ${body.gaps
+              .map((gap) => `0x${gap.offset.toString(16)}+${gap.length}`)
+              .join(' ')}`,
+        )
+        .join('; ')}`;
+      // Without the record the rewrite may not apply: keep every gap as a pad member.
+      if (
+        !this.localValidation.presentation(
+          'compact_struct_members',
+          nodes[0] ?? this.input.function.id,
+          COMPACT_STRUCT_MEMBERS_SCOPE,
+          nodes,
+          gaps,
+        )
+      )
+        bodies = this.structureBodies(false);
+    }
     if (this.structureSlot && !external)
       insert(
         this.structureSlot.at,

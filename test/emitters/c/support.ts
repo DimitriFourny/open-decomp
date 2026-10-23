@@ -340,6 +340,8 @@ export class Parser {
   private readonly formalTypes: CType[] = [];
   /** Python-like: the entry-SP offset each `frame.va: va_list` states. */
   private readonly vaOffsets = new Map<string, bigint>();
+  /** The `/* access stride N, not size *\/` of each structure that states one. */
+  private readonly strides = new Map<string, bigint>();
   /** Declared result types of `extern R name(...);` functions. */
   private readonly prototypes = new Map<string, CType>();
   returnType: CType = MATH;
@@ -359,6 +361,10 @@ export class Parser {
         .split(', ')
         .filter(Boolean),
     );
+    for (const match of text.matchAll(
+      /\/\* access stride (\d+), not size \*\/\n(?:\/\*[^\n]*\*\/\n)*struct (\w+) \{/g,
+    ))
+      this.strides.set(match[2]!, BigInt(match[1]!));
     this.openIndirect = [...this.openCallees].some((name) => name.startsWith('indirect call'));
     this.voidResult = /^void [A-Za-z_]\w*\(/m.test(text) || /^def .*-> void:/m.test(text);
     // The VA comment is omitted where the printed `data_<hex>` name already states the address.
@@ -593,7 +599,10 @@ export class Parser {
   }
 
   /** `[typedef] struct NAME { T field; uint8_t gap[N]; ... } [NAME];` laid out
-   * by C rules (each scalar at its natural alignment). */
+   * by C rules (each scalar at its natural alignment), except that a member named
+   * `field_0x<hex>` not preceded by a pad sits at the offset its name states (the
+   * compact inline text omits the gaps), and a `/* access stride N, not size *\/`
+   * comment gives the size of the elements an indexed access steps over. */
   private structDeclaration(): void {
     if (this.peek() === 'typedef') this.take('typedef');
     if (this.peek() !== 'struct') {
@@ -616,7 +625,10 @@ export class Parser {
     const layout = this.structBody();
     if (this.peek() === name) this.take(name);
     this.take(';');
-    this.structs.set(name, layout);
+    const stride = this.strides.get(name);
+    if (stride !== undefined)
+      assert.ok(stride >= layout.size, `Stride of ${name} below its members`);
+    this.structs.set(name, stride === undefined ? layout : { ...layout, size: stride });
   }
 
   /** `{ T field; uint8_t gap[N]; ... } [__attribute__((packed))]` laid out by C
@@ -624,7 +636,13 @@ export class Parser {
   private structBody(): StructLayout {
     const fields = new Map<string, { offset: bigint; type: CType; array: boolean }>();
     let offset = 0n,
-      alignment = 1n;
+      alignment = 1n,
+      padded = false;
+    /** The offset a `field_0x<hex>[_f]` name states, when no pad precedes it. */
+    const stated = (name: string): bigint | null => {
+      const match = padded ? null : /^field_0x([\da-f]+)(?:_f)?$/.exec(name);
+      return match ? BigInt(`0x${match[1]}`) : null;
+    };
     this.take('{');
     // The structure's closing brace, past any anonymous union bodies.
     let end = this.position;
@@ -682,10 +700,16 @@ export class Parser {
         this.take('}');
         this.take(';');
         const size = shared.reduce((max, item) => (item.size > max ? item.size : max), 0n);
-        if (!packed) {
+        const named = stated(shared[0]!.name);
+        if (named !== null) {
+          assert.ok(named >= offset, 'Struct members are listed in offset order');
+          offset = named;
+          if (!packed && size > alignment) alignment = size;
+        } else if (!packed) {
           offset = ((offset + size - 1n) / size) * size;
           if (size > alignment) alignment = size;
         }
+        padded = false;
         for (const item of shared) {
           assert.ok(!item.array, 'Union members are scalars');
           fields.set(item.name, { offset, type: item.type, array: false });
@@ -694,10 +718,16 @@ export class Parser {
         continue;
       }
       const item = member();
-      if (!packed) {
+      const named = stated(item.name);
+      if (named !== null) {
+        assert.ok(named >= offset, 'Struct members are listed in offset order');
+        offset = named;
+        if (!packed && item.size > alignment) alignment = item.size;
+      } else if (!packed) {
         offset = ((offset + item.size - 1n) / item.size) * item.size;
         if (item.size > alignment) alignment = item.size;
       }
+      padded = /^pad_/.test(item.name);
       fields.set(item.name, { offset, type: item.type, array: item.array });
       offset += item.size * item.count;
     }
