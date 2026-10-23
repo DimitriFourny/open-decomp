@@ -1,6 +1,13 @@
 import type { OperationContext } from '../core/index.js';
 import type { StackByte, StackFact, StackRecoveryResult } from '../analysis/stack/index.js';
-import { bitWidth, sameType, type Instruction, type Value } from '../ir/index.js';
+import {
+  bitWidth,
+  sameType,
+  type Expression,
+  type Instruction,
+  type RegisterBinding,
+  type Value,
+} from '../ir/index.js';
 import type { BlockRegion, ParallelTransfer } from '../presentation/index.js';
 import type { EmissionInput } from '../emitters/model.js';
 import { identityOperand } from './expressions.js';
@@ -355,17 +362,86 @@ export function createOutgoingStackSlots(
     ),
   );
   // The stack analysis treats a live frame pointer at any call as an escape.
-  // An exact escaped address lowers the floor (`escaped_frame_floor`); an
-  // inexact one may designate any slot (false: no slot is eligible).
+  // An escaped exact frame address (`stack`, or a `stack_fragment` of one)
+  // lowers the floor (`escaped_frame_floor`); an inexact (`dynamic_stack`)
+  // one lowers it to its lowest exact origin (`lowest`) and, without one,
+  // may designate any slot (false: no slot is eligible).
   let floor: bigint | undefined;
   const escapes: string[] = [];
-  const escape = (id: string, fact: StackFact | undefined): boolean => {
-    const value = fact?.value;
-    if (value?.kind === 'dynamic_stack') return false;
-    if (value?.kind === 'stack' || value?.kind === 'stack_fragment') {
-      if (floor === undefined || value.offset < floor) floor = value.offset;
-      if (escapes.at(-1) !== id) escapes.push(id);
+  let definitions: Map<string, Expression> | undefined;
+  const choices = new Map<string, Value[]>();
+  // The lowest frame offset at or above which `value`, a stack address
+  // value, designates bytes: its exact offset; for an inexact value, the
+  // lowest over a choice among values (a block parameter every incoming edge
+  // copies, or a select), the operand of a bit copy or zero extension, the
+  // address an extract or truncation is a fragment of (as for
+  // `stack_fragment`), or the larger over the operands of a 64-bit bitwise
+  // `or` (x | y >= x as unsigned address bits). Undefined when an origin is
+  // not such a value.
+  const lowest = (value: Value, seen: Set<string>): bigint | undefined => {
+    context.checkpoint(1);
+    const fact = stack.values.get(value.id)?.value;
+    if (fact?.kind === 'stack' || fact?.kind === 'stack_fragment') return fact.offset;
+    if (fact?.kind !== 'dynamic_stack' || seen.has(value.id) || seen.size >= 64) return undefined;
+    seen.add(value.id);
+    if (!definitions) {
+      definitions = new Map();
+      const edges = new Map<string, number>();
+      for (const { transfer } of transfers) {
+        context.checkpoint(1 + transfer.copies.length);
+        edges.set(transfer.target, (edges.get(transfer.target) ?? 0) + 1);
+        for (const copy of transfer.copies) {
+          const list = choices.get(copy.destination.id) ?? [];
+          list.push(copy.source);
+          choices.set(copy.destination.id, list);
+        }
+      }
+      for (const block of blocks.values()) {
+        context.checkpoint(1 + block.statements.length);
+        for (const node of block.statements)
+          if (node.kind === 'assign') definitions.set(node.result.id, node.expression);
+        for (const parameter of block.parameters)
+          if (choices.get(parameter.id)?.length !== edges.get(block.id))
+            choices.delete(parameter.id);
+      }
     }
+    const among = (values: readonly Value[]): bigint | undefined => {
+      let low: bigint | undefined;
+      for (const choice of values) {
+        const offset = lowest(choice, seen);
+        if (offset === undefined) return undefined;
+        if (low === undefined || offset < low) low = offset;
+      }
+      return low;
+    };
+    const sources = choices.get(value.id);
+    if (sources) return among(sources);
+    const expression = definitions.get(value.id);
+    if (expression?.kind === 'select') return among([expression.when_true, expression.when_false]);
+    if (
+      (expression?.kind === 'cast' &&
+        (expression.op === 'bitcast' ||
+          expression.op === 'zero_extend' ||
+          expression.op === 'truncate')) ||
+      expression?.kind === 'extract'
+    )
+      return lowest(expression.value, seen);
+    if (expression?.kind === 'integer' && expression.op === 'or' && bitWidth(value.type) === 64) {
+      const left = lowest(expression.left, seen),
+        right = lowest(expression.right, seen);
+      return left === undefined || (right !== undefined && right > left) ? right : left;
+    }
+    return undefined;
+  };
+  const escape = (id: string, fact: StackFact | undefined, value?: Value): boolean => {
+    const escaped = fact?.value;
+    let offset: bigint | undefined;
+    if (escaped?.kind === 'stack' || escaped?.kind === 'stack_fragment') offset = escaped.offset;
+    else if (escaped?.kind === 'dynamic_stack') offset = value && lowest(value, new Set());
+    else return true;
+    if (offset === undefined) return false;
+    if (floor === undefined || offset < floor) floor = offset;
+    if (escapes.at(-1) !== id) escapes.push(id);
     return true;
   };
   const preserved = new Set(source.abi.preserved.map((register) => register.root));
@@ -373,18 +449,23 @@ export function createOutgoingStackSlots(
   // variadic convention recorded with its call, its named registers (the
   // observed prefix) and its anonymous stack slots only: a stack address in
   // another register at its call reaches nothing. False when the boundary has
-  // no snapshot or hands out an inexact stack address.
-  const bounded = (id: string): boolean => {
+  // no snapshot or hands out an unbounded stack address. Snapshot rows follow
+  // the boundary's register inputs (`inputs`).
+  const bounded = (id: string, inputs?: readonly RegisterBinding[]): boolean => {
     const callee = inferred.get(id),
       named = callee?.variadic && callee.parameters,
       registers = stack.snapshots.get(id)?.registers;
     return (
       registers?.every(
-        (row) =>
+        (row, index) =>
           row.register.root === source.abi.stack_pointer.root ||
           preserved.has(row.register.root) ||
           (named && !named.some((register) => register.root === row.register.root)) ||
-          escape(id, row.fact),
+          escape(
+            id,
+            row.fact,
+            inputs?.[index]?.register.id === row.register.id ? inputs[index]!.value : undefined,
+          ),
       ) ?? false
     );
   };
@@ -393,9 +474,12 @@ export function createOutgoingStackSlots(
     for (const node of block.statements) {
       context.checkpoint(1);
       if (node.kind === 'store') {
-        if (!escape(node.id, stack.values.get(node.value.id))) return null;
+        if (!escape(node.id, stack.values.get(node.value.id), node.value)) return null;
         stores.set(node.id, node);
-      } else if ((node.kind === 'call' || node.kind === 'unknown_effect') && !bounded(node.id))
+      } else if (
+        (node.kind === 'call' || node.kind === 'unknown_effect') &&
+        !bounded(node.id, node.register_inputs)
+      )
         return null;
     }
     if (block.control.kind === 'indirect' && block.control.tail_call && !bounded(block.control.id))
