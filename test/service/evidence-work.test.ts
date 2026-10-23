@@ -1,9 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createOperationContext, entityIdentity, fingerprint } from '../../src/core/index.js';
+import {
+  createOperationContext,
+  entityIdentity,
+  fingerprint,
+  provenanceCoverage,
+  type Evidence,
+} from '../../src/core/index.js';
 import { integer } from '../../src/ir/index.js';
 import type { Expression, Value } from '../../src/ir/index.js';
 import {
+  boundedEvidence,
   emissionEvidenceReferences,
   evidenceReferences,
 } from '../../src/service/analysis/catalog.js';
@@ -100,4 +107,85 @@ test('typed emission closure reads the cited evidence table without scanning sem
       ),
     { code: 'resource_limit' },
   );
+});
+
+test('more than 10,000 cited proofs publish a closed catalog within its bounds and count the omitted references', () => {
+  const proof = (name: string, derived_from: string[] = []): Evidence => ({
+    id: `evidence_${fingerprint(name)}`,
+    origin: { kind: 'analysis', analyzer: 'open-decomp/test', version: '1', rule: 'catalog bound' },
+    claim: name,
+    derived_from,
+    conflicts_with: [],
+    revision: 1,
+  });
+  const base = proof('base');
+  // Every type citation derives from the shared base proof: a closure, not a flat list.
+  const cited = Array.from({ length: 12_000 }, (_, index) => proof(`cited-${index}`, [base.id]));
+  const diagnostic = proof('diagnostic');
+  const emissionProofs = Array.from({ length: 4 }, (_, index) => proof(`emission-${index}`));
+  const available = [base, diagnostic, ...cited, ...emissionProofs];
+  const types = Array.from({ length: 6 }, (_, index) => ({
+    id: entityIdentity(slice, 'type', `bounded-${index}`),
+    definition: { kind: 'integer' as const, bits: 32, signed: false },
+    source: 'analysis' as const,
+    status: 'established' as const,
+    // The first type cites 2,000 proofs, past the 1,000 a stored catalog type holds.
+    evidence_ids: cited.slice(index * 2000, (index + 1) * 2000).map((item) => item.id),
+  }));
+  const store = { readEvidence: (): Evidence[] => [] };
+  const input = {
+    store,
+    revision: 1,
+    available,
+    context: createOperationContext(),
+    types,
+    optional: [],
+    required: [{ evidence_ids: [diagnostic.id] }],
+    emission: { evidence: emissionProofs.map((item) => item.id) },
+  };
+  // The unbounded path refuses the same references: the catalog bound is real.
+  assert.throws(() => evidenceReferences([types, input.required], createOperationContext()), {
+    code: 'resource_limit',
+  });
+  const bounded = boundedEvidence(input);
+  const published = new Map(bounded.evidence.map((item) => [item.id, item]));
+  assert.ok(published.size <= 10_000);
+  assert.ok(published.has(diagnostic.id) && published.has(base.id));
+  assert.equal(bounded.emission, true);
+  for (const item of emissionProofs) assert.ok(published.has(item.id));
+  // Closed: every published proof's dependencies are published.
+  for (const item of bounded.evidence)
+    for (const parent of [...item.derived_from, ...item.conflicts_with])
+      assert.ok(published.has(parent));
+  let kept = 0;
+  for (const [index, record] of bounded.types.entries()) {
+    assert.equal(record.id, types[index]!.id);
+    assert.ok(record.evidence_ids.length <= 1000);
+    // A kept citation is a prefix of the original citations and resolves.
+    assert.deepEqual(
+      record.evidence_ids,
+      types[index]!.evidence_ids.slice(0, record.evidence_ids.length),
+    );
+    for (const id of record.evidence_ids) assert.ok(published.has(id));
+    kept += record.evidence_ids.length;
+  }
+  assert.equal(bounded.omitted, 12_000 - kept);
+  assert.ok(bounded.omitted > 2_000);
+  // Deterministic: the same records give the same publication.
+  assert.deepEqual(boundedEvidence({ ...input, context: createOperationContext() }), bounded);
+  const coverage = provenanceCoverage([
+    { kind: 'evidence', reason: 'output_limit', omitted: bounded.omitted },
+  ]);
+  assert.equal(coverage.state, 'partial');
+  assert.deepEqual(coverage.reasons, [
+    `output_limit: ${bounded.omitted} proof references omitted; the pseudocode text is complete`,
+  ]);
+  // Within the bounds nothing changes: the closure of every cited proof.
+  const small = boundedEvidence({
+    ...input,
+    context: createOperationContext(),
+    types: [{ ...types[1]!, evidence_ids: types[1]!.evidence_ids.slice(0, 10) }],
+  });
+  assert.equal(small.omitted, 0);
+  assert.equal(small.evidence.length, 10 + 1 + 1 + emissionProofs.length);
 });

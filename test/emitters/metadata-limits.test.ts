@@ -17,6 +17,7 @@ import { structureControlFlow } from '../../src/presentation/index.js';
 import { emitC } from '../../src/emitters/c/index.js';
 import { emitPythonLike } from '../../src/emitters/python-like/index.js';
 import { image, provenance, slice } from '../ir/support.js';
+import { execute } from './c/support.js';
 
 const i32 = integer(32);
 
@@ -87,6 +88,64 @@ for (const language of ['c-like', 'python-like'] as const)
       emissionSchema.parse(encodeEmission(bounded.emission));
     });
   });
+
+for (const language of ['c-like', 'python-like'] as const)
+  for (const view of ['source', 'checked'] as const)
+    test(`${language} ${view}: a render the remaining work cannot pay with metadata prints the identical text first, omitted for budget`, () => {
+      const emit = language === 'c-like' ? emitC : emitPythonLike;
+      const options = { ...DEFAULT_ANALYSIS_OPTIONS, emitter: language, view };
+      const body = fixture(24);
+      const unbounded = createOperationContext();
+      const full = emit({ function: body }, options, unbounded);
+      assert.equal(full.emission.omitted, undefined);
+      assert.ok(full.emission.mappings.length > 0);
+      // Oracle: 1 + (2 + 3 + ... + 25).
+      assert.deepEqual(execute(full.emission).values, [325n]);
+      const work = unbounded.consumedWork!();
+      const chosen = new Set<string>();
+      for (
+        let budget = Math.floor(work / 8);
+        budget <= work * 64;
+        budget = Math.ceil(budget * 1.1)
+      ) {
+        let bounded;
+        try {
+          bounded = emit(
+            { function: body },
+            options,
+            createOperationContext({ budget: { work: budget } }),
+          );
+        } catch (error) {
+          assert.equal((error as { code?: string }).code, 'resource_limit');
+          continue;
+        }
+        // Every rendered text is the full render's text; only metadata may be absent.
+        assert.equal(bounded.emission.text, full.emission.text);
+        assert.deepEqual(execute(bounded.emission).values, [325n]);
+        if (bounded.emission.omitted === undefined) {
+          assert.deepEqual(bounded.emission.mappings, full.emission.mappings);
+          chosen.add('full');
+          continue;
+        }
+        assert.deepEqual(
+          bounded.emission.omitted.map((item) => [item.kind, item.reason]),
+          [
+            ['mappings', 'budget'],
+            ['inferences', 'budget'],
+            ['requirements', 'budget'],
+          ],
+        );
+        assert.equal(bounded.emission.mappings.length, 0);
+        emissionSchema.parse(encodeEmission(bounded.emission));
+        assert.match(
+          provenanceCoverage(bounded.emission.omitted).reasons[0]!,
+          /^budget: \d+ source mappings omitted; the pseudocode text is complete$/,
+        );
+        chosen.add('text');
+      }
+      // Both choices occur: the text renders first below the full render's work.
+      assert.deepEqual([...chosen].sort(), ['full', 'text']);
+    });
 
 describe('shedding delivered metadata', () => {
   const body = fixture(24);
