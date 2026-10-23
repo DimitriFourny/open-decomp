@@ -1193,7 +1193,7 @@ Loader-bound import slots (Mach-O GOT/chained-fixup binds, ELF GLOB_DAT, PE IAT;
 lazy-bound slots or stub entries) carry `SourceAddress.import`. In the source view a
 pointer-width read of such a slot is the imported symbol's address (`&sym`) and a
 read through it is the symbol itself (`sym`), declared once with a compact comment
-(`import from <library basename>`) and the bind records as evidence. The declared type is
+(a `/* import <native name> */` comment only when the native symbol differs from the printed name or its Mach-O `_`-prefixed form; the Python-like `import_view` names the library and native symbol as arguments) and the bind records, which carry the library, as evidence. The declared type is
 the header-declared type when the library catalog knows the variable, otherwise the
 width of the accesses seen; a function that writes the
 slot keeps explicit memory accesses. Python-like declares them with `import_view`.
@@ -1249,7 +1249,7 @@ C source-view integer locals take a signed or narrow type by conversion cost (`l
 
 Synthetic source structure views use deterministic `struct_N` names, unified by
 observed member types and offsets within the function. Their C typedefs expose
-`f_<hex offset>` members and explicit byte gaps, with a `/* partial; N fns */` note (`partial`: only the members the text uses; `N fns`: merged from that many functions; conflicts are listed): a function declares only the members its text accesses (the inline body omits the byte gaps: a member named `field_0xOFFSET` states its own offset, recorded as the `compact_struct_members` presentation rule with the omitted gaps; the access-stride comment states the element size instead of a trailing pad; an Objective-C ivar, whose name carries no offset, keeps its pad; `structures: external` declarations and `types.h` keep every gap as a `pad_0xOFFSET` member; a structure the text never accesses stays an incomplete typedef), the image-wide layout lives in the types view / `types.h`. `observed_struct_layout` records nonoverlap and exact
+`f_<hex offset>` members and explicit byte gaps, with no note when the layout merely omits unaccessed members (every inline body is partial by construction) and a `/* conflicts with X, Y */` note when the image-wide layouts conflict: a function declares only the members its text accesses (the inline body omits the byte gaps: a member named `field_0xOFFSET` states its own offset, recorded as the `compact_struct_members` presentation rule with the omitted gaps; the access-stride comment states the element size instead of a trailing pad; an Objective-C ivar, whose name carries no offset, keeps its pad; `structures: external` declarations and `types.h` keep every gap as a `pad_0xOFFSET` member; a structure the text never accesses stays an incomplete typedef), the image-wide layout lives in the types view / `types.h`. `observed_struct_layout` records nonoverlap and exact
 width checks and a target-layout ABI requirement; overlapping, unsupported or
 budget-exhausted layouts stay opaque. Nested pointer types retain their complete
 declaration closure. Proven scalar array strides produce array members without
@@ -1301,7 +1301,7 @@ Arithmetic, narrowing and folding candidates keep the retained-original fallback
 The source C renderer emits `extern` declarations only for direct calls with an
 established prototype (library, debug or recovered source signatures, including variadic
 tails). A call interface observed only at its call sites is not declared: the call prints
-it, and an open list is stated once per function on the `open arity (calls show proven args
+it, and an open list is stated once per function on the `open arity (proven args
 only): f, g` comment line (both dialects) while the calls print only their proven
 arguments. Declarations never close an unknown argument remainder or manufacture an
 authored prototype; exhausted `call_declaration` records leave the call undeclared.

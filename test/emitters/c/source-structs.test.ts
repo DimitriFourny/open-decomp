@@ -482,7 +482,9 @@ for (const indexed of [false, true, 'shared', 'array'] as const)
       revision: 1,
     });
     const output = emit(ssa, { types, source: { abi: sysvAMD64Abi, callees: [], addresses: [] } });
-    assert.match(output.emission.text, /\/\* partial\b[^*]*\*\/\nstruct /);
+    // A body is partial by construction: it carries no note unless layouts conflict.
+    assert.match(output.emission.text, /^struct \w+ \{/m);
+    assert.doesNotMatch(output.emission.text, /partial/);
     assert.match(output.emission.text, /uint8_t field_0x4;/);
     assert.match(output.emission.text, /uint32_t field_0x18(?:\[\])?;/);
     assert.match(output.emission.text, indexed === true ? /\]\.field_0x18/ : /->field_0x18/);
@@ -590,7 +592,8 @@ for (const mixed of [false, true])
     const output = emit(ssa, { types, source: { abi: sysvAMD64Abi, callees: [], addresses: [] } });
     const text = output.emission.text;
     if (mixed) {
-      assert.match(text, /\/\* partial\b[^*]*\*\/\nstruct /);
+      assert.match(text, /^struct \w+ \{/m);
+      assert.doesNotMatch(text, /partial/);
       assert.match(text, /->field_0x8/);
     } else {
       assert.doesNotMatch(text, /struct_[0-9a-f]+|->field_0x/);

@@ -61,12 +61,13 @@ for (const language of ['c-like', 'python-like'] as const) {
     const text = output.emission.text;
     assert.doesNotMatch(text, /data_address/);
     if (language === 'c-like') {
-      assert.match(text, /^extern uint64_t __stderrp;/m);
+      // The bind record carries the library: the declaration prints no comment for it.
+      assert.match(text, /^extern uint64_t __stderrp;$/m);
       assert.match(text, /return __stderrp;/);
     } else {
       assert.match(
         text,
-        /__stderrp = import_view\("\/usr\/lib\/libSystem\.B\.dylib", "___stderrp", "uint64_t"\)/,
+        /__stderrp = import_view\("\/usr\/lib\/libSystem\.B\.dylib", "___stderrp", "uint64_t"\)$/m,
       );
       assert.match(text, /return __stderrp\[0\]/);
     }
