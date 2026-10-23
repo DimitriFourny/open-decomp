@@ -453,7 +453,7 @@ Files that several items touch:
 
 ### K5: Writable import slots are program storage; interior addresses are named after their symbol
 
-- [ ] **Problem:**
+- [x] **Done** (`wt/rm4-k5`; lane `od-rm4-k5` at the branch point vs `od-main-bf6f43f`: exactly 21 texts changed, all SQLite: `verifyDbFile` and `unixSync` load the `aSyscall` slot and call through it (`value0 = (opaque_1*)aSyscall_0x80;`, declaration `/* VA 0x100169580, aSyscall+0x80, initially fstat */`; no `fstat`/`stat`/`fcntl` import fold), and 20 functions rename all 212 `data_1001…` names to `sqlite3Config_0x…`, `pcache1_g_0x…`, `sqlite3BuiltinFunctions_0x…`, `aSyscall_0x…`, `memdb_vfs_0x…`, `mem0_0x10`, `sqlite3azCompileOpt_0x…` (212 → 0); brotli texts byte-identical; states unchanged. Checked view: `data_address` identity becomes `"_sqlite3Config+0x80"`, and the three former binding slots lose their `0x8` extent (`"unknown"`). Work: `isDate` +73, `sqlite3Fts3Incrmerge` +1,288 (the per-function `symbol_relative_name` record). reconstruction 88, C emitter 99, Python-like 96.) **Problem:**
   - **Soundness bug.** Three calls through SQLite's writable `aSyscall[i].pCurrent` print as calls to `fstat`, `stat` and `fcntl` (`verifyDbFile`: `value0 = (uintptr_t)fstat; ((uint64_t (*)(…))value0)(…)`; `unixSync`). SQLite's `unixSetSystemCall` rewrites those slots.
   - **Naming.** 212 `data_1001…` names are interior addresses of named Mach-O symbols: `_sqlite3Config` 156, `_sqlite3BuiltinFunctions` 22, `_pcache1_g` 22, … They include the 49 mutex-method calls the grader misread in 4 claims ("invokes a cleanup trigger through data_100168d70").
   - **Root cause:**
@@ -635,7 +635,7 @@ Files that several items touch:
 
 ### A1: Unlifted SIMD&FP data-processing encodings get a bounded effect
 
-- [ ] **Problem.** `isDate`, `unicodeNext` and `sqlite3VdbeDisplayComment` print their callee-saved saves as stores (`frame.local_a0 = unknown_value("bits64_t", "non-argument entry register");`, 46 lines). They also lose every FP presentation and frame promotion. They are the three costliest SIMD users in the corpus: `isDate` is 18,789 tokens vs Ghidra's 6,521.
+- [x] **Problem.** `isDate`, `unicodeNext` and `sqlite3VdbeDisplayComment` print their callee-saved saves as stores (`frame.local_a0 = unknown_value("bits64_t", "non-argument entry register");`, 46 lines). They also lose every FP presentation and frame promotion. They are the three costliest SIMD users in the corpus: `isDate` is 18,789 tokens vs Ghidra's 6,521. _Done (`wt/rm4-a1`, lane `od-rm4-a1` vs `od-main-307644d`): only the 3 acceptance texts change; `isDate` 11,108 → 7,924 lexical tokens (gotos 96 → 56, `requirement_predicate` 27 → 0, `fp_*` calls 21 → 0, save lines 20 → 0), checked 273,167 → 238,427 B; `sqlite3VdbeDisplayComment` 2,141 → 1,580, save lines 12 → 0, no `unknown_value`; `unicodeNext` 2,886 → 2,850 (memory-free SIMD effects, `INS_asimdins_IR_r` now lifted; its ST1 store is A2). GP-reading forms stay unbounded (docs/ARM64.md)._
   - **Root cause:**
     - The unlifted encodings `FMADD_D_floatdp3`, `FCVTZS_asisdmisc_R`, `FCCMP_D_floatccmp`, `INS_asimdins_*`, `USHL_asimdsame_only`, `XTN_asimdmisc_N` and `UZP1_asimdperm_only` fall back to `unknownClobbers` (`src/lifters/arm64/semantics.ts:58-76`, `index.ts:339-347`). That clobber set covers x0–x30, **SP**, v0–v31, **FPCR** and all memory.
     - `source-stack.ts:1098-1101` treats any `unknown_effect` as a frame escape, so the save elision never runs: there is no `frame_save` record in these functions.
@@ -814,7 +814,7 @@ Files that several items touch:
 
 ### E6: Move proven non-faulting reloads across loads
 
-- [ ] **Problem.** `-O0` `matrix_alias` (Mach-O, ELF, PE) prints `value0 = *address; *address_1 = *address_1 ^ value0; value1 = *address; return value1 + *address_1;`. Both judges call these "redundant temporaries". There are about 12 such sites in the corpus.
+- [x] (Done: `nonfaulting_load_order` + `nonfaulting_reload`; `matrix_alias` -O0 Mach-O/ELF/PE print `*address_1 = *address_1 ^ *address; return *address + *address_1;`, plus `vdbeMemAddTerminator` and `fts5FlushSecureDelete`: 5 texts changed, checked view identical; executed tests in both dialects.) **Problem.** `-O0` `matrix_alias` (Mach-O, ELF, PE) prints `value0 = *address; *address_1 = *address_1 ^ value0; value1 = *address; return value1 + *address_1;`. Both judges call these "redundant temporaries". There are about 12 such sites in the corpus.
   - **Root cause:** `source-inlining.ts:449-468` refuses to move a load across any intervening independent load (the fault-order premise, `:90-101`), even when the moved load's exact address was just accessed.
   - **Change:**
     - A load whose exact address range was accessed on every path from a dominating access, with no call, unknown effect or volatile access in between, may move across non-volatile loads (never across stores or calls).

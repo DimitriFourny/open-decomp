@@ -20,6 +20,17 @@ export interface GlobalObject {
   readonly stem: string;
   /** Native linkage name, kept in identifier metadata. */
   readonly native_name?: string;
+  /** No symbol covers the base: it lies `offset` bytes after the preceding object
+   * symbol (C spelling `symbol`). The renderer may name it `symbol_0x<offset>`
+   * under a `symbol_relative_name` record; the extent stays unknown. */
+  readonly relative?: {
+    readonly symbol: string;
+    readonly offset: bigint;
+    readonly evidence_ids: readonly string[];
+  };
+  /** C spelling of the import whose exact address the loader stores in this
+   * writable pointer slot at load time; program code may rewrite it. */
+  readonly initial_import?: string;
   /** `scalar`: one element at offset 0; `array`: unbounded elements of one
    * scalar type; `bytes`: bytes, every access an explicit cast dereference. */
   shape: 'scalar' | 'array' | 'bytes';
@@ -115,6 +126,22 @@ export function planGlobals(
           item.name ??
           (item.import ? `got_${item.import.source_name}` : `data_${hex(base.address.value)}`),
         ...(item.name === undefined ? {} : { native_name: item.name }),
+        ...(item.symbol_relative?.source_name !== undefined &&
+        item.source_name === undefined &&
+        item.name === undefined &&
+        !item.import &&
+        base.offset === 0n
+          ? {
+              relative: {
+                symbol: item.symbol_relative.source_name,
+                offset: item.symbol_relative.offset,
+                evidence_ids: item.symbol_relative.evidence_ids,
+              },
+            }
+          : {}),
+        ...(item.initial_import !== undefined && base.offset === 0n
+          ? { initial_import: item.initial_import }
+          : {}),
         shape: 'bytes',
         element: { bits: 8, float: false },
       };

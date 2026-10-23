@@ -494,7 +494,12 @@ export class Renderer {
   private readonly globals: GlobalPlan;
   private readonly usedGlobals = new Map<
     string,
-    { readonly object: GlobalObject; readonly name: string }
+    {
+      readonly object: GlobalObject;
+      readonly name: string;
+      /** `symbol+0x<offset>` when the name is relative to a preceding symbol. */
+      readonly relative?: string;
+    }
   >();
   private readonly sourceValueTypes = new Map<string, string>();
   /** Single call results, by result value id (their library return spelling). */
@@ -2342,7 +2347,12 @@ export class Renderer {
         'data_address',
         'Exact image-backed byte storage address: identity, original VA base, byte offset, known extent (or unknown), mutability and data kind. Returns base + offset without reading, folding, allocating or rebasing storage. Not indexing into a neighbouring literal; original memory ordering and faults remain explicit.',
         [
-          this.writer.quote(item.name ?? `data_${object.address.value.toString(16)}`),
+          this.writer.quote(
+            item.name ??
+              (item.symbol_relative && object.offset === 0n
+                ? `${item.symbol_relative.name}+0x${item.symbol_relative.offset.toString(16)}`
+                : `data_${object.address.value.toString(16)}`),
+          ),
           `0x${object.address.value.toString(16)}`,
           `0x${object.offset.toString(16)}`,
           object.byte_length === null
@@ -2418,9 +2428,40 @@ export class Renderer {
     const used = this.usedGlobals.get(global.key);
     if (used) return used.name;
     if (global.native_name !== undefined) this.names.set(global.key, global.native_name);
-    const name = this.sourceIdentifier(global.key, global.stem, global.native_name !== undefined);
-    this.usedGlobals.set(global.key, { object: global, name });
+    const relative = global.relative && this.relativeName(global.relative);
+    const name = this.sourceIdentifier(
+      global.key,
+      relative?.stem ?? global.stem,
+      global.native_name !== undefined,
+    );
+    this.usedGlobals.set(global.key, {
+      object: global,
+      name,
+      ...(relative ? { relative: relative.text } : {}),
+    });
     return name;
+  }
+
+  /** `symbol_0x<offset>` for storage no symbol covers, named after the preceding
+   * object symbol of its section (`symbol+0x<offset>` for comments), when the
+   * `symbol_relative_name` record is admitted. One record per function states the
+   * rule; the declaration's mapping carries each symbol's evidence. */
+  private relativeName(relative: {
+    readonly symbol: string;
+    readonly offset: bigint;
+  }): { readonly stem: string; readonly text: string } | undefined {
+    const offset = `0x${relative.offset.toString(16)}`;
+    return this.localValidation.presentation(
+      'symbol_relative_name',
+      this.input.function.id,
+      'image storage that no symbol or data record covers is named after the nearest preceding object symbol of its section plus the exact byte offset, when no other symbol or data record starts in between; naming only, the extent stays unknown',
+    )
+      ? {
+          stem: `${relative.symbol}_${offset}`,
+          // Comment text: an asserted name cannot close the comment.
+          text: `${relative.symbol.replace(/\*\//g, '* /')}+${offset}`,
+        }
+      : undefined;
   }
 
   /** Integer address of an image object (or of an imported object, offset 0). */
@@ -3850,9 +3891,14 @@ export class Renderer {
     if (!this.usedGlobals.size) return;
     const python = this.language === 'python-like';
     const lines: string[] = [],
-      spans: { readonly object: GlobalObject; readonly start: number; readonly end: number }[] = [];
+      spans: {
+        readonly object: GlobalObject;
+        readonly start: number;
+        readonly end: number;
+        readonly relative: boolean;
+      }[] = [];
     let offset = at;
-    for (const { object: global, name } of this.usedGlobals.values()) {
+    for (const { object: global, name, relative } of this.usedGlobals.values()) {
       this.context.checkpoint(1);
       const declared = global.declared;
       if (declared && !python) this.registerTypedefs(declared.type);
@@ -3878,8 +3924,12 @@ export class Renderer {
         ? `import${native === name || native === `_${name}` ? '' : ` ${plain(native!)}`}${global.import.library === null ? '' : ` from ${plain(global.import.library.slice(global.import.library.lastIndexOf('/') + 1))}`}`
         : [
             ...(python || name.split('_').includes(hex) ? [] : [`VA 0x${hex}`]),
+            ...(relative === undefined ? [] : [plain(relative)]),
             ...(global.object.byte_length === null ? [] : [`${global.object.byte_length} bytes`]),
             ...(global.object.kind === 'bytes' ? [] : [global.object.kind.replace('_', ' ')]),
+            ...(global.initial_import === undefined
+              ? []
+              : [`initially ${plain(global.initial_import)}`]),
           ].join(', ');
       const comment = where === '' ? '' : python ? `  # ${where}` : ` /* ${where} */`;
       if (python) {
@@ -3903,7 +3953,12 @@ export class Renderer {
             : `extern ${global.object.mutable || global.import ? '' : 'const '}${type} ${name}${global.shape === 'scalar' ? '' : '[]'};${comment}`,
         );
       const length = lines.slice(first).reduce((sum, line) => sum + line.length + 1, 0);
-      spans.push({ object: global, start: offset, end: offset + length });
+      spans.push({
+        object: global,
+        start: offset,
+        end: offset + length,
+        relative: relative !== undefined,
+      });
       offset += length;
     }
     const delta = insert(at, lines);
@@ -3916,6 +3971,7 @@ export class Renderer {
         [
           span.object.object.evidence_ids,
           ...(span.object.import ? [span.object.import.evidence_ids] : []),
+          ...(span.relative && span.object.relative ? [span.object.relative.evidence_ids] : []),
         ],
         span.end,
       );
@@ -3937,6 +3993,7 @@ export class Renderer {
       readonly first: string;
       readonly address: string;
       readonly table: IndexedDataAccess;
+      readonly relative: string | undefined;
       reach: bigint;
     }
     const groups = new Map<string, Group>();
@@ -3954,8 +4011,22 @@ export class Renderer {
       )
         continue;
       const key = `${this.addressKey(object.address)}:u${table.bits}`;
+      const symbolRelative = table.data.symbol_relative;
+      const relative =
+        symbolRelative?.source_name !== undefined &&
+        table.data.source_name === undefined &&
+        table.data.name === undefined &&
+        object.offset === 0n
+          ? this.relativeName({
+              symbol: symbolRelative.source_name,
+              offset: symbolRelative.offset,
+            })
+          : undefined;
       const stem =
-        table.data.source_name ?? table.data.name ?? `data_${object.address.value.toString(16)}`;
+        table.data.source_name ??
+        table.data.name ??
+        relative?.stem ??
+        `data_${object.address.value.toString(16)}`;
       if (table.data.name !== undefined) this.names.set(key, table.data.name);
       const name = this.sourceIdentifier(key, stem);
       this.dataTables.set(id, { ...table, name });
@@ -3968,6 +4039,7 @@ export class Renderer {
           first: id,
           address: node.address.id,
           table,
+          relative: relative?.text,
           reach: table.last + 1n,
         });
     }
@@ -3992,19 +4064,29 @@ export class Renderer {
         if (this.language === 'c-like')
           this.writer.line(
             0,
-            `extern ${object.mutable ? '' : 'const '}uint${table.bits}_t ${group.name}[]; /* VA 0x${hex}, ${extent} */`,
+            `extern ${object.mutable ? '' : 'const '}uint${table.bits}_t ${group.name}[]; /* VA 0x${hex}, ${group.relative === undefined ? '' : `${group.relative}, `}${extent} */`,
           );
         else
           this.writer.line(
             0,
-            `${group.name} = memory_view(0x${hex}, "uint${table.bits}_t", ${object.mutable ? 'True' : 'False'})  # ${extent}`,
+            `${group.name} = memory_view(0x${hex}, "uint${table.bits}_t", ${object.mutable ? 'True' : 'False'})  # ${group.relative === undefined ? '' : `${group.relative}, `}${extent}`,
           );
         this.writer.helper(
           this.language === 'c-like' ? group.name : 'memory_view',
           'Image-backed indexed storage view at the declared VA; no allocation or invented extent. Index units are the declared scalar width. Reads retain original byte order, aliasing and faults; no Python sequence bounds or negative-index rebasing.',
         );
       }
-      this.mapped(node, start, [group.address], [object.evidence_ids]);
+      this.mapped(
+        node,
+        start,
+        [group.address],
+        [
+          object.evidence_ids,
+          ...(group.relative !== undefined && table.data.symbol_relative
+            ? [table.data.symbol_relative.evidence_ids]
+            : []),
+        ],
+      );
     }
   }
 
@@ -7972,6 +8054,19 @@ export class Renderer {
       )
     )
       for (const site of rematerialized) candidates.delete(site.node.result.id);
+    const reloads = [...candidates.values()].filter((site) => site.nonfaulting);
+    if (
+      reloads.length &&
+      !this.localValidation.presentation(
+        'nonfaulting_load_order',
+        subject,
+        'a nonvolatile load of an address range that a printed nonvolatile access of the same structural address and at least its width reached (through its block and single-predecessor blocks, with only assignments, register reads and nonvolatile loads/stores in between) expands at its unconditional same-block single use across independent nonvolatile loads, never across a store, call, unknown effect, fence or volatile access; it cannot fault, so the faults of the loads it crosses keep their order, and loads change no memory',
+        reloads.map(({ node }) => node.id),
+      )
+    ) {
+      calls = new Map();
+      for (const site of reloads) candidates.delete(site.node.result.id);
+    }
     if (
       candidates.size &&
       this.localValidation.presentation(
@@ -7981,6 +8076,12 @@ export class Renderer {
         [...candidates.values()].map(({ node }) => node.id),
       )
     ) {
+      if (reloads.some((site) => candidates.has(site.node.result.id)))
+        this.localValidation.requireAbi(
+          'nonfaulting_reload',
+          [...new Set(reloads.map(({ anchor }) => anchor))].slice(0, 64),
+          'A successful access to [a, a+w) implies that a later read of it does not fault, absent an intervening call, unknown effect or volatile access: no other agent unmaps, protects or remaps those bytes in between. Each moved reload keeps its address, width and value; the checked view keeps every load at its original position.',
+        );
       for (const [id, site] of candidates) {
         this.inlined.set(id, site);
         this.inline.add(id);

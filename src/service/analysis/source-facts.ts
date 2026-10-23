@@ -864,6 +864,35 @@ function sourceAddresses(
     }
   const names = new Map<string, Set<string>>();
   const sourceNames = new Map<string, string>();
+  /** A symbol's name under its name annotations: one asserted name verbatim, none
+   * when other annotations leave it unresolved, otherwise its loader name. */
+  const symbolName = (symbol: {
+    readonly id: string;
+    readonly display_name: string | null;
+    readonly original_name: string | null;
+  }): { readonly name: string | null | undefined; readonly annotated: boolean } => {
+    const annotations = scope.store
+      .readAnnotations(symbol.id, revision)
+      .filter(
+        (annotation) => annotation.value.kind === 'name' && annotation.status !== 'retracted',
+      );
+    const asserted = new Set(
+      annotations.flatMap((annotation) =>
+        annotation.status === 'asserted' && annotation.value.kind === 'name'
+          ? [annotation.value.value]
+          : [],
+      ),
+    );
+    return {
+      name:
+        asserted.size === 1
+          ? [...asserted][0]
+          : annotations.length
+            ? undefined
+            : (symbol.display_name ?? symbol.original_name),
+      annotated: annotations.length > 0,
+    };
+  };
   const symbols = records(scope, revision, image.id, 'symbol').items.map((symbol) => {
     context.checkpoint(1);
     if (!symbol.address) return symbol;
@@ -883,28 +912,11 @@ function sourceAddresses(
         }
       }
     if (!relevant) return symbol;
-    const annotations = scope.store
-      .readAnnotations(symbol.id, revision)
-      .filter(
-        (annotation) => annotation.value.kind === 'name' && annotation.status !== 'retracted',
-      );
-    const asserted = new Set(
-      annotations.flatMap((annotation) =>
-        annotation.status === 'asserted' && annotation.value.kind === 'name'
-          ? [annotation.value.value]
-          : [],
-      ),
-    );
-    const name =
-      asserted.size === 1
-        ? [...asserted][0]
-        : annotations.length
-          ? undefined
-          : (symbol.display_name ?? symbol.original_name);
+    const { name, annotated } = symbolName(symbol);
     if (name) {
       sourceNames.set(
         `${addressKey(symbol.address)}:${name}`,
-        annotations.length ? name : cSourceName(image.target.format, name),
+        annotated ? name : cSourceName(image.target.format, name),
       );
       const key = addressKey(symbol.address),
         values = names.get(key) ?? new Set<string>();
@@ -949,7 +961,7 @@ function sourceAddresses(
     );
     names.set(key, new Set([name]));
   }
-  const slotImports = recoverImportBindings(
+  const { bindings: slotImports, initial: initialImports } = recoverImportBindings(
     image,
     candidates,
     (id) => {
@@ -984,6 +996,7 @@ function sourceAddresses(
         string_byte_length: _l,
         string_encoding: _e,
         string_start: _t,
+        symbol_relative: _r,
         ...slot
       } = recovered ?? { address };
       const object = recovered?.object;
@@ -1034,9 +1047,27 @@ function sourceAddresses(
             context,
           )
         : undefined;
+    // A relative name follows the preceding symbol's name annotations.
+    const { symbol_relative: relative, ...plain } = recovered ?? { address };
+    const relativeName =
+      relative &&
+      symbolName({ id: relative.symbol_id, display_name: null, original_name: relative.name });
+    const initial = initialImports.get(key);
     if (recovered)
       result.push({
-        ...recovered,
+        ...plain,
+        ...(relative && relativeName?.name
+          ? {
+              symbol_relative: {
+                ...relative,
+                name: relativeName.name,
+                source_name: relativeName.annotated
+                  ? relativeName.name
+                  : cSourceName(image.target.format, relativeName.name),
+              },
+            }
+          : {}),
+        ...(initial === undefined ? {} : { initial_import: initial }),
         ...(constantBytes === undefined ? {} : { constant_bytes: constantBytes }),
         ...(objectBytes === undefined ? {} : { object_bytes: objectBytes }),
         ...(name === undefined ? {} : { name }),

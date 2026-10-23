@@ -119,6 +119,26 @@ test('escaped stack pointers survive partial overwrite, reload and unknown write
   assert.equal(result.frame.aliased, true);
 });
 
+test('a memory-free unknown effect is no barrier, even for escaped stack bytes', () => {
+  for (const memory of ['none', 'unknown_read_write'] as const) {
+    const ir = builder(`stack-memory-${memory}`),
+      b = ir.block('entry');
+    const slot = b.int('sub', b.readRegister(darwin.stack_pointer), b.constant(i64, 16n));
+    // The slot's address escapes to global memory before the effect.
+    b.store(b.constant(i64, 0x5000n), slot);
+    b.store(slot, b.constant(i64, 0x1234n));
+    b.unknown('Unsupported SIMD instruction', { registers: [], flags: [], memory });
+    b.return([b.load(i64, slot)]);
+    const result = recoverStack(ssa(ir.finish(b, [i64])), darwin, createOperationContext());
+    const read = result.accesses.find((access) => access.kind === 'read')!;
+    assert.equal(result.frame.escaped, true);
+    if (memory === 'none') {
+      assert.deepEqual(read.value.value, { kind: 'constant', bits: 0x1234n });
+      assert.equal(read.value.initialization, 'initialized');
+    } else assert.equal(read.value.value.kind, 'unknown');
+  }
+});
+
 test('call snapshots retain pre-call bytes and invalidate them only afterward', () => {
   const ir = builder('stack-call-time'),
     b = ir.block('entry');
