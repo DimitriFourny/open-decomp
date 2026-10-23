@@ -1751,8 +1751,12 @@ export function planSource(
       : undefined;
   const incomingParameters = new Map<bigint, Value>(),
     formalStackOffsets = new Map<string, bigint>();
+  const environmentWriters = new Set(
+    evidence.callees.flatMap((callee) => (callee.fp_environment_writer ? [callee.call_id] : [])),
+  );
   const registerOutputs = new Map<string, readonly RegisterBinding[]>();
   const presentation: SourcePresentation = {
+    ...(environmentWriters.size ? { fp_environment_writers: environmentWriters } : {}),
     inferred: !functionSignature,
     parameter_names: parameterNames,
     return_type: returnType,

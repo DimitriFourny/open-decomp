@@ -104,6 +104,10 @@ export interface InferredCallee {
   readonly context_assumptions?: NativeContext;
   /** Preconditions of these observations; absent means no inferred FP condition. */
   readonly requirements?: readonly 'fp_environment'[];
+  /** The callee may return with a changed FP control state: it writes it on a
+   * path to a return or tail exit (an explicit write, an opaque effect, a writer
+   * import or a writer callee). Its caller keeps its environment guards. */
+  readonly fp_environment_writer?: true;
   readonly evidence_ids: readonly string[];
 }
 export interface SourceAddress {
@@ -433,6 +437,9 @@ export interface SourcePresentation {
   readonly field_subjects?: ReadonlyMap<string, readonly string[]>;
   /** Localized preconditions and residual sites; never a blanket CFG assumption. */
   readonly requirements?: readonly Requirement[];
+  /** Calls whose callee summary is an FP environment writer
+   * (`InferredCallee.fp_environment_writer`): their caller keeps its guards. */
+  readonly fp_environment_writers?: ReadonlySet<string>;
   readonly locals: ReadonlyMap<string, SourceLocal>;
   readonly stack: SourceStackStorage | null;
   /** Source view (S4): the incoming object, when its struct formal is presented. */
