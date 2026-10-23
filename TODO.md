@@ -888,7 +888,7 @@ Files that several items touch:
   - **Acceptance:** only comment bytes change (about −14.5 KB); lexical metrics byte-identical; checked view identical.
   - **Expected effect:** Claude geomean about −0.015 [estimate].
   - **Depends on:** P2 (same function).
-  - **Done (`wt/rm4-p3`):** OD lane vs a lane of `307644d`: 137 of 235 texts change; only comment bytes (360 `/* partial… */` lines, 119 `open arity` lines shortened, 21 `import from` comments dropped, 7,676 bytes removed in total); identical after stripping comments (0 lexical diffs); coverage and failures unchanged; versions C 99, Python-like 96.
+  - **Done (`wt/rm4-p3`):** OD lane vs `od-main-66cb8fe`: 139 of 235 texts change; only comment bytes (360 `/* partial… */` lines, 119 `open arity` lines shortened, 21 `import from` comments dropped, 7,855 bytes removed in total); identical after stripping comments (0 lexical diffs); coverage and failures unchanged; versions C 106, Python-like 102.
 
 ### P4: Struct class names without another function's name
 
