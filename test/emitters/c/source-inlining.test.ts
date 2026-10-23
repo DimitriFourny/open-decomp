@@ -441,3 +441,150 @@ for (const language of ['c-like', 'python-like'] as const)
       assert.deepEqual(actual.memory, expected.memory);
     });
   });
+
+/** `*a += d; *b ^= *a; return *a + *b;` with every access a separate load. With
+ * `barrier`, a call precedes the last reload of `*a`, or the last load reads
+ * `a + 8` after only a byte store there. */
+function aliasing(barrier?: 'call' | 'narrow') {
+  const b = program(`nonfaulting-reload-${barrier ?? 'plain'}`),
+    entry = b.block('entry', [i64, i64, i64]);
+  const [first, second, delta] = entry.parameters as [Value, Value, Value];
+  entry.store(first, entry.int('add', entry.load(i64, first), delta));
+  const reload = entry.load(i64, first);
+  entry.store(second, entry.int('xor', entry.load(i64, second), reload));
+  if (barrier === 'call')
+    entry.call(
+      { kind: 'direct', address: { image_id: image, space: 'va', value: 0x4000n } },
+      [],
+      [],
+      { registers: [], flags: [], memory: 'unknown_read_write' },
+    );
+  let last = first;
+  if (barrier === 'narrow') {
+    last = entry.int('add', first, entry.constant(i64, 8n));
+    entry.store(last, entry.constant(i8, 0x5an));
+  }
+  last = entry.load(i64, last);
+  entry.return([entry.int('add', last, entry.load(i64, second))]);
+  return { input: b.finish(entry, [i64]), first, second, delta, reloads: [reload, last] };
+}
+/** Little-endian u64 cells at each address; an address absent from `words` is unmapped. */
+function words(cells: readonly (readonly [bigint, bigint])[]): Map<bigint, number> {
+  const bytes = new Map<bigint, number>();
+  for (const [address, value] of cells)
+    for (let byte = 0n; byte < 8n; byte++)
+      bytes.set(address + byte, Number((value >> (8n * byte)) & 0xffn));
+  return bytes;
+}
+
+for (const language of ['c-like', 'python-like'] as const)
+  describe(`non-faulting reloads ${language}`, () => {
+    const render = (input: SSAForm, view: 'source' | 'checked' = 'source'): EmissionResult =>
+      emit(input, { source }, language, view);
+    const mask = (1n << 64n) - 1n;
+    test('a reload of a just-accessed address moves across independent loads, also when the pointers alias', () => {
+      const { input, first, second, delta, reloads } = aliasing(),
+        output = render(input),
+        checked = render(input, 'checked'),
+        text = output.emission.text;
+      for (const reload of reloads) assert.ok(!named(output, reload), text);
+      const rules = (output.emission.local_validation ?? []).map((record) => record.rule);
+      assert.ok(rules.includes('nonfaulting_load_order'), text);
+      assert.ok(
+        output.emission.requirements?.some(
+          (requirement) =>
+            requirement.kind === 'abi_conformance' &&
+            requirement.explanation.includes('does not fault'),
+        ),
+        text,
+      );
+      const a0 = 0xfedc_ba98_7654_3210n,
+        b0 = 0x0123_4567_89ab_cdefn,
+        d = 0x1111_2222_3333_4444n;
+      for (const [left, right, expected] of [
+        // Distinct objects: *a = a0 + d; *b = b0 ^ *a; *a + *b.
+        [0x1000n, 0x2000n, ((a0 + d) & mask) + (b0 ^ ((a0 + d) & mask))],
+        // a == b: the xor clears the shared cell, which the last reload observes.
+        [0x1000n, 0x1000n, 0n],
+      ] as const) {
+        const inputs = new Map([
+          [first.id, left],
+          [second.id, right],
+          [delta.id, d],
+        ]);
+        const bytes = (): Map<bigint, number> =>
+          words(
+            left === right
+              ? [[left, a0]]
+              : [
+                  [left, a0],
+                  [right, b0],
+                ],
+          );
+        const actual = execute(output.emission, inputs, bytes()),
+          oracle = execute(checked.emission, inputs, bytes());
+        assert.deepEqual(actual.values, [expected & mask], text);
+        assert.deepEqual(actual.values, oracle.values, text);
+        assert.deepEqual(actual.memory, oracle.memory, text);
+      }
+    });
+
+    test('faults keep their order: the first access faults before any effect, a later fault after the earlier store', () => {
+      const { input, first, second, delta } = aliasing(),
+        output = render(input),
+        checked = render(input, 'checked'),
+        text = output.emission.text;
+      const inputs = new Map([
+        [first.id, 0x1000n],
+        [second.id, 0x2000n],
+        [delta.id, 5n],
+      ]);
+      // `*a` unmapped: its first load faults with nothing written.
+      for (const result of [output, checked]) {
+        const fault = execute(result.emission, inputs, words([[0x2000n, 7n]]));
+        assert.equal(fault.exit, 'fault', text);
+        assert.deepEqual(fault.events, ['load'], text);
+        assert.deepEqual(fault.memory, words([[0x2000n, 7n]]), text);
+      }
+      // `*b` unmapped: the fault follows the completed store to `*a`, and the
+      // reload of `*a` (which cannot fault) adds no fault of its own.
+      const actual = execute(output.emission, inputs, words([[0x1000n, 2n]])),
+        oracle = execute(checked.emission, inputs, words([[0x1000n, 2n]]));
+      assert.equal(actual.exit, 'fault', text);
+      assert.equal(oracle.exit, 'fault', text);
+      assert.deepEqual(actual.memory, words([[0x1000n, 7n]]), text);
+      assert.deepEqual(actual.memory, oracle.memory, text);
+      assert.deepEqual(actual.events.slice(0, 2), ['load', 'store'], text);
+      assert.ok(
+        actual.events.slice(2).every((event) => event === 'load'),
+        text,
+      );
+    });
+
+    test('a call or only a narrower access before a reload keeps it a statement', () => {
+      for (const barrier of ['call', 'narrow'] as const) {
+        const { input, first, second, delta, reloads } = aliasing(barrier),
+          output = render(input),
+          text = output.emission.text;
+        assert.ok(!named(output, reloads[0]!), `${barrier}\n${text}`);
+        assert.ok(named(output, reloads[1]!), `${barrier}\n${text}`);
+        if (barrier === 'call') continue;
+        const inputs = new Map([
+          [first.id, 0x1000n],
+          [second.id, 0x2000n],
+          [delta.id, 1n],
+        ]);
+        const bytes = (): Map<bigint, number> =>
+          words([
+            [0x1000n, 0x100n],
+            [0x1008n, 0x77n],
+            [0x2000n, 3n],
+          ]);
+        const actual = execute(output.emission, inputs, bytes()),
+          oracle = execute(render(input, 'checked').emission, inputs, bytes());
+        assert.deepEqual(actual.values, oracle.values, text);
+        assert.deepEqual(actual.memory, oracle.memory, text);
+        assert.deepEqual(actual.events, oracle.events, text);
+      }
+    });
+  });

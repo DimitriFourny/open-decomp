@@ -813,7 +813,7 @@ Files that several items touch:
 
 ### E6: Move proven non-faulting reloads across loads
 
-- [ ] **Problem.** `-O0` `matrix_alias` (Mach-O, ELF, PE) prints `value0 = *address; *address_1 = *address_1 ^ value0; value1 = *address; return value1 + *address_1;`. Both judges call these "redundant temporaries". There are about 12 such sites in the corpus.
+- [x] (Done: `nonfaulting_load_order` + `nonfaulting_reload`; `matrix_alias` -O0 Mach-O/ELF/PE print `*address_1 = *address_1 ^ *address; return *address + *address_1;`, plus `vdbeMemAddTerminator` and `fts5FlushSecureDelete`: 5 texts changed, checked view identical; executed tests in both dialects.) **Problem.** `-O0` `matrix_alias` (Mach-O, ELF, PE) prints `value0 = *address; *address_1 = *address_1 ^ value0; value1 = *address; return value1 + *address_1;`. Both judges call these "redundant temporaries". There are about 12 such sites in the corpus.
   - **Root cause:** `source-inlining.ts:449-468` refuses to move a load across any intervening independent load (the fault-order premise, `:90-101`), even when the moved load's exact address was just accessed.
   - **Change:**
     - A load whose exact address range was accessed on every path from a dominating access, with no call, unknown effect or volatile access in between, may move across non-volatile loads (never across stores or calls).
