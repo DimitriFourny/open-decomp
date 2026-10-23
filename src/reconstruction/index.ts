@@ -28,6 +28,11 @@ import type {
 import { planSource } from './source-planner.js';
 import { planSourceStack } from './source-stack.js';
 import { planVariadicStackArguments } from './source-variadic.js';
+import {
+  createOutgoingStackSlots,
+  planStackArgumentStores,
+  type OutgoingStackSlots,
+} from './source-stack-arguments.js';
 import { projectSourceConstants } from './source-data.js';
 import { recombineSourceCells } from './source-cells.js';
 import { registerOutputs } from './source-model.js';
@@ -285,29 +290,53 @@ function reconstructView(
             ? 'Objective-C selector tail closure assumes the receiver implements a non-variadic method for the selector with its image type-encoding argument classes; unresolved selectors retain their physical interface.'
             : 'Library-tail closure and its native propagation assume the established imported contract and ABI-conforming register arguments and results; unresolved or variadic targets retain their physical interface.',
         );
-  // Source view only: Darwin variadic outgoing stores become trailing arguments
-  // of the one call that consumes them (store id -> call id).
-  const variadicStores =
-    sourcePlan && sourceStack && view === 'source'
-      ? planVariadicStackArguments(
-          input,
-          blocks,
-          expressions,
-          sourcePlan.calls,
-          (id) =>
-            sourceStack.hidden.has(id) ||
-            sourceStack.locals.has(id) ||
-            sourceStack.saves.stores.has(id),
-          {
-            transfers: allTransfers,
-            copies: cellTransfers,
-            incoming: parameterSources,
-            make: sourcePlan.make,
-          },
-          localValidation,
-          context,
-        )
-      : new Map<string, string>();
+  // Source view only: outgoing stack stores a call alone observes become its
+  // arguments: Darwin variadic slots as trailing arguments, and the slots a
+  // projection already bound (`stack_argument_store`) print only as those
+  // arguments (store id -> call or tail id).
+  const argumentStores = new Map<string, string>();
+  if (sourcePlan && sourceStack && view === 'source') {
+    let outgoing: OutgoingStackSlots | null | undefined;
+    const slots = (): OutgoingStackSlots | null =>
+      outgoing === undefined
+        ? (outgoing = createOutgoingStackSlots(
+            input,
+            blocks,
+            sourcePlan.calls,
+            (id) =>
+              sourceStack.hidden.has(id) ||
+              sourceStack.locals.has(id) ||
+              sourceStack.saves.stores.has(id),
+            allTransfers,
+            context,
+          ))
+        : outgoing;
+    planVariadicStackArguments(
+      input,
+      blocks,
+      expressions,
+      sourcePlan.calls,
+      slots,
+      {
+        transfers: allTransfers,
+        copies: cellTransfers,
+        incoming: parameterSources,
+        make: sourcePlan.make,
+      },
+      localValidation,
+      context,
+    );
+    planStackArgumentStores(
+      sourcePlan.stackArguments,
+      sourcePlan.calls,
+      sourcePlan.tails,
+      BigInt(input.source!.abi.layout.pointer_bits / 8),
+      slots,
+      localValidation,
+      context,
+    );
+    for (const [store, call] of outgoing?.consumed ?? []) argumentStores.set(store, call);
+  }
   let normalizationDemand: SourceExpressionDemand | undefined;
   if (sourcePlan) {
     // These roots deliberately overapproximate the liveness roots below, before
@@ -852,7 +881,7 @@ function reconstructView(
         node.kind === 'assign' ||
         constantLoads.has(node.id) ||
         sourceStack?.hidden.has(node.id) ||
-        variadicStores.has(node.id) ||
+        argumentStores.has(node.id) ||
         (node.kind === 'load' && sourceStack?.returnAddressLoads.has(node.result.id))
       )
         continue;
@@ -1157,8 +1186,8 @@ function reconstructView(
     for (const node of block.statements)
       if (!mapped.has(node.id)) {
         context.checkpoint(1);
-        // A consumed variadic store is printed as its call's trailing argument.
-        origins.get(variadicStores.get(node.id) ?? block.control.id)!.push(node);
+        // A consumed outgoing store is printed as its call's argument.
+        origins.get(argumentStores.get(node.id) ?? block.control.id)!.push(node);
         mapped.add(node.id);
       }
 

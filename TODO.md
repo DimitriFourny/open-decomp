@@ -392,7 +392,7 @@ Files that several items touch:
 
 ### K2: Consume outgoing stores that a bound stack argument already shows
 
-- [ ] **Problem.** 33 stores in 10 functions (17 in brotli `main`) print the value and pass it again as the call's argument: `frame.local_2b0 = …; fprintf(stream_3, "corrupt input [%s]\n", …same…)`, `frame.local_88 = arg9; … sqlite3CreateFunc(…, arg8, arg9, …)`.
+- [x] **Problem.** 33 stores in 10 functions (17 in brotli `main`) print the value and pass it again as the call's argument: `frame.local_2b0 = …; fprintf(stream_3, "corrupt input [%s]\n", …same…)`, `frame.local_88 = arg9; … sqlite3CreateFunc(…, arg8, arg9, …)`.
   - **Root cause:** only `planVariadicStackArguments` consumes stores (`reconstruction/index.ts:286-302`). Format-rule closures (`bindStack`, `source-planner.ts:566-573`) and callee stack parameters (`:386-390`) bind the value but leave the store.
   - **Change:**
     - Factor the slot-eligibility checks out of `planVariadicStackArguments` into one helper.
@@ -409,6 +409,7 @@ Files that several items touch:
     - Checked view unchanged.
   - **Expected effect:** tokens −1.5k to −2k [estimate]; QA tokens (brotli `main`).
   - **Depends on:** K1 (same files).
+  - **Done (K2, reconstruction 96):** `createOutgoingStackSlots` (shared with `planVariadicStackArguments`) + `planStackArgumentStores` consume the stores of every `bindStack` binding (`stack_argument_store`; `open_call_argument_area` on stores a later boundary sees only through the call). OD lane vs `od-main-6960e68`: 11 store lines gone in `createFunctionApi` (6, both `sqlite3CreateFunc` sites), `PrintFileProcessingProgress` (2, frame gone), `sqlite3_rtree_query_callback` (3, frame gone), `sqlite3Initialize` (2, frame gone); integer call arguments now name function-entry and named-data constants as assignments do (C 108, Python-like 103), so no name is lost: 8 texts change (also brotli `main` `OnMetadataStart`/`OnMetadataChunk`, `openDatabase` collation functions, `sessionRetryConstraints` `sqlite3changeset_old`, `sqlite3session_delete` `xPreUpdate`, `sqlite3Initialize` 6 builtin tables and `memdb_vfs`); checked view identical. Blocked on K7 (escape abort): brotli `main` 17/17 consume with the abort lifted (measured), `fts5FlushSecureDelete` 1. Not K2 cases: `sqlite3Fts3Incrmerge` (the 9th `fts3WriteSegdir` argument is not bound), `rename*Func` (walker fields, not arguments), ELF `-O0` `matrix_variadic` (no call), `sqlite3BtreeOpen` (not bound).
 
 ### K3: Print the fixed prefix of an established variadic library contract
 
@@ -494,7 +495,7 @@ Files that several items touch:
 
 ### K7: Escaped frame addresses bound the variadic aliasing floor
 
-- [ ] **Problem.** One escaped frame address anywhere (`fstat(fd, &buf)`) disables variadic binding for the whole function: `source-variadic.ts:70-97` aborts on any stored or register-held stack address (10 of 19 affected functions).
+- [x] **Problem.** One escaped frame address anywhere (`fstat(fd, &buf)`) disables variadic binding for the whole function: `source-variadic.ts:70-97` aborts on any stored or register-held stack address (10 of 19 affected functions). _Done (`wt/rm4-k7`): lane `od-rm4-k7` differs from `od-main-a15b636` in exactly five texts: `fts3DestroyMethod` prints all 11 `fts3DbExec` arguments and loses its 11-member frame, `unixSync` prints its 5 `sqlite3_log` arguments, `verifyDbFile` binds its joined slot (`sqlite3_log(28, value5, value4)`), brotli `main` loses its 17 duplicated `frame.local_2a0/2a8/2b0` stores (an inexact `&local | 4` escape is bounded by its exact origin), `fts5FlushSecureDelete` loses 1; checked views unchanged; `selectInnerLoop` still unbound (store identity lost to a same-fact loop merge in the stack analysis, then the next iteration's call sees the slot); work: brotli `main` −13,112, `isDate` +5,414 (the eligibility scan no longer stops at the first escape), `sqlite3Fts3Incrmerge` 0._
   - **Change:**
     - Do not abort on an exact `stack`/`stack_fragment` escape. Record the lowest escaped offset as `escapeFloor`, and admit only slots with `start + size ≤ escapeFloor`.
     - Keep aborting on `dynamic_stack` and on missing snapshots.
@@ -1044,6 +1045,7 @@ Files that several items touch:
     - SQLite and brotli texts byte-identical. `createFunctionApi` must keep `uint8_t* address_1` through the shape edge.
     - `partial(budget)` drops by up to 22.
   - **Expected effect** (measured, upper bound with all deferred loads skipped): SQLite work −9.3%, time −7%.
+  - **Outcome (not merged; branch `wt/rm4-t4` at `d92d226`):** the classification works and keeps every text byte-identical (lazy classes: the demanded closure runs only the arity probe; a body is classified once, only when a deferred dependency would load), but it saves nothing: SQLite work +0.22%, `partial(budget)` 62 → 62. The deferred phase always runs until its half-allowance stop, so every skipped effects-only load frees work that deeper result and shape loads then spend (`sqlite3DbMallocRawNN` +227k reaching `sqlite3Fp10Convert2` and `sqlite3Initialize`). The first prototype's −2.1% came from its own classification cost tripping that stop one load earlier, which also dropped three texts' struct locals (`fts3UpdateMethod` lost `sqlite3_reset`'s shape transfer). A real saving needs loads gated on a fact some caller up the chain needs, or a smaller deferred allowance; both change texts and are a new item.
 
 ### T5: Budget labels name the fact that is actually missing
 
@@ -1056,6 +1058,7 @@ Files that several items touch:
   - **Tests:** `native-worklist.test.ts` (per-fact propagation); `test/core/diagnostic-summary.test.ts`.
   - **Acceptance:** texts and checked view byte-identical; budget-labelled states 62 → about 38–40 [estimate].
   - **Depends on:** T4.
+  - **Outcome:** not started; it needs T4's per-fact edge classes, which are not on `main` (see T4).
 
 ### T6: Memoize the allowance-independent prefix of unit preparation
 
