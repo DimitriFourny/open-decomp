@@ -733,7 +733,7 @@ Files that several items touch:
 
 ### E2: A formal is a scalar-element pointer only when its accesses are array-shaped
 
-- [ ] **Problem.** Struct pointers print as `uint64_t*` with constant subscripts: `stmtClose(uint64_t* address) … address[2]`, brotli `InitDecoder` `address[41]`, `PrintFileProcessingProgress` `address[59]`. This causes 6 wrong claims in 4 functions ("takes a uint64_t array pointer"). 20 formals use only non-zero constant subscripts.
+- [x] **Problem.** _Done (E2): OD lane `od-rm4-e2` vs `od-main-bf6f43f`: 29 texts changed (+480 regex-lexer tokens: typedef/struct lines); `stmtClose` prints `address->field_0x10`, `InitDecoder` `address->field_0x148`, `PrintFileProcessingProgress` fields; real arrays unchanged; 5 texts print `*p->field_0xN`._ Struct pointers print as `uint64_t*` with constant subscripts: `stmtClose(uint64_t* address) … address[2]`, brotli `InitDecoder` `address[41]`, `PrintFileProcessingProgress` `address[59]`. This causes 6 wrong claims in 4 functions ("takes a uint64_t array pointer"). 20 formals use only non-zero constant subscripts.
   - **Root cause:** `formal_pointer` (`src/reconstruction/source-signature.ts:744-783`) checks only element width and kind. `scalarArray`'s contiguity gate (`src/emitters/source-structs.ts:132-182`) is not applied to formals.
   - **Change:**
     - Record per-root constant displacements (`:617-626`). Grant `formal_pointer` only when the formal is indexed or stepped, or its constant offsets are contiguous from 0. Otherwise keep the analysis structure (or a byte pointer).
