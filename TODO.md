@@ -217,7 +217,7 @@ Files that several items touch:
 
 ### C3: Always produce text within the unchanged 10M
 
-- [ ] **Problem.** Four functions fail with no text. Optional stages (callee summaries, image types, pointer evidence, goto search, provenance metadata) are sized as fractions of what remains, not against what the mandatory tail needs. Two output bounds turn finished text into a failure:
+- [x] **Problem.** Four functions fail with no text. Optional stages (callee summaries, image types, pointer evidence, goto search, provenance metadata) are sized as fractions of what remains, not against what the mandatory tail needs. Two output bounds turn finished text into a failure: _Done (C3): tail reserve 300/IR node on the summary pool and image types, text-first render below 450/render unit with a goto-search sub-allowance leaving 120/unit, catalog bounds publish text with an `evidence` omission. Lane: `sqlite3WhereCodeOneLoopStart` (8.34M) and `sqlite3_str_vappendf` (9.62M) get text, every other text and work count byte-identical, 233 → 235 with text; `sqlite3Select`/`sqlite3Pragma` still fail (their mandatory prefix plus reconstruct leaves < 1.1M for the render)._
   - the evidence catalog of 10,000 ids (`catalog.ts:36-62, 95-101`, `src/core/tools.ts:538`);
   - a cache-catalog type with more than 1,000 `evidence_ids` (`src/project/cache/index.ts:92`).
   - **Change:**
@@ -939,7 +939,7 @@ Files that several items touch:
 
 ### L3: `for` loops over `-O0` promoted stack-slot induction variables
 
-- [ ] **Problem.** 8 `-O0` loops (`matrix_callback` ×3, `matrix_multi_exit` ×3, `matrix_variadic` PE/Mach-O) print `index = 0; while (index < n) { …; index = index + 1; }`. Ghidra prints `for`, and the judge cites "ghidra has a clean for-loop".
+- [x] **Problem.** 8 `-O0` loops (`matrix_callback` ×3, `matrix_multi_exit` ×3, `matrix_variadic` PE/Mach-O) print `index = 0; while (index < n) { …; index = index + 1; }`. Ghidra prints `for`, and the judge cites "ghidra has a clean for-loop".
   - **Root cause:** the step and init are `store`s to a promoted private local. `trailingStatement` accepts only `assign`/`load` (`renderer.ts:5644`), and `acceptStatementFor` identifies the variable by `step.result` (`:5587`).
   - **Change:** accept a trailing store into a promoted, non-escaped, non-punned local when:
     - the test reads a load of it;
@@ -951,6 +951,7 @@ Files that several items touch:
   - **Tests:** `source-control.test.ts`: an `-O0`-style IR executed for n = 0, 1, 3; negative: a second store in the loop.
   - **Acceptance:** those 8 texts print `for (index = 0; index < argN; index = index + 1)`. Nothing else changes.
   - **Depends on:** L1 (`acceptStatementFor`).
+  - **Done:** `od-rm4-l3` vs `od-main-07f4b12`: exactly the 8 acceptance texts change (`for (index = 0; index < argN; index = index + 1)`), nothing else; work deterministic, checked view byte-identical; `test/emitters/c/source-control.test.ts` executes the `-O0` slot loop for n = 0, 1, 3 in both dialects plus a second-store negative.
 
 ### L4: Rotate loop-carried copies so bottom tests become do-while
 
