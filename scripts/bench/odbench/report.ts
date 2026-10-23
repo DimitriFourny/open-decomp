@@ -1025,7 +1025,9 @@ export async function buildReport(opts: {
         `Lane ${lane} started with load average ${load.toFixed(2)} on ${run.host.cores} cores (> cores/2): its timings are inflated.`,
       );
     if (run.kind !== 'source' && run.jobs > 1)
-      loadWarnings.push(`Lane ${lane} ran with jobs=${run.jobs}: its timings are not comparable.`);
+      loadWarnings.push(
+        `Lane ${lane} ran with jobs=${run.jobs}: its decompile time after open and first-10 time are wall times over ${run.jobs} request workers (the D8 measure); its per-function and cold times are not comparable with one-worker lanes.`,
+      );
     for (const fn of tierFns)
       if (run.functions[fn.id]?.deterministic === false) determinism.push({ lane, fn: fn.id });
     const rows: WorkRow[] = [];
