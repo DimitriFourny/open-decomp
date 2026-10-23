@@ -783,13 +783,17 @@ export interface LoopCopyRotation {
  * them before its test. Each such copy rotates when `y` is a printed value of
  * the phi's type that is not live into the header (defined in the loop) and
  * `eligible` holds. A loop rotates only when all of them do and every other
- * repeat copy is unread by the test, so no copy blocker remains. */
+ * repeat copy is unread by the test, so no copy blocker remains, and only when
+ * `topTested` is false for its header and the bottom test's exit target (a
+ * header test leaving for the same continuation may already print the loop as
+ * `while`, which the rotated copy would displace). */
 export function loopCopyRotations(
   body: Region,
   program: Reconstruction,
   liveness: VariableLiveness,
   plain: (control: Control) => boolean,
   eligible: (phi: Value, source: Value) => boolean,
+  topTested: (header: BlockRegion, follow: string) => boolean,
   context: OperationContext,
 ): LoopCopyRotation[] {
   const result: LoopCopyRotation[] = [];
@@ -818,7 +822,15 @@ export function loopCopyRotations(
     );
     const leave = again === control.when_true ? control.when_false : control.when_true;
     const copies = again ? (program.transfers.get(again.transfer) ?? []) : [];
-    if (!again || again.body || leave.body || !copies.length || !header) return;
+    if (
+      !again ||
+      again.body ||
+      leave.body ||
+      !copies.length ||
+      !header ||
+      topTested(header, leave.transfer.target)
+    )
+      return;
     const inside = blocksOf(loop.body);
     if (
       leave.transfer.target === loop.header ||

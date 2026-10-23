@@ -8004,6 +8004,20 @@ export class Renderer {
         !floating?.has(source.id) &&
         !this.fpPresentation.unobserved.has(phi.id) &&
         !this.fpPresentation.unobserved.has(source.id),
+      // A header with at most one printed statement (silent, or one a comma
+      // test may hold) testing for the loop's continuation may already print
+      // the loop as `while`.
+      (header, follow) =>
+        header.control.kind === 'if' &&
+        [header.control.when_true, header.control.when_false].some(
+          (arm) => !arm.body && arm.transfer.target === follow,
+        ) &&
+        header.statements.filter(
+          (node) =>
+            program.retained.has(node.id) &&
+            !('result' in node && this.inlined.has(node.result.id)) &&
+            !this.noMove(node),
+        ).length <= 1,
       this.context,
     );
     // The rotated liveness copies every block's entry set once.
