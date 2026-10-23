@@ -41,6 +41,8 @@ export interface OdWorkerRequest {
   readonly inference: 'proven' | 'likely';
   /** False opens without the open-time job (`openJob: false`). */
   readonly open_job: boolean;
+  /** Request workers (`requestWorkers`); above 1 the worker keeps that many decompiles in flight. */
+  readonly jobs: number;
   /** JSONL file the worker appends its `OdWorkerLine`s to. */
   readonly out: string;
   readonly repeat: { readonly index: number; readonly total: number };
@@ -157,9 +159,16 @@ async function runWorker(
   });
 }
 
-/** `atMs` is every corpus function's result time (corpus order): the 10th's, or null when there is none. */
+/** `atMs` is every corpus function's result time (corpus order): when the first 10 all have a
+ * result (the latest of their times; with one worker the 10th's), or null when one has none. */
 export function firstFunctionsMs(atMs: readonly (number | null)[]): number | null {
-  return atMs.length < FIRST_FUNCTIONS ? null : (atMs[FIRST_FUNCTIONS - 1] ?? null);
+  if (atMs.length < FIRST_FUNCTIONS) return null;
+  let latest = 0;
+  for (const at of atMs.slice(0, FIRST_FUNCTIONS)) {
+    if (at === null) return null;
+    latest = Math.max(latest, at);
+  }
+  return latest;
 }
 
 /** The worker's exact self-reported peak replaces its sampled one when larger. */
@@ -267,15 +276,13 @@ export async function runOdLane(opts: {
   repeat: number;
   inference: 'proven' | 'likely';
   only: readonly string[] | null;
-  /** Request workers per binary; only 1 until roadmap 4 T9 (parallel requests over one opened project). */
+  /** Request workers per binary (`requestWorkers`: parallel decompiles over one opened project). */
   jobs: number;
   /** Run the open-time job at open (default build behaviour); false passes `openJob: false`. */
   openJob: boolean;
 }): Promise<LaneRun> {
-  if (opts.jobs !== 1)
-    throw new Error(
-      `od: --jobs ${opts.jobs} is not supported yet: decompiling one binary with several request workers needs roadmap 4 T9; only --jobs 1 runs`,
-    );
+  if (!Number.isInteger(opts.jobs) || opts.jobs < 1 || opts.jobs > 32)
+    throw new Error(`od: jobs must be an integer from 1 to 32, got ${opts.jobs}`);
   const loadStart = [...loadavg()];
   const started = new Date().toISOString();
   const repo = resolve(opts.repo);
@@ -344,9 +351,9 @@ export async function runOdLane(opts: {
     binaries,
     functions,
     notes: [
-      'One worker process per binary and repeat, fresh cache directory, default budgets and structures.',
-      'cold_ms = API module load + openBinary + every decompile (tsx start-up and session close excluded); import_ms = open_ms = openBinary (import, discovery and the open-time job); open_job_ms / open_job_work = the open-time job alone; per-function ms = median over repeats.',
-      'first10_ms = wall time from openBinary returning to the 10th corpus function result (corpus order); peak_rss = peak resident set size per process (ps sampling every 200 ms for the analysis workers, exact maxRSS for the bench worker), largest over repeats.',
+      `One worker process per binary and repeat, fresh cache directory, default budgets and structures; ${opts.jobs === 1 ? 'decompiles one at a time in the project owner' : `${opts.jobs} request workers (openBinary requestWorkers), selections in corpus order with ${opts.jobs} decompiles in flight`}.`,
+      `cold_ms = API module load + openBinary + every decompile (tsx start-up and session close excluded); import_ms = open_ms = openBinary (import, discovery and the open-time job); open_job_ms / open_job_work = the open-time job alone; decompile_ms_total = ${opts.jobs === 1 ? 'sum of the decompile calls' : 'wall time from openBinary returning to the last result (the calls overlap)'}; per-function ms = median over repeats (with several workers: from its selection to its result).`,
+      'first10_ms = wall time from openBinary returning until the first 10 corpus functions (corpus order) all have a result; peak_rss = peak resident set size per process (ps sampling every 200 ms for the analysis workers, exact maxRSS for the bench worker), largest over repeats.',
       ...freshness,
     ],
   });
@@ -368,6 +375,7 @@ export async function runOdLane(opts: {
               cachePath,
               inference: opts.inference,
               open_job: opts.openJob,
+              jobs: opts.jobs,
               out: join(work, 'out.jsonl'),
               repeat: { index, total: opts.repeat },
               functions: fns.map((fn) => ({ id: fn.id, va: fn.va, name: fn.name })),

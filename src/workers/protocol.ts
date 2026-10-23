@@ -102,6 +102,9 @@ export const commandSchema = z.discriminatedUnion('kind', [
     analysis_cache: z.boolean().default(true),
     /** Byte cap on the project's persisted native units (trusted host setting). */
     native_summary_bytes: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
+    /** Request workers that analyse `function_decompile` jobs in parallel over a shared
+     * snapshot of the project (trusted host setting); 1 analyses every job in the owner. */
+    request_workers: z.number().int().min(1).max(32).default(1),
     interrupted: z
       .strictObject({ id: jobIdSchema, reason: z.enum(['cancelled', 'deadline']) })
       .optional(),

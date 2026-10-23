@@ -72,6 +72,13 @@ export interface OpenBinaryOptions {
    * keeps callees first. Rows the cap drops are prepared on demand: output and work are
    * unaffected. */
   readonly unitStoreBytes?: number;
+  /** Request workers (1–32, default 1). Above 1, decompiles run in that many processes over a
+   * shared read-only snapshot of the project and may be awaited concurrently (call
+   * `decompile`/`decompileFunction` without awaiting each); this session's project stays
+   * their single writer. Texts and per-function work are identical for every count. Each
+   * worker holds its own decoded image and prepared units (docs/internals/project-cache.md
+   * §4b, "Concurrency ceilings"). */
+  readonly requestWorkers?: number;
 }
 export interface DecompileOptions {
   readonly emitter?: 'c-like' | 'python-like';
@@ -183,6 +190,7 @@ export class BinarySession {
       ...(options.unitStoreBytes === undefined
         ? {}
         : { native_summary_bytes: options.unitStoreBytes }),
+      ...(options.requestWorkers === undefined ? {} : { request_workers: options.requestWorkers }),
     });
     try {
       options.signal?.throwIfAborted();
@@ -367,6 +375,18 @@ export class BinarySession {
     input: FunctionSelector,
     options: DecompileOptions = {},
   ): Promise<ToolResult<'function_decompile'>> {
+    return this.decompileFunction((await this.selectFunction(input, options)).id, options);
+  }
+
+  /** The function `input` names. An unsettled selection runs whole-image discovery to its
+   * end (each step under `options.budget`), so the answer comes from the final enumeration
+   * whatever ran before. With request workers, select functions one after another and start
+   * each decompile before the next selection: a discovery step then waits for the
+   * decompiles started before it, and each decompile reads the revision it was selected at. */
+  async selectFunction(
+    input: FunctionSelector,
+    options: Pick<DecompileOptions, 'budget' | 'signal' | 'onProgress'> = {},
+  ): Promise<BinaryFunction> {
     this.#requireOpen();
     const selector = selectorSchema.parse(input);
     const call: QueryCallOptions = {
@@ -381,17 +401,13 @@ export class BinarySession {
         selector,
         call,
       );
-    let selected;
     try {
-      selected = await select();
+      return await select();
     } catch (error) {
       if (!(error instanceof FunctionSelectionError) || error.reason !== 'incomplete') throw error;
-      // An unsettled selection runs whole-image discovery to its end (each step under this
-      // request's budget), so the answer comes from the final enumeration whatever ran before.
       if (!(await this.completeDiscovery(options.budget, call))) throw error;
-      selected = await select();
+      return select();
     }
-    return this.decompileFunction(selected.id, options);
   }
 
   /** Continue whole-image function discovery step by step, each under `budget` (default
@@ -437,6 +453,8 @@ export class BinarySession {
     options: DecompileOptions = {},
   ): Promise<ToolResult<'function_decompile'>> {
     this.#requireOpen();
+    // A concurrent discovery step may advance `this.revision` while this request runs.
+    const revision = this.revision;
     const call: QueryCallOptions = {
       ...(options.signal === undefined ? {} : { signal: options.signal }),
       ...(options.onProgress === undefined ? {} : { onProgress: options.onProgress }),
@@ -445,7 +463,7 @@ export class BinarySession {
       'function_decompile',
       {
         project_id: this.projectId,
-        revision: this.revision,
+        revision,
         function_id: functionId,
         wait: true,
         ...(options.emitter === undefined &&
@@ -467,7 +485,7 @@ export class BinarySession {
     );
     return materializeDecompilation(
       this.service,
-      { project_id: this.projectId, revision: this.revision },
+      { project_id: this.projectId, revision },
       result,
       options.signal,
     );

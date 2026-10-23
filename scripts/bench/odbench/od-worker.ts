@@ -2,8 +2,9 @@
  * odbench OD worker: one process per binary (isolated memory, cold timing). Usage:
  * `node --import tsx od-worker.ts <request.json>` with an `OdWorkerRequest`. It imports the measured
  * checkout's built API by file URL, opens the binary with a fresh cache, decompiles each function
- * sequentially and appends one `OdWorkerLine` (JSON) per event to `request.out`, so a crash
- * loses only the functions that had not finished. Progress goes to stderr.
+ * (with `jobs` > 1: over that many request workers, selecting in corpus order and keeping `jobs`
+ * decompiles in flight) and appends one `OdWorkerLine` (JSON) per event to `request.out`, so a
+ * crash loses only the functions that had not finished. Progress goes to stderr.
  */
 import { appendFileSync, readFileSync } from 'node:fs';
 import { performance } from 'node:perf_hooks';
@@ -90,6 +91,7 @@ async function main(): Promise<void> {
     session = await api.openBinary(request.input, {
       cachePath: request.cachePath,
       openJob: request.open_job ? {} : false,
+      ...(request.jobs > 1 ? { requestWorkers: request.jobs } : {}),
     });
     openFinished = performance.now();
     // A build without the open-time job has no `openJob` field.
@@ -109,19 +111,23 @@ async function main(): Promise<void> {
     return;
   }
   try {
-    let decompileTotal = 0;
-    for (const [index, fn] of request.functions.entries()) {
-      emit({ kind: 'start', id: fn.id });
-      const callStarted = performance.now();
+    const decompileOptions = {
+      emitter: 'c-like',
+      view: 'source',
+      inference: request.inference,
+    } as const;
+    let finished = 0;
+    // One function's outcome, from `call` (the request; its selection already done or not).
+    const record = async (
+      index: number,
+      fn: OdWorkerRequest['functions'][number],
+      call: () => Promise<Api.ToolResult<'function_decompile'>>,
+      callStarted: number,
+    ): Promise<number> => {
       let outcome: Interpreted;
       let notFound = false;
       try {
-        outcome = interpret(
-          await session.decompile(
-            { address: { space: 'va', value: fn.va } },
-            { emitter: 'c-like', view: 'source', inference: request.inference },
-          ),
-        );
+        outcome = interpret(await call());
       } catch (error) {
         notFound = error instanceof Error && error.name === 'FunctionSelectionError';
         outcome = {
@@ -133,7 +139,6 @@ async function main(): Promise<void> {
         };
       }
       const ms = performance.now() - callStarted;
-      decompileTotal += ms;
       emit({
         kind: 'fn',
         id: fn.id,
@@ -150,9 +155,54 @@ async function main(): Promise<void> {
         : outcome.state === 'complete'
           ? 'complete'
           : `${outcome.state}(${outcome.reason ?? ''})`;
+      finished++;
       process.stderr.write(
-        `od: ${request.binary} ${index + 1}/${request.functions.length} ${fn.name ?? fn.va} ${Math.round(ms)} ms ${detail}${suffix}\n`,
+        `od: ${request.binary} ${request.jobs > 1 ? `${finished}/` : ''}${index + 1}/${request.functions.length} ${fn.name ?? fn.va} ${Math.round(ms)} ms ${detail}${suffix}\n`,
       );
+      return ms;
+    };
+    let decompileTotal = 0;
+    if (request.jobs <= 1) {
+      for (const [index, fn] of request.functions.entries()) {
+        emit({ kind: 'start', id: fn.id });
+        decompileTotal += await record(
+          index,
+          fn,
+          () => session.decompile({ address: { space: 'va', value: fn.va } }, decompileOptions),
+          performance.now(),
+        );
+      }
+    } else {
+      // Selections run in corpus order, each decompile starts before the next selection, so a
+      // discovery step a selection needs waits for the decompiles started before it and each
+      // function is analysed at the revision a one-worker run would analyse it at.
+      const inFlight = new Set<Promise<void>>();
+      for (const [index, fn] of request.functions.entries()) {
+        while (inFlight.size >= request.jobs) await Promise.race(inFlight);
+        emit({ kind: 'start', id: fn.id });
+        const callStarted = performance.now();
+        let selected: Api.BinaryFunction | undefined, selectionError: unknown;
+        try {
+          selected = await session.selectFunction({ address: { space: 'va', value: fn.va } }, {});
+        } catch (error) {
+          selectionError = error;
+        }
+        const pending = record(
+          index,
+          fn,
+          () =>
+            selected === undefined
+              ? Promise.reject(selectionError)
+              : session.decompileFunction(selected.id, decompileOptions),
+          callStarted,
+        ).then(() => {
+          inFlight.delete(pending);
+        });
+        inFlight.add(pending);
+      }
+      await Promise.all(inFlight);
+      // Wall time: the decompiles overlap.
+      decompileTotal = performance.now() - openFinished;
     }
     emit({
       kind: 'done',

@@ -499,6 +499,9 @@ export interface ProjectStore {
     readonly cache: CacheIdentity;
     readonly analysis_ids?: readonly string[];
     readonly reuse_scope?: string;
+    /** Trusted owner only: publish under this identity, which a request worker's response
+     * already carries (docs/internals/project-cache.md §4b); default a fresh identity. */
+    readonly artifact_id?: string;
   }): Promise<
     | { readonly state: 'published'; readonly artifact: Artifact }
     | { readonly state: 'stale' | 'cancelled'; readonly current_revision: number }
@@ -515,6 +518,8 @@ export interface ProjectStore {
   publishTransientArtifact(input: {
     readonly media_type: string;
     readonly bytes: Uint8Array;
+    /** As `publishArtifact`'s `artifact_id`. */
+    readonly artifact_id?: string;
   }): Artifact;
   /** One persisted prepared-callee summary, or null when absent, evicted or not authentic:
    * a row whose identity or content digest does not match is never returned. */
@@ -542,14 +547,18 @@ export interface ProjectStore {
    * absent directory `destination`, after writing queued summaries: the private store of an
    * open-time job helper process. */
   copyProject?(destination: string): void;
-  /** Insert the summary rows of `scope` at the current revision from the project copies at
-   * `sources` (the helpers'), each re-checked against its digest, keeping a present row whose
-   * allowance is not larger. Rows are chosen in `order` (function IDs, callees first) while
-   * they fit in the byte cap and written in reverse, so eviction drops callers before the
-   * callees they share. One cache write; returns the rows inserted. */
+  /** Write an immutable copy of this project's database to the absent file `destination`
+   * after writing queued summaries: what request workers read (§4b). */
+  snapshotDatabase?(destination: string): void;
+  /** Insert the summary rows of `scope` (every scope when null) at the current revision from
+   * the project copies at `sources` (open-time job helpers' copies, request workers'
+   * outboxes), each re-checked against its digest, keeping a present row whose allowance is
+   * not larger. Rows are chosen in `order` (function IDs, callees first) while they fit in
+   * the byte cap and written in reverse, so eviction drops callers before the callees they
+   * share. One cache write; returns the rows inserted. */
   importNativeSummaries?(
     sources: readonly string[],
-    scope: string,
+    scope: string | null,
     order: readonly string[],
   ): number;
   saveJob(job: Job): void;
