@@ -2,7 +2,7 @@
 
 Turns a function's SSA plus an `AbiProfile` into per-call interface facts: which registers and stack slots carry arguments and results, and whether that is proven by a supplied contract, observed at the call site, or summarized from the callee's own body. Physical call analysis runs inside type recovery; callee summaries run after structuring, before reconstruction. Output is _evidence_, not a prototype: whatever is unproven stays an explicit open argument list (`...`).
 
-**Code:** `src/abi/`, `src/analysis/calls/`, `src/service/analysis/` (`calls.ts`, `native-*.ts`, `source-facts.ts`, `likely-arity.ts`, `objc-*.ts`, `source-variadic.ts`)
+**Code:** `src/abi/`, `src/analysis/calls/`, `src/service/analysis/` (`calls.ts`, `native-*.ts`, `source-facts.ts`, `likely-arity.ts`, `objc-*.ts`, `source-variadic.ts`, `source-literal-candidates.ts`)
 
 ## Data model
 

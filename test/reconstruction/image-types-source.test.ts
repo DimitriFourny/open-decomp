@@ -92,8 +92,9 @@ test(
       new RegExp(`\\b${set.name}\\b`),
     );
     assert.deepEqual(get.members, ['field_0x8', 'field_0x10']);
-    assert.match(set.declaration, /pad_0x0\[|field_0x0;/);
-    assert.match(get.declaration, /pad_0x0\[8\]/);
+    // The inline body omits the gap before field_0x8: the name states the offset.
+    assert.doesNotMatch(set.declaration, /pad_0x/);
+    assert.doesNotMatch(get.declaration, /pad_0x/);
 
     // The whole-image header declares the same name with the same layout and
     // is valid C on its own.
