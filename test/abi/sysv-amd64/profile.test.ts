@@ -406,3 +406,26 @@ test('actual argument count stays independent from physical layout completeness'
     null,
   );
 });
+
+test('SysV environment writers clobber exactly the callee-saved FP control state', () => {
+  // psABI 3.2.1: the x87 control word and MXCSR control bits are callee-saved;
+  // only fenv writers change them, and ordinary calls do not clobber them.
+  assert.deepEqual(
+    abi.environment_writer_clobbers.map((register) => [
+      register.id,
+      register.root,
+      register.offset_bits,
+      register.width_bits,
+      register.write_rule,
+    ]),
+    [
+      ['x86_64:fpcsr', 'x86_64:fpcsr', 0, 16, 'replace_root'],
+      ['x86_64:mxcsr[6:16]', 'x86_64:mxcsr', 6, 10, 'preserve_other_bits'],
+    ],
+  );
+  for (const register of abi.environment_writer_clobbers) {
+    registerSchema.parse(register);
+    assert.ok(abi.preserved.includes(register));
+    assert.ok(!abi.unknown_call_clobbers.registers.some((lost) => lost.root === register.root));
+  }
+});

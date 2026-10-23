@@ -11,7 +11,14 @@ import type {
   ReferenceRecord,
   RegisterDescriptor,
 } from '../../core/index.js';
-import { fingerprint, OperationError, U64_LIMIT, type CanonicalValue } from '../../core/index.js';
+import {
+  buildOnce,
+  fingerprint,
+  OperationError,
+  U64_LIMIT,
+  useBuilt,
+  type CanonicalValue,
+} from '../../core/index.js';
 import type { CallAnalysisResult, SuppliedCallContract } from '../../analysis/calls/index.js';
 import {
   observePreparedCallInterfaces,
@@ -35,6 +42,7 @@ import {
 } from '../../analysis/types/index.js';
 import {
   bitWidth,
+  successors,
   expressionOperands,
   type DataType,
   type Expression,
@@ -60,7 +68,8 @@ import {
 } from './native-summaries.js';
 import { records } from '../queries/scope.js';
 import type { AnalysisScope } from './index.js';
-import type { CallScope } from './calls.js';
+import { environmentWriterCalls, imageEnvironmentWriters, type CallScope } from './calls.js';
+import { fpEnvironmentRegister } from '../../reconstruction/source-fp.js';
 import {
   nativeDependencies,
   prepareNativeUnit,
@@ -1339,6 +1348,151 @@ function nativeArgumentReaching(
   );
 }
 
+/** Local writer evidence per prepared body (it depends only on the body and the
+ * image's call index), built once and charged once per operation. */
+const localEnvironmentWriters = new WeakMap<
+  SSAForm,
+  {
+    readonly functions: readonly FunctionRecord[];
+    readonly references: readonly ReferenceRecord[];
+    readonly writer: boolean;
+  }
+>();
+
+/** A prepared body that shows a changed FP control state at a return or tail
+ * exit: a writer-import call in a block that reaches such an exit, a tail into
+ * a writer import, a writer callee, or an exit binding that an explicit write
+ * defines (traced through phis and bitcasts back to anything but the entry
+ * state). An opaque effect is no such evidence: like an unknown callee, the body
+ * rests on `fp_environment_preserved`. A restore through a writer call counts. */
+function environmentWriter(
+  input: SourceFactsInput,
+  ir: SSAForm,
+  index: NativeInterfaceIndex | undefined,
+  interfaces: ReadonlyMap<string, NativeInterface>,
+  context: OperationContext,
+): boolean {
+  if ([...interfaces.values()].some((callee) => callee.fp_environment_writer)) return true;
+  const cached = localEnvironmentWriters.get(ir);
+  if (cached?.functions === input.functions && cached.references === input.references)
+    return useBuilt(context, cached).writer;
+  // The interface structure is already built for this body's observation.
+  const prepared = index?.preparation(ir, context);
+  const built = buildOnce(context, (quiet) => ({
+    functions: input.functions,
+    references: input.references,
+    writer: localEnvironmentWriter(input, ir, prepared, quiet),
+  }));
+  localEnvironmentWriters.set(ir, built);
+  return built.writer;
+}
+
+function localEnvironmentWriter(
+  input: SourceFactsInput,
+  ir: SSAForm,
+  prepared: ReturnType<NativeInterfaceIndex['preparation']> | undefined,
+  context: OperationContext,
+): boolean {
+  const states =
+    prepared?.states ?? new Map(ir.register_states.map((state) => [state.block, state]));
+  const entry = new Set<string>(),
+    leaving: string[] = [],
+    stack: string[] = [];
+  for (const binding of states.get(ir.entry)?.entry ?? [])
+    if (fpEnvironmentRegister(binding.register)) entry.add(binding.value.id);
+  for (const block of prepared ? [...prepared.exits, ...prepared.tails] : ir.blocks) {
+    context.checkpoint(1);
+    const control = block.terminator;
+    if (control.kind !== 'return' && !(control.kind === 'indirect' && control.tail_call)) continue;
+    leaving.push(block.id);
+    for (const binding of states.get(block.id)?.exit ?? [])
+      if (fpEnvironmentRegister(binding.register) && !entry.has(binding.value.id))
+        stack.push(binding.value.id);
+  }
+  // Only calls of a writer import carry control-state clobbers (ordinary call
+  // clobbers exclude it), so an image without writer imports has none.
+  if (imageEnvironmentWriters(input.image, input.functions, input.references, context)) {
+    const tails = environmentWriterCalls(
+      ir,
+      input.image,
+      input.functions,
+      input.references,
+      context,
+    );
+    const predecessors = new Map<string, string[]>();
+    for (const block of ir.blocks) {
+      context.checkpoint(1);
+      if (tails.has(block.terminator.id)) return true;
+      for (const edge of successors(block.terminator)) {
+        const row = predecessors.get(edge.target) ?? [];
+        row.push(block.id);
+        predecessors.set(edge.target, row);
+      }
+    }
+    const reaching = new Set(leaving);
+    for (let cursor = 0; cursor < leaving.length; cursor++)
+      for (const parent of predecessors.get(leaving[cursor]!) ?? []) {
+        context.checkpoint(1);
+        if (reaching.has(parent)) continue;
+        reaching.add(parent);
+        leaving.push(parent);
+      }
+    for (const block of ir.blocks)
+      if (reaching.has(block.id))
+        for (const node of block.instructions) {
+          context.checkpoint(1);
+          if (node.kind === 'call' && node.clobbers.registers.some(fpEnvironmentRegister))
+            return true;
+        }
+  }
+  // Every exit keeps the entry state: no definition needs tracing.
+  if (!stack.length) return false;
+  const incoming = new Map<string, (readonly Value[])[]>(),
+    parameters = new Map<string, { readonly block: string; readonly index: number }>(),
+    definitions = new Map<string, Instruction>();
+  for (const block of ir.blocks) {
+    context.checkpoint(1);
+    for (const [index, value] of block.parameters.entries())
+      parameters.set(value.id, { block: block.id, index });
+    for (const edge of successors(block.terminator)) {
+      const args = incoming.get(edge.target) ?? [];
+      args.push(edge.arguments);
+      incoming.set(edge.target, args);
+    }
+    for (const node of block.instructions) {
+      context.checkpoint(1);
+      if (node.kind === 'assign') definitions.set(node.result.id, node);
+      else if (node.kind === 'call' || node.kind === 'unknown_effect')
+        for (const binding of node.register_outputs) definitions.set(binding.value.id, node);
+    }
+  }
+  const seen = new Set<string>();
+  while (stack.length) {
+    context.checkpoint(1);
+    const id = stack.pop()!;
+    if (entry.has(id) || seen.has(id)) continue;
+    seen.add(id);
+    const parameter = parameters.get(id);
+    if (parameter) {
+      for (const args of incoming.get(parameter.block) ?? []) {
+        const value = args[parameter.index];
+        if (value) stack.push(value.id);
+      }
+      continue;
+    }
+    const node = definitions.get(id);
+    if (node?.kind === 'unknown_effect') continue;
+    if (
+      node?.kind === 'assign' &&
+      node.expression.kind === 'cast' &&
+      node.expression.op === 'bitcast'
+    )
+      stack.push(node.expression.value.id);
+    else return true;
+  }
+  return false;
+}
+
 function observeNativeUnit(
   input: SourceFactsInput,
   unit: PreparedNativeUnit,
@@ -1423,6 +1577,8 @@ function observeNativeUnit(
       ],
     };
   }
+  if (environmentWriter(input, unit.ir, unit.interface_index, interfaces, context))
+    observed = { ...observed, fp_environment_writer: true };
   if (unit.context_assumptions) {
     const assumed = [
       ...unit.context_assumptions.constants.map((item) => item.register),
