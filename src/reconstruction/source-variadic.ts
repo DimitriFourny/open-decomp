@@ -14,7 +14,12 @@ import type { EmissionInput } from '../emitters/model.js';
 import type { BoundaryProjection } from './model.js';
 import type { LocalValidationSession } from './local-validation.js';
 import type { InferredCallee } from './source-model.js';
-import type { JoinedSlot, OutgoingSlot, OutgoingStackSlots } from './source-stack-arguments.js';
+import {
+  requireEscapedFrameFloor,
+  type JoinedSlot,
+  type OutgoingSlot,
+  type OutgoingStackSlots,
+} from './source-stack-arguments.js';
 
 /** Darwin arm64 passes every variadic argument in 8-byte outgoing stack slots
  * starting at SP+0. When the callee lets a pointer into its incoming argument
@@ -135,8 +140,9 @@ export function planVariadicStackArguments(
         ({ value, join }) =>
           value ?? join!.shared ?? joinStackSlot(blocks, storage, node.id, join!),
       );
-      for (const argument of taken)
-        for (const store of argument.stores) outgoing.consumed.set(store.id, node.id);
+      const stores = taken.flatMap((argument) => argument.stores);
+      requireEscapedFrameFloor(outgoing, node.id, stores, validation);
+      for (const store of stores) outgoing.consumed.set(store.id, node.id);
       calls.set(node.id, {
         ...projection,
         arguments: [...projection.arguments, ...values],

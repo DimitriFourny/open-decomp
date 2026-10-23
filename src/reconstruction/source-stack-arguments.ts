@@ -284,6 +284,11 @@ export interface OutgoingSlot {
  * taken twice). */
 export interface OutgoingStackSlots {
   readonly consumed: Map<string, string>;
+  /** The boundaries and stores through which an exact frame address leaves
+   * this body; empty when none does. Every slot admitted while one exists
+   * lies wholly below the lowest escaped offset and rests on
+   * `escaped_frame_floor` (`requireEscapedFrameFloor`). */
+  readonly escapes: readonly string[];
   /** The stores of the `extent` bytes at `offset` above `call`'s SP, when they
    * are its only observer; null when any condition fails. */
   readonly slot: (
@@ -292,6 +297,23 @@ export interface OutgoingStackSlots {
     extent: bigint,
     calleeOwned?: boolean,
   ) => OutgoingSlot | null;
+}
+
+/** Records the `escaped_frame_floor` premise (Decision D5) for a call whose
+ * argument presentation consumed `stores` while an exact frame address
+ * escapes this body (`slots.escapes`); nothing when none escapes. */
+export function requireEscapedFrameFloor(
+  slots: OutgoingStackSlots,
+  call: string,
+  stores: readonly Store[],
+  validation: LocalValidationSession,
+): void {
+  if (!slots.escapes.length || !stores.length) return;
+  validation.requireAbi(
+    'escaped_frame_floor',
+    [call, ...stores.map((store) => store.id), ...slots.escapes],
+    'A frame address handed to a callee or stored designates bytes at or above itself: code reached through an escaped exact frame address accesses no byte below the lowest escaped offset, so outgoing stack stores wholly below it are observed only through this body and its calls’ argument areas.',
+  );
 }
 
 /** Source view: the slot-eligibility facts of outgoing stack stores. A store
@@ -308,8 +330,11 @@ export interface OutgoingStackSlots {
  * its entry SP. Under ABI conformance callees use preserved registers and SP
  * only as such; any other stack address leaving this body (a scratch or
  * argument register at a boundary, or a stored value) may alias the outgoing
- * slots, and an unknown read offset may read any: then no slot is eligible
- * (null). */
+ * slots. An exact escaped address (`stack`/`stack_fragment`) designates bytes
+ * at or above itself (`escaped_frame_floor`, Decision D5), so a slot stays
+ * eligible only when its stored bytes end at or below the lowest escaped
+ * offset. A `dynamic_stack` escape, a boundary without a snapshot or an
+ * unknown read offset may reach any slot: then no slot is eligible (null). */
 export function createOutgoingStackSlots(
   input: EmissionInput,
   blocks: ReadonlyMap<string, BlockRegion>,
@@ -330,28 +355,37 @@ export function createOutgoingStackSlots(
     ),
   );
   // The stack analysis treats a live frame pointer at any call as an escape.
-  const stackKind = (fact: StackFact | undefined): boolean =>
-    fact?.value.kind === 'stack' ||
-    fact?.value.kind === 'stack_fragment' ||
-    fact?.value.kind === 'dynamic_stack';
+  // An exact escaped address lowers the floor (`escaped_frame_floor`); an
+  // inexact one may designate any slot (false: no slot is eligible).
+  let floor: bigint | undefined;
+  const escapes: string[] = [];
+  const escape = (id: string, fact: StackFact | undefined): boolean => {
+    const value = fact?.value;
+    if (value?.kind === 'dynamic_stack') return false;
+    if (value?.kind === 'stack' || value?.kind === 'stack_fragment') {
+      if (floor === undefined || value.offset < floor) floor = value.offset;
+      if (escapes.at(-1) !== id) escapes.push(id);
+    }
+    return true;
+  };
   const preserved = new Set(source.abi.preserved.map((register) => register.root));
   // A callee with a published `va_start` footprint (S8) reads, under the
   // variadic convention recorded with its call, its named registers (the
   // observed prefix) and its anonymous stack slots only: a stack address in
-  // another register at its call reaches nothing.
-  const leaks = (id: string): boolean => {
+  // another register at its call reaches nothing. False when the boundary has
+  // no snapshot or hands out an inexact stack address.
+  const bounded = (id: string): boolean => {
     const callee = inferred.get(id),
-      named = callee?.variadic && callee.parameters;
+      named = callee?.variadic && callee.parameters,
+      registers = stack.snapshots.get(id)?.registers;
     return (
-      stack.snapshots
-        .get(id)
-        ?.registers.some(
-          (row) =>
-            row.register.root !== source.abi.stack_pointer.root &&
-            !preserved.has(row.register.root) &&
-            (!named || named.some((register) => register.root === row.register.root)) &&
-            stackKind(row.fact),
-        ) ?? true
+      registers?.every(
+        (row) =>
+          row.register.root === source.abi.stack_pointer.root ||
+          preserved.has(row.register.root) ||
+          (named && !named.some((register) => register.root === row.register.root)) ||
+          escape(id, row.fact),
+      ) ?? false
     );
   };
   const stores = new Map<string, Store>();
@@ -359,12 +393,12 @@ export function createOutgoingStackSlots(
     for (const node of block.statements) {
       context.checkpoint(1);
       if (node.kind === 'store') {
-        if (stackKind(stack.values.get(node.value.id))) return null;
+        if (!escape(node.id, stack.values.get(node.value.id))) return null;
         stores.set(node.id, node);
-      } else if ((node.kind === 'call' || node.kind === 'unknown_effect') && leaks(node.id))
+      } else if ((node.kind === 'call' || node.kind === 'unknown_effect') && !bounded(node.id))
         return null;
     }
-    if (block.control.kind === 'indirect' && block.control.tail_call && leaks(block.control.id))
+    if (block.control.kind === 'indirect' && block.control.tail_call && !bounded(block.control.id))
       return null;
   }
   const owners = new Map<StackFact, { store: Store; offset: bigint; size: bigint }>(),
@@ -628,7 +662,7 @@ export function createOutgoingStackSlots(
       taken.push({ transfer, exit: block.control.id, store: owned.store });
       facts.add(owned.fact);
     }
-    if (size === undefined) return null;
+    if (size === undefined || (floor !== undefined && start + size > floor)) return null;
     // The call sees merged bytes only, and no store owns the slot's rest.
     for (let byte = 0n; byte < extent; byte++) {
       const other = memory.get(start + byte);
@@ -651,6 +685,7 @@ export function createOutgoingStackSlots(
   };
   return {
     consumed,
+    escapes,
     slot(call, offset, extent, calleeOwned = false) {
       let skipped = false;
       const through =
@@ -683,6 +718,7 @@ export function createOutgoingStackSlots(
       const owned = ownedSlot(snapshot.memory, start, extent);
       if (
         !owned ||
+        (floor !== undefined && start + owned.size > floor) ||
         (owned.fact.initialization !== 'initialized' && !unbarred(owned.store.id, call)) ||
         !unobserved(
           call,
@@ -769,7 +805,8 @@ export function planStackArgumentStores(
         [boundary, ...after.map((store) => store.id)],
         'A call’s stack arguments form a callee-owned area starting at its callee-entry SP, which the callee may overwrite, so a caller never reads back after the call the pre-call contents of those bytes: a later boundary that sees an argument store only through the call does not observe it.',
       );
-    const consumed = slots()!.consumed;
-    for (const store of taken) consumed.set(store.id, boundary);
+    const outgoing = slots()!;
+    requireEscapedFrameFloor(outgoing, boundary, taken, validation);
+    for (const store of taken) outgoing.consumed.set(store.id, boundary);
   }
 }
