@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
-import { openBinary, type BinarySession } from '../../../src/api/index.js';
+import { openBinary, type BinarySession, type ToolResult } from '../../../src/api/index.js';
 import { SqliteProjectStore } from '../../../src/project/store/index.js';
 import { NATIVE_SUMMARY_MARKER_ALLOWANCE } from '../../../src/service/analysis/native-summaries.js';
 import { CLANG, nativeOracleSkip } from '../../support/host-tools.js';
@@ -338,6 +338,92 @@ test(
     const later = await openBinary(binary, { cachePath: cache });
     try {
       assert.deepEqual(await decompile(later), cold, 'caller from the persisted large unit');
+    } finally {
+      await later.close();
+    }
+  },
+);
+
+// Request workers (T9): with four, decompiles run in parallel processes over a shared read-only
+// snapshot of the project and the session's owner publishes them. Every function's text and
+// work equal those of one owner decompiling them one after another, across the budgets in
+// which the callee reserve cut-off falls; the owner published every result (a later session
+// is served from the store).
+test(
+  'decompiles give identical texts and work with one and four request workers',
+  { skip: nativeOracleSkip(), timeout: 300_000 },
+  async (t) => {
+    const root = await mkdtemp(join(tmpdir(), 'open-decomp-request-workers-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const binary = join(root, 'determinism');
+    const compiled = spawnSync(
+      CLANG,
+      [
+        '-target',
+        'arm64-apple-macos13.0',
+        '-O1',
+        '-g0',
+        '-fno-inline',
+        resolve('test/service/analysis/request-determinism-source.c'),
+        '-o',
+        binary,
+      ],
+      { encoding: 'utf8' },
+    );
+    assert.equal(compiled.status, 0, compiled.stderr);
+    type Outcome = { text: string; work: unknown; cache: unknown };
+    const outcome = (result: ToolResult<'function_decompile'>): Outcome =>
+      'data' in result && result.data.delivery === 'inline'
+        ? { text: result.data.emission.text, work: result.data.work, cache: result.data.cache }
+        : { text: `unavailable: ${result.state}`, work: undefined, cache: undefined };
+    const run = async (cachePath: string, workers: number): Promise<Map<string, Outcome>> => {
+      const session = await openBinary(binary, {
+        cachePath,
+        openJob: { jobs: 2 },
+        requestWorkers: workers,
+      });
+      try {
+        const found = await session.findFunctions({ page: { limit: 1000 } });
+        assert.ok('data' in found);
+        const requests = [100_000, 104_000, undefined].flatMap((work) =>
+          found.data.items.map((fn) => ({ fn, work })),
+        );
+        // `workers` requests in flight (the session runs that many at a time), in order.
+        const results: ToolResult<'function_decompile'>[] = [];
+        let next = 0;
+        await Promise.all(
+          Array.from({ length: workers }, async () => {
+            for (let index = next++; index < requests.length; index = next++) {
+              const { fn, work } = requests[index]!;
+              results[index] = await session.decompileFunction(fn.id, {
+                emitter: 'c-like',
+                ...(work === undefined ? {} : { budget: { work } }),
+              });
+            }
+          }),
+        );
+        return new Map(
+          requests.map(({ fn, work }, index) => [
+            `${fn.display_name ?? fn.id}@${work ?? 'default'}`,
+            outcome(results[index]!),
+          ]),
+        );
+      } finally {
+        await session.close();
+      }
+    };
+    const serial = await run(join(root, 'one'), 1);
+    const parallel = await run(join(root, 'four'), 4);
+    assert.ok(serial.size >= 12, `${serial.size} requests`);
+    assert.deepEqual(parallel, serial);
+    // Each request computed its result (a failed one has none).
+    for (const [key, { cache }] of parallel) assert.notEqual(cache, 'hit', key);
+    // The owner published what the request workers computed: a later session hits it.
+    const later = await openBinary(binary, { cachePath: join(root, 'four') });
+    try {
+      const again = outcome(await later.decompile({ name: 'root' }, { emitter: 'c-like' }));
+      assert.equal(again.cache, 'hit');
+      assert.equal(again.text, serial.get('_root@default')?.text);
     } finally {
       await later.close();
     }

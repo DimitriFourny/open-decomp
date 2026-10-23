@@ -56,6 +56,12 @@ export interface WorkerPoolOptions {
    * `DEFAULT_NATIVE_SUMMARY_BYTES`. Past it the oldest writes are evicted; the open-time job
    * keeps callees first. */
   readonly native_summary_bytes?: number;
+  /** Request workers per project (1–32, default 1): above 1, `function_decompile` jobs run in
+   * that many processes over a shared read-only snapshot of the project, in parallel, and
+   * the project's owner publishes their results (docs/internals/project-cache.md §4b). Each
+   * worker holds its own decoded image and prepared units (about the owner's analysis
+   * memory). */
+  readonly request_workers?: number;
   readonly startup_timeout_ms?: number;
   readonly cancel_grace_ms?: number;
   /** Trusted, statically registered child entry point; defaults to workers/entry.js (or .ts under tsx). */
@@ -209,7 +215,8 @@ export class ProjectWorker {
   #expectedExit = false;
   #recovering: Promise<void> | undefined;
   #exit = deferred<void>();
-  #running: PendingJob | undefined;
+  /** Request workers of the owner (`WorkerPoolOptions.request_workers`). */
+  readonly #requestWorkers: number;
   #reserved = 0;
   readonly #jobs = new Map<string, PendingJob>();
   readonly #requests = new Map<string, Deferred<WorkerEvent>>();
@@ -225,6 +232,7 @@ export class ProjectWorker {
     this.path = path;
     this.#options = options;
     this.#release = release;
+    this.#requestWorkers = bounded(options.request_workers, 1, 1, 32);
   }
 
   get pid(): number | undefined {
@@ -313,6 +321,7 @@ export class ProjectWorker {
         mode,
         max_queued: this.#pool.max_queued,
         analysis_cache: this.#options.analysis_cache ?? true,
+        request_workers: this.#requestWorkers,
         ...(this.#options.native_summary_bytes === undefined
           ? {}
           : { native_summary_bytes: this.#options.native_summary_bytes }),
@@ -455,11 +464,59 @@ export class ProjectWorker {
     }
   }
 
+  /** Where a job runs. With one request worker every job runs alone, in admission order.
+   * Otherwise `function_decompile` jobs run in the owner's request workers, in parallel; the
+   * owner runs one other job meanwhile; and a mutation (import, annotations, discovery) runs
+   * alone, after every job admitted before it and before every job admitted after it, so
+   * each job reads the revision it was admitted at. */
+  #lane(job: PendingJob): 'pool' | 'owner' | 'exclusive' {
+    if (this.#requestWorkers <= 1) return 'exclusive';
+    if (job.cancelled) return 'owner';
+    if (job.request.kind === 'import') return 'exclusive';
+    if (job.request.operation === 'function_decompile') return 'pool';
+    return job.request.operation === 'annotations_apply' ||
+      job.request.operation === 'functions_discover'
+      ? 'exclusive'
+      : 'owner';
+  }
+
   #pump(): void {
-    if (this.#running || this.#recovering || this.#closed) return;
-    const job = [...this.#jobs.values()].find((item) => item.admitted);
-    if (!job) return;
-    this.#running = job;
+    if (this.#recovering || this.#closed) return;
+    let pooled = 0,
+      owner = false;
+    for (const job of this.#jobs.values()) {
+      if (!job.running) continue;
+      const lane = this.#lane(job);
+      if (lane === 'exclusive') return;
+      if (lane === 'pool') pooled++;
+      else owner = true;
+    }
+    if (this.#requestWorkers <= 1) {
+      if (owner || pooled) return;
+      const job = [...this.#jobs.values()].find((item) => item.admitted);
+      if (job) this.#start(job);
+      return;
+    }
+    // A job that cannot start yet keeps every later mutation waiting.
+    let blocked = false;
+    for (const job of this.#jobs.values()) {
+      if (job.running) continue;
+      const lane = this.#lane(job);
+      if (lane === 'exclusive') {
+        if (!blocked && job.admitted && !owner && pooled === 0) this.#start(job);
+        return;
+      }
+      if (job.admitted && lane === 'pool' && pooled < this.#requestWorkers) {
+        this.#start(job);
+        pooled++;
+      } else if (job.admitted && lane === 'owner' && !owner) {
+        this.#start(job);
+        owner = true;
+      } else blocked = true;
+    }
+  }
+
+  #start(job: PendingJob): void {
     job.running = true;
     void this.#rpc({ kind: job.cancelled ? 'cancel' : 'run', id: job.id })
       .then((event) => {
@@ -517,7 +574,6 @@ export class ProjectWorker {
     clearTimeout(job.timer);
     job.cleanup();
     this.#jobs.delete(job.id);
-    if (this.#running === job) this.#running = undefined;
   }
 
   #finish(job: PendingJob, outcome: JobOutcome): void {

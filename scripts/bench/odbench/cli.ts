@@ -3,6 +3,7 @@
  * Run `--help` for the command list.
  */
 import { mkdir, writeFile } from 'node:fs/promises';
+import { availableParallelism } from 'node:os';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { corpusSha256, loadCorpus, verifyInputs } from './corpus.js';
@@ -18,12 +19,15 @@ import type { Corpus, JudgeOptions, LaneRun, TaskName, Tier } from './types.js';
 
 const REFERENCE_LANE = 'ghidra';
 
+/** Request workers per binary of an OD run (roadmap 4 T9 measurement: docs/internals/project-cache.md). */
+const DEFAULT_OD_JOBS = Math.max(1, Math.min(4, availableParallelism() >> 1));
+
 const USAGE = `Usage: bench <command> [flags]
 
 Commands:
   inputs                       verify every corpus binary/source hash in the data store
   select [--check]             rebuild corpus.json (--check: verify the committed one reproduces)
-  run od --label L [--repo PATH] [--tier quick|full] [--repeat N] [--jobs 1] [--inference proven|likely] [--only BINARY,...]
+  run od --label L [--repo PATH] [--tier quick|full] [--repeat N] [--jobs N] [--inference proven|likely] [--only BINARY,...]
                                [--no-open-job]
   run ghidra [--tier] [--install DIR] [--java-home DIR] [--force] [--only BINARY,...]
   run source [--tier]
@@ -33,14 +37,15 @@ Commands:
   report --lanes A,B,... [--reference ghidra] [--pairs A:B,...] [--tier] [--model M] [--out DIR]
         [--qa-samples N] [--comprehension-samples N]
   all --label L [--repo PATH] [--base LANE] [--tier quick] [--no-judge] [--model M]
-        [--repeat N] [--jobs 1] [--inference proven|likely] [--only BINARY,...] [--install DIR] [--java-home DIR]
+        [--repeat N] [--jobs N] [--inference proven|likely] [--only BINARY,...] [--install DIR] [--java-home DIR]
         [--force] [--backend omp|anthropic|cmd] [--command CMD] [--concurrency N]
         [--qa-samples N] [--comprehension-samples N] [--out DIR]
         run od, source and ghidra (cached), judge od-L/ghidra/source[/base], write the report
 
 Defaults: --tier quick, --model ${DEFAULT_MODEL}, --backend anthropic if ANTHROPIC_API_KEY is set else omp,
 --concurrency 8, --qa-samples 3, --comprehension-samples 1, --repeat 1, --inference proven,
---repo this checkout, --reference ghidra. --no-open-job opens without the open-time job (T8).
+--repo this checkout, --reference ghidra, --jobs ${DEFAULT_OD_JOBS} (request workers per binary: min(4, cores/2)).
+--no-open-job opens without the open-time job (T8).
 Lanes: od-<label>, ghidra (reference), source (calibration anchor). Data store: $OPEN_DECOMP_BENCH_DIR or .odbench/.
 `;
 
@@ -248,7 +253,7 @@ async function runOd(flags: Flags, loaded: Loaded): Promise<LaneRun> {
     repo: resolve(text(flags, 'repo') ?? resolve(ODBENCH_DIR, '../../..')),
     tier: choice<Tier>(flags, 'tier', ['quick', 'full'], 'quick'),
     repeat: integer(flags, 'repeat', 1),
-    jobs: integer(flags, 'jobs', 1),
+    jobs: integer(flags, 'jobs', DEFAULT_OD_JOBS),
     inference: choice(flags, 'inference', ['proven', 'likely'], 'proven'),
     only: list(flags, 'only'),
     openJob: flags['no-open-job'] !== true,

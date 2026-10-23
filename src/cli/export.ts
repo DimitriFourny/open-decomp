@@ -1,8 +1,6 @@
-import { cp, mkdir, readdir, rename, rm, writeFile } from 'node:fs/promises';
-import { constants } from 'node:fs';
+import { mkdir, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { availableParallelism } from 'node:os';
 import { basename, join } from 'node:path';
-import { openBinary } from '../api/index.js';
 import type { BinaryFunction, BinarySession } from '../api/index.js';
 import { cSourceName } from '../metadata/symbols/c-names.js';
 import type { Target, ToolResult } from '../core/index.js';
@@ -11,13 +9,15 @@ export interface ExportOptions {
   readonly out: string;
   readonly language: 'c-like' | 'python-like';
   readonly inference?: 'proven' | 'likely' | undefined;
-  readonly jobs: number | undefined;
-  readonly sliceId?: string | undefined;
+  /** Decompiles in flight; the session must have been opened with this many request
+   * workers (`exportJobs`). */
+  readonly jobs: number;
   readonly name?: string | undefined;
-  /** False: extra workers open their project copies without analysis caching too. */
-  readonly analysisCache?: boolean | undefined;
-  /** The extra workers' project copies keep the primary's unit store cap. */
-  readonly unitStoreBytes?: number | undefined;
+}
+
+/** Request workers of an export: `--jobs`, default min(4, CPUs/2). */
+export function exportJobs(jobs: number | undefined): number {
+  return jobs ?? Math.max(1, Math.min(4, availableParallelism() >> 1));
 }
 export interface ExportSummary {
   readonly functions: number;
@@ -693,71 +693,31 @@ export async function exportBinary(
   if (outer.aborted) forward();
   else outer.addEventListener('abort', forward, { once: true });
   const exporter = new Exporter(options, primary.inputPath, signal, primary.image.target.format);
-  const sessions: BinarySession[] = [primary];
-  let scratch: string | undefined;
   try {
     const data = await exporter.load(primary);
     exporter.buildRows(data.functions);
     const rows = exporter.rows;
-    const jobs = Math.max(
-      1,
-      Math.min(
-        options.jobs ?? Math.max(1, Math.min(4, availableParallelism() >> 1)),
-        rows.length || 1,
-      ),
-    );
+    const jobs = Math.max(1, Math.min(options.jobs, rows.length || 1));
     await mkdir(options.out, { recursive: true });
     await exporter.prepareDirectory();
     log(
       `export: ${rows.length} functions${options.name === undefined ? '' : ` matching "${options.name}"`}, ${jobs} worker${jobs === 1 ? '' : 's'}`,
     );
-    if (jobs > 1) {
-      // A project database has one owner. Extra workers analyze private copies of the
-      // finished import (copy-on-write where the filesystem supports it).
-      await primary.close();
-      sessions.length = 0;
-      scratch = join(primary.cachePath, `.export-${process.pid}-${Date.now()}`);
-      const projectName = basename(primary.projectPath);
-      await Promise.all(
-        Array.from({ length: jobs }, async (_, index) => {
-          let cachePath = primary.cachePath;
-          if (index > 0) {
-            cachePath = join(scratch!, `w${index}`);
-            await mkdir(cachePath, { recursive: true, mode: 0o700 });
-            await cp(primary.projectPath, join(cachePath, projectName), {
-              recursive: true,
-              mode: constants.COPYFILE_FICLONE,
-            });
-          }
-          sessions.push(
-            await openBinary(primary.inputPath, {
-              cachePath,
-              ...(options.sliceId === undefined ? {} : { sliceId: options.sliceId }),
-              ...(options.analysisCache === false ? { analysisCache: false } : {}),
-              ...(options.unitStoreBytes === undefined
-                ? {}
-                : { unitStoreBytes: options.unitStoreBytes }),
-              // A copy of the primary, whose open already ran the open-time job.
-              openJob: false,
-              signal,
-            }),
-          );
-        }),
-      );
-    }
-
     let next = 0,
       done = 0,
       lastReport = started;
     const counts = { complete: 0, partial: 0, failed: 0 };
     let failure: { error: unknown } | undefined;
-    const worker = async (session: BinarySession): Promise<void> => {
+    // `jobs` loops over the one session: its request workers analyse the decompiles in
+    // parallel and its project owner publishes every result (docs/internals/project-cache.md
+    // §4b), so the files do not depend on `jobs`.
+    const worker = async (): Promise<void> => {
       try {
         for (;;) {
           signal.throwIfAborted();
           const row = rows[next++];
           if (row === undefined) return;
-          await exporter.process(session, row);
+          await exporter.process(primary, row);
           if (row.state === 'complete') counts.complete++;
           else if (row.state === 'partial') counts.partial++;
           else counts.failed++;
@@ -775,11 +735,11 @@ export async function exportBinary(
         stop.abort(error);
       }
     };
-    await Promise.all(sessions.map((session) => worker(session)));
+    await Promise.all(Array.from({ length: jobs }, () => worker()));
     if (failure) throw failure.error;
     signal.throwIfAborted();
     // Image-wide merged structure types: the names the pseudocode files use.
-    const types = await sessions[0]!.types({}, { signal });
+    const types = await primary.types({}, { signal });
     signal.throwIfAborted();
     let bytes = await exporter.writeIndexes(
         data,
@@ -806,7 +766,5 @@ export async function exportBinary(
     };
   } finally {
     outer.removeEventListener('abort', forward);
-    await Promise.allSettled(sessions.map((session) => session.close()));
-    if (scratch !== undefined) await rm(scratch, { recursive: true, force: true });
   }
 }

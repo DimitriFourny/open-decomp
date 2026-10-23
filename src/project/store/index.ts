@@ -17,6 +17,7 @@ import {
   writeSync,
 } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
 import {
   AddressMap,
@@ -329,10 +330,20 @@ export class SqliteProjectStore implements ProjectStore {
   // Analysis artifacts delivered with analysis caching disabled: memory only, newest kept.
   readonly #transientArtifacts = new Map<string, { artifact: Artifact; bytes: Uint8Array }>();
   #transientBytes = 0;
+  // A request snapshot (`openSnapshot`): the main connection is a read-only immutable copy of
+  // the owner's database, and written summaries go to this private database instead.
+  readonly #outbox: DatabaseSync | undefined;
+  readonly #outboxStatements = new Map<string, StatementSync>();
 
-  private constructor(path: string, db: DatabaseSync, summaryCap = DEFAULT_NATIVE_SUMMARY_BYTES) {
+  private constructor(
+    path: string,
+    db: DatabaseSync,
+    summaryCap = DEFAULT_NATIVE_SUMMARY_BYTES,
+    outbox?: DatabaseSync,
+  ) {
     this.#path = path;
     this.#db = db;
+    this.#outbox = outbox;
     if (!Number.isSafeInteger(summaryCap) || summaryCap < 0)
       fail('invalid_input', 'Invalid native summary byte cap');
     this.#summaryCap = summaryCap;
@@ -353,6 +364,72 @@ export class SqliteProjectStore implements ProjectStore {
       this.#statements.set(sql, statement);
     }
     return statement;
+  }
+
+  /** A statement on the database summaries are written to (the outbox of a request snapshot). */
+  #summaryPrepare(sql: string): StatementSync {
+    if (!this.#outbox) return this.#prepare(sql);
+    let statement = this.#outboxStatements.get(sql);
+    if (!statement) {
+      statement = this.#outbox.prepare(sql);
+      this.#outboxStatements.set(sql, statement);
+    }
+    return statement;
+  }
+
+  /** A request worker's view of a project another process owns (docs/internals/project-cache.md
+   * §4b): `database` is an immutable copy of the owner's database (`snapshotDatabase`), opened
+   * read-only and without locking, so any number of processes share it; images and artifacts
+   * are read from the owner's project directory `path` (immutable, content-checked files).
+   * Every write except a summary fails; summaries are written to the private database in the
+   * absent or empty directory `outbox`, from which the owner imports them
+   * (`importNativeSummaries`). */
+  static openSnapshot(
+    path: string,
+    database: string,
+    options: { readonly outbox: string; readonly native_summary_bytes?: number },
+  ): SqliteProjectStore {
+    const root = realpathSync(resolve(path));
+    const stat = lstatSync(database);
+    if (!stat.isFile() || stat.isSymbolicLink())
+      fail('permission_denied', 'Project snapshot must be a regular file');
+    const url = pathToFileURL(realpathSync(database));
+    url.search = '?immutable=1';
+    const db = new DatabaseSync(url, { readOnly: true });
+    let outbox: DatabaseSync | undefined;
+    try {
+      const version = numberField(db.prepare('PRAGMA user_version').get(), 'user_version');
+      if (version !== STORE_SCHEMA_VERSION)
+        fail('unsupported_version', `Project snapshot schema ${version} is not current`);
+      mkdirSync(options.outbox, { recursive: true, mode: 0o700 });
+      const outboxPath = join(options.outbox, 'project.sqlite');
+      if (existsSync(outboxPath)) fail('invalid_input', 'Snapshot outbox already exists');
+      outbox = new DatabaseSync(outboxPath);
+      outbox.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=OFF; ${NATIVE_SUMMARIES_TABLE}`);
+      return new SqliteProjectStore(root, db, options.native_summary_bytes, outbox);
+    } catch (error) {
+      outbox?.close();
+      db.close();
+      throw error;
+    }
+  }
+
+  /** Write an immutable copy of this project's database to the absent file `destination`,
+   * after writing queued summaries: checkpoint the write-ahead log into the main file, then
+   * clone it (copy-on-write where the filesystem supports it). The copy is what
+   * `openSnapshot` reads. */
+  snapshotDatabase(destination: string): void {
+    this.#current();
+    if (this.#outbox) fail('invalid_input', 'A project snapshot cannot be snapshotted');
+    if (this.#db.isTransaction) fail('invalid_input', 'Cannot snapshot inside a transaction');
+    this.flushNativeSummaries();
+    if (existsSync(destination)) fail('invalid_input', 'Project snapshot destination exists');
+    const checkpoint = this.#db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
+    if (numberField(checkpoint, 'busy') !== 0)
+      fail('internal_error', 'Project log could not be checkpointed for a snapshot');
+    cpSync(join(this.#path, 'project.sqlite'), destination, {
+      mode: constants.COPYFILE_FICLONE,
+    });
   }
 
   static open(
@@ -1360,6 +1437,7 @@ export class SqliteProjectStore implements ProjectStore {
     cache: CacheIdentity;
     analysis_ids?: readonly string[];
     reuse_scope?: string;
+    artifact_id?: string;
   }): Promise<
     | { state: 'published'; artifact: Artifact }
     | { state: 'stale' | 'cancelled'; current_revision: number }
@@ -1392,7 +1470,10 @@ export class SqliteProjectStore implements ProjectStore {
     )
       fail('invalid_input', 'Analysis reuse index does not match its immutable scope');
     const artifact: Artifact = {
-      id: newIdentity('artifact'),
+      id:
+        input.artifact_id === undefined
+          ? newIdentity('artifact')
+          : artifactIdSchema.parse(input.artifact_id),
       project_id: this.project_id,
       revision: current,
       media_type: input.media_type,
@@ -1437,12 +1518,19 @@ export class SqliteProjectStore implements ProjectStore {
     return { state: 'published', artifact };
   }
 
-  publishTransientArtifact(input: { media_type: string; bytes: Uint8Array }): Artifact {
+  publishTransientArtifact(input: {
+    media_type: string;
+    bytes: Uint8Array;
+    artifact_id?: string;
+  }): Artifact {
     const current = this.#current();
     if (input.bytes.length > MAX_ARTIFACT_BYTES)
       fail('resource_limit', 'Artifact exceeds 64 MiB limit');
     const artifact: Artifact = {
-      id: newIdentity('artifact'),
+      id:
+        input.artifact_id === undefined
+          ? newIdentity('artifact')
+          : artifactIdSchema.parse(input.artifact_id),
       project_id: this.project_id,
       revision: current,
       media_type: input.media_type,
@@ -1561,21 +1649,22 @@ export class SqliteProjectStore implements ProjectStore {
    * current revision) in order, evict past the byte cap. Never throws; returns the rows
    * inserted (0 when the write failed). */
   #insertNativeSummaries(current: number, rows: Iterable<EncodedSummary>): number {
+    const db = this.#outbox ?? this.#db;
     let lowered = false,
       inserted = 0;
     try {
-      if (this.#synchronous > 1) {
-        this.#db.exec('PRAGMA synchronous=NORMAL');
+      if (!this.#outbox && this.#synchronous > 1) {
+        db.exec('PRAGMA synchronous=NORMAL');
         lowered = true;
       }
-      this.#db.exec('BEGIN IMMEDIATE');
+      db.exec('BEGIN IMMEDIATE');
       try {
-        this.#prepare('DELETE FROM native_summaries WHERE revision<?').run(current);
+        this.#summaryPrepare('DELETE FROM native_summaries WHERE revision<?').run(current);
         let seq = numberField(
-          this.#prepare('SELECT COALESCE(MAX(seq),0) AS seq FROM native_summaries').get(),
+          this.#summaryPrepare('SELECT COALESCE(MAX(seq),0) AS seq FROM native_summaries').get(),
           'seq',
         );
-        const insert = this.#prepare(
+        const insert = this.#summaryPrepare(
           'INSERT OR REPLACE INTO native_summaries(scope,function_id,revision,seq,allowance,work,bytes,digest,payload) VALUES (?,?,?,?,?,?,?,?,?)',
         );
         for (const row of rows) {
@@ -1593,18 +1682,20 @@ export class SqliteProjectStore implements ProjectStore {
           inserted++;
         }
         if (inserted === 0) {
-          this.#db.exec('ROLLBACK');
+          db.exec('ROLLBACK');
           return 0;
         }
         let total = numberField(
-          this.#prepare('SELECT COALESCE(SUM(bytes),0) AS total FROM native_summaries').get(),
+          this.#summaryPrepare(
+            'SELECT COALESCE(SUM(bytes),0) AS total FROM native_summaries',
+          ).get(),
           'total',
         );
         if (total > this.#summaryCap) {
-          const oldest = this.#prepare(
+          const oldest = this.#summaryPrepare(
             'SELECT scope,function_id,bytes FROM native_summaries ORDER BY revision,seq LIMIT 64',
           );
-          const drop = this.#prepare(
+          const drop = this.#summaryPrepare(
             'DELETE FROM native_summaries WHERE scope=? AND function_id=?',
           );
           while (total > this.#summaryCap) {
@@ -1617,17 +1708,17 @@ export class SqliteProjectStore implements ProjectStore {
             }
           }
         }
-        this.#db.exec('COMMIT');
+        db.exec('COMMIT');
         return inserted;
       } catch (error) {
-        this.#db.exec('ROLLBACK');
+        db.exec('ROLLBACK');
         throw error;
       }
     } catch {
       // A cache write never fails a request; the rows are recomputed when next needed.
       return 0;
     } finally {
-      if (lowered) this.#db.exec(`PRAGMA synchronous=${this.#synchronous}`);
+      if (lowered) db.exec(`PRAGMA synchronous=${this.#synchronous}`);
     }
   }
 
@@ -1670,7 +1761,7 @@ export class SqliteProjectStore implements ProjectStore {
 
   importNativeSummaries(
     sources: readonly string[],
-    scope: string,
+    scope: string | null,
     order: readonly string[],
   ): number {
     const current = this.#current();
@@ -1682,38 +1773,59 @@ export class SqliteProjectStore implements ProjectStore {
       const present = this.#prepare(
         'SELECT allowance FROM native_summaries WHERE scope=? AND function_id=? AND revision=?',
       );
-      // One candidate per function: the row of the smallest allowance any copy holds.
-      const candidates = new Map<
-        string,
-        { readonly source: number; readonly allowance: number; readonly bytes: number }
-      >();
+      // One candidate per scope and function: the row of the smallest allowance any copy holds.
+      type Candidate = {
+        readonly scope: string;
+        readonly function_id: string;
+        readonly source: number;
+        readonly allowance: number;
+        readonly bytes: number;
+      };
+      const candidates = new Map<string, Candidate>();
       dbs.forEach((db, source) => {
-        for (const row of db
-          .prepare(
-            'SELECT function_id,allowance,bytes FROM native_summaries WHERE scope=? AND revision=?',
-          )
-          .iterate(scope, current)) {
-          const id = stringField(row, 'function_id'),
+        const rows =
+          scope === null
+            ? db
+                .prepare(
+                  'SELECT scope,function_id,allowance,bytes FROM native_summaries WHERE revision=?',
+                )
+                .iterate(current)
+            : db
+                .prepare(
+                  'SELECT scope,function_id,allowance,bytes FROM native_summaries WHERE scope=? AND revision=?',
+                )
+                .iterate(scope, current);
+        for (const row of rows) {
+          const rowScope = stringField(row, 'scope'),
+            id = stringField(row, 'function_id'),
+            key = `${rowScope}\0${id}`,
             allowance = numberField(row, 'allowance'),
-            prior = candidates.get(id);
+            prior = candidates.get(key);
           if (!prior || allowance < prior.allowance)
-            candidates.set(id, { source, allowance, bytes: numberField(row, 'bytes') });
+            candidates.set(key, {
+              scope: rowScope,
+              function_id: id,
+              source,
+              allowance,
+              bytes: numberField(row, 'bytes'),
+            });
         }
       });
       // Callees first, as many as fit in the cap next to the rows of this revision already
       // held; a row this project holds at an allowance the import cannot improve stays.
       let room = this.#summaryCap - this.nativeSummaryUsage().bytes;
-      const selected: string[] = [];
-      for (const [id, candidate] of [...candidates].sort(
-        ([a], [b]) =>
-          (rank.get(a) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b) ?? Number.MAX_SAFE_INTEGER) ||
+      const selected: Candidate[] = [];
+      for (const [, candidate] of [...candidates].sort(
+        ([a, left], [b, right]) =>
+          (rank.get(left.function_id) ?? Number.MAX_SAFE_INTEGER) -
+            (rank.get(right.function_id) ?? Number.MAX_SAFE_INTEGER) ||
           (a < b ? -1 : a > b ? 1 : 0),
       )) {
-        const prior = present.get(scope, id, current);
+        const prior = present.get(candidate.scope, candidate.function_id, current);
         if (prior && numberField(prior, 'allowance') <= candidate.allowance) continue;
         if (candidate.bytes > room) continue;
         room -= candidate.bytes;
-        selected.push(id);
+        selected.push(candidate);
       }
       const reads = dbs.map((db) =>
         db.prepare(
@@ -1725,20 +1837,22 @@ export class SqliteProjectStore implements ProjectStore {
       // leaves of the call graph before the callees many functions share.
       function* rows(): Generator<EncodedSummary> {
         for (let index = selected.length - 1; index >= 0; index--) {
-          const function_id = selected[index]!;
-          const row = reads[candidates.get(function_id)!.source]!.get(scope, function_id, current);
+          const { scope: rowScope, function_id, source } = selected[index]!;
+          const row = reads[source]!.get(rowScope, function_id, current);
           const payload = row?.['payload'],
             digest = row?.['digest'];
           if (
             !row ||
             !(payload instanceof Uint8Array) ||
             typeof digest !== 'string' ||
-            summaryDigest(scope, function_id, current, payload) !== digest ||
+            rowScope.length < 1 ||
+            rowScope.length > 256 ||
+            summaryDigest(rowScope, function_id, current, payload) !== digest ||
             payload.length > Math.min(summaryCap, MAX_NATIVE_SUMMARY_ROW_BYTES)
           )
             continue;
           yield {
-            scope,
+            scope: rowScope,
             function_id: entityIdSchema.parse(function_id),
             revision: current,
             allowance: numberField(row, 'allowance'),
@@ -1770,9 +1884,12 @@ export class SqliteProjectStore implements ProjectStore {
           })
         : null;
     }
-    const row = this.#prepare(
-      'SELECT revision,allowance,work,digest,payload FROM native_summaries WHERE scope=? AND function_id=?',
-    ).get(scope, functionId);
+    // A request snapshot's own writes replace the snapshot's row, as a write would in place.
+    const select =
+      'SELECT revision,allowance,work,digest,payload FROM native_summaries WHERE scope=? AND function_id=?';
+    const row =
+      (this.#outbox ? this.#summaryPrepare(select).get(scope, functionId) : undefined) ??
+      this.#prepare(select).get(scope, functionId);
     if (!row) return null;
     try {
       return this.#decodeSummary(scope, functionId, numberField(row, 'revision'), {
@@ -1946,6 +2063,7 @@ export class SqliteProjectStore implements ProjectStore {
     if (this.#transaction) fail('invalid_input', 'Cannot close a project inside a transaction');
     this.flushNativeSummaries();
     this.#db.close();
+    this.#outbox?.close();
     this.#closed = true;
     this.#loadedImages.clear();
     this.#loadedImageBytes = 0;

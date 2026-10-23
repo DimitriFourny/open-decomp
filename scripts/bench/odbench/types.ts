@@ -186,7 +186,9 @@ export interface LaneRun {
   readonly finished: string;
   readonly host: HostInfo;
   readonly repeat: number;
-  /** Timing is comparable only for lanes run with `jobs: 1` on an otherwise idle host. */
+  /** Request workers per binary. With more than one, `decompile_ms_total` and `first10_ms` are
+   * wall times over the workers; per-function times compare only between lanes of equal `jobs`
+   * on an otherwise idle host. */
   readonly jobs: number;
   readonly binaries: Readonly<Record<string, BinaryTiming>>;
   /** Keyed by CorpusFunction.id. */

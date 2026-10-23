@@ -261,7 +261,7 @@ test('a jobs=1 lane re-renders unchanged through the store', async () => {
   );
 });
 
-test('--jobs above 1 is refused until parallel requests exist', async () => {
+test('--jobs outside 1..32 is refused', async () => {
   await assert.rejects(
     runOdLane({
       corpus,
@@ -272,16 +272,18 @@ test('--jobs above 1 is refused until parallel requests exist', async () => {
       repeat: 1,
       inference: 'proven',
       only: null,
-      jobs: 4,
+      jobs: 0,
       openJob: true,
     }),
-    /--jobs 4 is not supported yet.*T9/,
+    /jobs must be an integer from 1 to 32/,
   );
 });
 
-test('first10 is the 10th corpus function result, null below 10 functions', () => {
+test('first10 is when the first 10 corpus functions all have a result, null below 10', () => {
   const at = Array.from({ length: 12 }, (_, index) => (index + 1) * 100);
   assert.equal(firstFunctionsMs(at), 1000);
+  // Several request workers: results arrive out of corpus order.
+  assert.equal(firstFunctionsMs([...at.slice(0, 8), 1500, 900, 950]), 1500);
   assert.equal(firstFunctionsMs(at.slice(0, 9)), null);
   assert.equal(firstFunctionsMs([...at.slice(0, 9), null]), null);
 });

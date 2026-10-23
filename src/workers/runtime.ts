@@ -42,7 +42,9 @@ import {
   type WorkRequest,
   type WorkerEvent,
   type WorkerSnapshot,
+  type ExecuteRequest,
 } from './protocol.js';
+import { RequestPool, publishPooled, type PooledOutcome } from './request-pool.js';
 
 export interface PreparedImport {
   /** Native facts plus the bounded diagnostic/capability report from import preparation. */
@@ -121,6 +123,71 @@ export async function describeProject(store: ProjectStore): Promise<WorkerSnapsh
 const IDLE_FLUSH_DELAY_MS = 200;
 const IDLE_FLUSH_ROWS = 8;
 
+/** A request's operation context: its budget, its deadline counted from admission. */
+export function requestContext(
+  budget: WorkRequest['budget'],
+  deadline: number,
+  onProgress: (phase: string, completed: number, total: number | null) => void,
+): OperationContext {
+  return createOperationContext({
+    budget: {
+      ...budget,
+      deadline_ms: Math.max(1, Math.min(budget.deadline_ms, deadline - Date.now())),
+    },
+    onProgress,
+  });
+}
+
+/** At most one progress report per 100 ms. */
+export function throttled(
+  report: (phase: string, completed: number, total: number | null) => void,
+): (phase: string, completed: number, total: number | null) => void {
+  let last = 0;
+  return (phase, completed, total) => {
+    const now = Date.now();
+    if (now - last < 100) return;
+    last = now;
+    report(phase, completed, total);
+  };
+}
+
+/** The part of an `execute` request that reads and writes only `store`: the same in the
+ * owner (the project's store) and in a request worker (its `RequestStore`), so where a
+ * request runs never changes its work or result. Returns the validated result. */
+export async function executeRequest(
+  handler: WorkerHandler,
+  request: ExecuteRequest,
+  scope: {
+    readonly store: ProjectStore;
+    readonly context: OperationContext;
+    readonly job_id: string;
+    readonly analysis_cache: boolean;
+  },
+): Promise<unknown> {
+  const { store, context } = scope;
+  const args = toolSchemas[request.operation].input.parse(request.args);
+  let result: unknown = await handler.execute(request.operation, args, {
+    store,
+    context,
+    job_id: scope.job_id,
+    ...(scope.analysis_cache ? {} : { analysis_cache: false }),
+    ...(request.max_result_bytes === undefined
+      ? {}
+      : { max_result_bytes: request.max_result_bytes }),
+  });
+  // Prepared callee summaries this request queued and no publication released: readable
+  // from here on. They are written later (idle slices, queue pressure, close), never on the
+  // request's path.
+  store.releaseNativeSummaries();
+  // A handler that parsed and size-checked its result under these very limits
+  // (queryWorkerHandler) has marked it; do not repeat the parse and serialization.
+  if (!isSchemaValidated(result)) {
+    result = toolSchemas[request.operation].output.parse(result);
+    frame(result, Math.min(request.budget.output_bytes, request.max_result_bytes ?? Infinity));
+  }
+  return result;
+}
+
 /** Trusted in-process observation seam for deterministic fault injection at real durable boundaries.
  * It is never selected or configured by an IPC request. */
 export interface WorkerRuntimeObserver {
@@ -137,6 +204,9 @@ export function runProjectWorker(handler?: WorkerHandler, observer?: WorkerRunti
   let unitsJob: { readonly id: string; readonly controller: AbortController } | undefined;
   let chain = Promise.resolve();
   let pending = 0;
+  // Request workers analysing `function_decompile` jobs of this project in parallel (the
+  // `open` command's `request_workers` > 1; docs/internals/project-cache.md §4b).
+  let requestPool: RequestPool | undefined;
   // Queued callee summaries are cache data: they are written in small slices while no command
   // is waiting, after the response that produced them was sent. A crash loses them, never a
   // job or artifact (those commit before their response; docs/internals/project-cache.md).
@@ -193,6 +263,41 @@ export function runProjectWorker(handler?: WorkerHandler, observer?: WorkerRunti
     db.saveJob(result);
     return result;
   };
+  /** Publish a request worker's outcome as the owner would have published it in place: its
+   * artifacts under the identities its result carries, then the job's terminal state. */
+  const finishPooled = async (running: Job, outcome: PooledOutcome): Promise<void> => {
+    const db = requireStore();
+    let job = running;
+    let result: unknown;
+    try {
+      // Publications the request made before failing stand, as they would in the owner.
+      await publishPooled(db, job.id, outcome.publications);
+      if (outcome.error) throw new OperationError(outcome.error);
+      const persisted = db.readJob(job.id);
+      if (persisted && terminal(persisted)) job = persisted;
+      else {
+        job =
+          outcome.job && terminal(outcome.job)
+            ? outcome.job
+            : {
+                ...job,
+                state: 'completed',
+                progress: { phase: 'complete', completed: 1, total: 1 },
+              };
+        db.saveJob(job);
+      }
+      result = outcome.result;
+    } catch (error) {
+      result = undefined;
+      job = saveFailure(job, error);
+    }
+    await send({
+      kind: 'job',
+      id: job.id,
+      job: encodeJob(job),
+      ...(result === undefined ? {} : { result }),
+    });
+  };
   const execute = async (command: Command): Promise<void> => {
     if (stopping) return;
     if (command.kind === 'open') {
@@ -211,6 +316,21 @@ export function runProjectWorker(handler?: WorkerHandler, observer?: WorkerRunti
       );
       maxQueued = command.max_queued;
       analysisCache = command.analysis_cache;
+      if (handler && command.request_workers > 1) {
+        const pool = new RequestPool(command.request_workers, {
+          project: command.path,
+          analysis_cache: analysisCache,
+          ...(command.native_summary_bytes === undefined
+            ? {}
+            : { native_summary_bytes: command.native_summary_bytes }),
+        });
+        requestPool = pool;
+        // A request worker analysing when the owner is stopped would outlive it.
+        process.once('SIGTERM', () => {
+          pool.kill();
+          process.exit(143);
+        });
+      }
       const recoveryContext = createOperationContext();
       let cursor: string | undefined;
       do {
@@ -262,6 +382,8 @@ export function runProjectWorker(handler?: WorkerHandler, observer?: WorkerRunti
     }
     if (command.kind === 'close') {
       if (admitted.size) fail('invalid_input', 'Cannot close with admitted jobs');
+      // The request workers' prepared units join the project's store before it closes.
+      await requestPool?.close(db);
       await db.close();
       store = undefined;
       stopping = true;
@@ -294,6 +416,9 @@ export function runProjectWorker(handler?: WorkerHandler, observer?: WorkerRunti
       } finally {
         unitsJob = undefined;
       }
+      // Request workers start now, over a snapshot that holds the job's units, so the first
+      // requests do not wait for them.
+      requestPool?.prepare(db);
       await send({ kind: 'units', id: command.id, report });
       return;
     }
@@ -368,26 +493,35 @@ export function runProjectWorker(handler?: WorkerHandler, observer?: WorkerRunti
         db.saveJob(job);
         await send({ kind: 'progress', id: job.id, job: encodeJob(job) });
         observer?.phase?.('running', job);
-        let lastProgress = 0;
-        const context = createOperationContext({
-          budget: {
-            ...work.request.budget,
-            deadline_ms: Math.max(
-              1,
-              Math.min(work.request.budget.deadline_ms, work.deadline - Date.now()),
-            ),
-          },
-          onProgress: (phase, completed, total) => {
-            const now = Date.now();
-            if (now - lastProgress < 100) return;
-            lastProgress = now;
-            job = { ...job!, progress: { phase, completed, total } };
-            db.saveJob(job);
-            // At most one buffered progress frame; stdout backpressure never grows an unbounded queue.
-            if (process.stdout.writableLength === 0)
-              process.stdout.write(frame({ kind: 'progress', id: job.id, job: encodeJob(job) }));
-          },
-        });
+        const onProgress = (phase: string, completed: number, total: number | null): void => {
+          job = { ...job!, progress: { phase, completed, total } };
+          db.saveJob(job);
+          // At most one buffered progress frame; stdout backpressure never grows an unbounded queue.
+          if (process.stdout.writableLength === 0)
+            process.stdout.write(frame({ kind: 'progress', id: job.id, job: encodeJob(job) }));
+        };
+        if (requestPool && work.request.kind === 'execute' && requestPool.serves(work.request)) {
+          // Analysed by a request worker; the owner publishes its outcome when it arrives,
+          // after this command (docs/internals/project-cache.md §4b).
+          requestPool.prepare(db);
+          const running = job;
+          pending++;
+          void requestPool
+            .run(running, work.request, work.deadline, (progress) => {
+              if (terminal(progress)) return;
+              onProgress(
+                progress.progress.phase,
+                progress.progress.completed,
+                progress.progress.total,
+              );
+            })
+            .then((outcome) => schedule(running.id, () => finishPooled(running, outcome)))
+            .finally(() => {
+              if (--pending === 0 && store && !stopping) scheduleIdleFlush(IDLE_FLUSH_DELAY_MS);
+            });
+          return;
+        }
+        const context = requestContext(work.request.budget, work.deadline, throttled(onProgress));
         context.checkpoint(0);
         if (work.request.kind === 'import') {
           const before = db.snapshot();
@@ -505,29 +639,12 @@ export function runProjectWorker(handler?: WorkerHandler, observer?: WorkerRunti
               'unavailable_semantics',
               `No child handler is registered for ${work.request.operation}`,
             );
-          const args = toolSchemas[work.request.operation].input.parse(work.request.args);
-          result = await handler.execute(work.request.operation, args, {
+          result = await executeRequest(handler, work.request, {
             store: db,
             context,
             job_id: job.id,
-            ...(analysisCache ? {} : { analysis_cache: false }),
-            ...(work.request.max_result_bytes === undefined
-              ? {}
-              : { max_result_bytes: work.request.max_result_bytes }),
+            analysis_cache: analysisCache,
           });
-          // Prepared callee summaries this request queued and no publication released: readable
-          // from here on. They are written later (idle slices, queue pressure, close), never
-          // on the request's path.
-          db.releaseNativeSummaries();
-          // A handler that parsed and size-checked its result under these very limits
-          // (queryWorkerHandler) has marked it; do not repeat the parse and serialization.
-          if (!isSchemaValidated(result)) {
-            result = toolSchemas[work.request.operation].output.parse(result);
-            frame(
-              result,
-              Math.min(work.request.budget.output_bytes, work.request.max_result_bytes ?? Infinity),
-            );
-          }
           const persisted = db.readJob(job.id);
           if (persisted && terminal(persisted)) job = persisted;
           else {
@@ -555,12 +672,9 @@ export function runProjectWorker(handler?: WorkerHandler, observer?: WorkerRunti
       ...(result === undefined ? {} : { result }),
     });
   };
-  const decoder = new FrameDecoder((value) => {
-    const command = commandSchema.parse(value);
-    if (command.kind === 'cancel_units') {
-      if (unitsJob?.id === command.target) unitsJob.controller.abort();
-      return;
-    }
+  /** Run `task` after every command and publication before it, in order; a failure answers
+   * `id` with an error. */
+  const schedule = (id: string, task: () => Promise<void>): void => {
     if (++pending > 1028) throw new Error('Too many pending worker commands');
     if (idleFlush !== undefined) {
       clearTimeout(idleFlush);
@@ -569,11 +683,11 @@ export function runProjectWorker(handler?: WorkerHandler, observer?: WorkerRunti
     chain = chain
       .then(async () => {
         try {
-          await execute(command);
+          await task();
         } catch (error) {
           await send({
             kind: 'error',
-            id: command.id,
+            id,
             diagnostic: encodeDiagnostic(workerDiagnostic(error)),
           });
         } finally {
@@ -583,8 +697,17 @@ export function runProjectWorker(handler?: WorkerHandler, observer?: WorkerRunti
       .catch(() => {
         process.exitCode = 1;
         process.stdin.destroy();
+        requestPool?.kill();
         void store?.close();
       });
+  };
+  const decoder = new FrameDecoder((value) => {
+    const command = commandSchema.parse(value);
+    if (command.kind === 'cancel_units') {
+      if (unitsJob?.id === command.target) unitsJob.controller.abort();
+      return;
+    }
+    schedule(command.id, () => execute(command));
   });
   process.stdin.on('data', (chunk: Buffer) => {
     try {
@@ -595,11 +718,13 @@ export function runProjectWorker(handler?: WorkerHandler, observer?: WorkerRunti
   });
   process.stdin.on('end', () => {
     void chain.finally(async () => {
+      requestPool?.kill();
       await store?.close();
     });
   });
   process.stdin.on('error', () => {
     process.exitCode = 1;
+    requestPool?.kill();
     void store?.close();
   });
 }
