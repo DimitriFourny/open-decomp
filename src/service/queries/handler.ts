@@ -45,6 +45,7 @@ import {
   type IndexState,
 } from './scope.js';
 import { executeDecompilation, executeAnnotations, executeImageTypes } from '../analysis/index.js';
+import { runNativeOpenJob } from '../analysis/native-open-job.js';
 import {
   investigationArtifact,
   investigationItems,
@@ -348,6 +349,7 @@ function encodeInstruction(instruction: unknown): unknown {
  * the owning project process, never the protocol host. */
 export const queryWorkerHandler: WorkerHandler = {
   prepareImport: prepareQueryImport,
+  prepareUnits: (store, options) => runNativeOpenJob(store, options),
   async execute<K extends ToolName>(
     operation: K,
     input: ToolArgs<K>,

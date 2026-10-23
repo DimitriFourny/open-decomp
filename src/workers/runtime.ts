@@ -38,6 +38,7 @@ import {
   frame,
   MAX_IMAGES,
   type Command,
+  type OpenJobReport,
   type WorkRequest,
   type WorkerEvent,
   type WorkerSnapshot,
@@ -76,6 +77,12 @@ export interface WorkerHandler {
       readonly revision: number;
     },
   ): Promise<PreparedImport>;
+  /** The open-time job over the current revision (docs/internals/project-cache.md §5a). It
+   * never throws: failure and cancellation are reported states. */
+  prepareUnits?(
+    store: ProjectStore,
+    options: { readonly jobs?: number; readonly work?: number; readonly signal: AbortSignal },
+  ): Promise<OpenJobReport>;
 }
 export function workerDiagnostic(error: unknown): Diagnostic {
   return error instanceof OperationError
@@ -126,6 +133,8 @@ export function runProjectWorker(handler?: WorkerHandler, observer?: WorkerRunti
   let analysisCache = true;
   let stopping = false;
   const admitted = new Map<string, { request: WorkRequest; deadline: number }>();
+  // The running open-time job, cancellable on arrival of `cancel_units`.
+  let unitsJob: { readonly id: string; readonly controller: AbortController } | undefined;
   let chain = Promise.resolve();
   let pending = 0;
   // Queued callee summaries are cache data: they are written in small slices while no command
@@ -193,7 +202,13 @@ export function runProjectWorker(handler?: WorkerHandler, observer?: WorkerRunti
         : join(realpathSync(dirname(command.path)), basename(command.path));
       if (canonical !== command.path)
         fail('permission_denied', 'Authorized project path changed before child open');
-      store = SqliteProjectStore.open(command.path, command.mode);
+      store = SqliteProjectStore.open(
+        command.path,
+        command.mode,
+        command.native_summary_bytes === undefined
+          ? {}
+          : { native_summary_bytes: command.native_summary_bytes },
+      );
       maxQueued = command.max_queued;
       analysisCache = command.analysis_cache;
       const recoveryContext = createOperationContext();
@@ -252,6 +267,34 @@ export function runProjectWorker(handler?: WorkerHandler, observer?: WorkerRunti
       stopping = true;
       await send({ kind: 'closed', id: command.id });
       process.stdin.destroy();
+      return;
+    }
+    if (command.kind === 'prepare_units') {
+      const controller = new AbortController();
+      unitsJob = { id: command.id, controller };
+      let report: OpenJobReport;
+      try {
+        report =
+          handler?.prepareUnits && analysisCache
+            ? await handler.prepareUnits(db, {
+                ...(command.jobs === undefined ? {} : { jobs: command.jobs }),
+                ...(command.work === undefined ? {} : { work: command.work }),
+                signal: controller.signal,
+              })
+            : {
+                state: 'skipped',
+                ms: 0,
+                work: 0,
+                jobs: 0,
+                prepared: 0,
+                retained: 0,
+                bytes: 0,
+                stored: 0,
+              };
+      } finally {
+        unitsJob = undefined;
+      }
+      await send({ kind: 'units', id: command.id, report });
       return;
     }
     if (command.kind === 'status') {
@@ -514,6 +557,10 @@ export function runProjectWorker(handler?: WorkerHandler, observer?: WorkerRunti
   };
   const decoder = new FrameDecoder((value) => {
     const command = commandSchema.parse(value);
+    if (command.kind === 'cancel_units') {
+      if (unitsJob?.id === command.target) unitsJob.controller.abort();
+      return;
+    }
     if (++pending > 1028) throw new Error('Too many pending worker commands');
     if (idleFlush !== undefined) {
       clearTimeout(idleFlush);

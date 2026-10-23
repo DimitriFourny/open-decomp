@@ -28,6 +28,8 @@ Analysis reuses persistent SQLite projects in INPUT.open-decomp by default;
 --no-analysis-cache reads and writes no derived analysis (published results, reuse candidates,
 persisted callee summaries); the import and its indexes still persist. Output is identical.
 --analysis-cache forces it on when a settings file turns it off.
+At open, the open-time job completes function discovery and prepares the callee unit of every
+function in helper processes into the project (once per project); --no-open-job skips it.
 
 Settings: optional JSON at $XDG_CONFIG_HOME/open-decomp/settings.json (default
 ~/.config/open-decomp/settings.json) sets defaults for cache_root, analysis_cache,

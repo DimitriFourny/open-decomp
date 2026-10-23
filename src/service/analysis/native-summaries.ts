@@ -14,7 +14,7 @@ import type { NativePreparationInput, PreparedNativeUnit } from './native-prepar
 import type { NativeDependency } from './native-worklist.js';
 
 /** Bump when the stored shape of a prepared unit changes. */
-const NATIVE_SUMMARY_FORMAT = 6;
+const NATIVE_SUMMARY_FORMAT = 7;
 
 /** A prepared callee body kept for reuse, with exactly what reusing it must replay. */
 export interface PreparedUnitEntry {
@@ -35,18 +35,18 @@ export interface PreparedUnitEntry {
 export const preparedSize = (unit: PreparedNativeUnit, trace?: readonly TracedRead[]): number =>
   unit.instructions + unit.nodes + unit.evidence.length + (trace?.length ?? 0);
 
-/** Larger prepared units (instructions + IR nodes + evidence + traced reads) are not persisted:
- * encoding one costs more than the cold request can recover, and loading one approaches the cost
- * of preparing it. Measured: a 32k-size unit is ~30 MB of JSON, ~330 ms to write and ~260 ms to
- * load against ~450 ms to prepare, while units below this bound write and load in a few ms. */
-const MAX_PERSISTED_UNIT_SIZE = 8192;
-
 /** The second tier of the prepared-unit cache: the project's persisted summaries. */
 export interface NativeUnitPersistence {
-  /** A stored unit equal to what preparing `fn` here would return, or undefined. */
-  load(fn: FunctionRecord): PreparedUnitEntry | undefined;
+  /** A stored unit equal to what preparing `fn` here would return, or undefined. Checking it
+   * charges nothing but observes the cancellation and deadline of `context`, the loading
+   * request's (never the request that created this tier, whose deadline may have passed). */
+  load(fn: FunctionRecord, context: OperationContext): PreparedUnitEntry | undefined;
   /** Queue `entry` for the request's next batched write. */
   save(fn: FunctionRecord, entry: PreparedUnitEntry): void;
+  /** Queue a marker row for `fn`: the open-time job prepared it and kept nothing (the unit is
+   * not retained), so a later open need not prepare it again. A marker is never a unit (every
+   * load misses it) and any saved unit replaces it. */
+  skip(fn: FunctionRecord): void;
 }
 
 type StoredUnit = Omit<PreparedNativeUnit, 'function' | 'dependencies' | 'analysis'> & {
@@ -95,6 +95,13 @@ const storedSummarySchema = z.object({
   }),
 });
 
+/** The persisted rows' scope of one `preparedUnitIdentity`. */
+export const nativeSummaryScope = (identity: string): string =>
+  fingerprint(['native-summary', NATIVE_SUMMARY_FORMAT, identity]);
+
+/** A marker row's allowance: above every load's, so a stored unit always replaces it. */
+export const NATIVE_SUMMARY_MARKER_ALLOWANCE = Number.MAX_SAFE_INTEGER;
+
 /** Reads and writes prepared units of one image revision in the project store. Identity
  * (`scope`) names the revision, image slice, target, component versions, ABI/lifter and the
  * supplied native types, so a stored unit is only ever offered for exactly the state it was
@@ -112,7 +119,7 @@ export function createNativeUnitPersistence(
     typeof store.queueNativeSummary !== 'function'
   )
     return undefined;
-  const key = fingerprint(['native-summary', NATIVE_SUMMARY_FORMAT, identity]);
+  const key = nativeSummaryScope(identity);
   const abi: AbiProfile = input.components.abi;
   const missing = new Set<string>();
   let byId: ReadonlyMap<string, FunctionRecord> | undefined;
@@ -121,10 +128,12 @@ export function createNativeUnitPersistence(
     checkpoint: () => context.checkpoint(0),
   });
 
-  const load = (fn: FunctionRecord): PreparedUnitEntry | undefined => {
+  const load = (fn: FunctionRecord, context: OperationContext): PreparedUnitEntry | undefined => {
     if (missing.has(fn.id)) return undefined;
     const row = store.readNativeSummary(key, fn.id);
-    const entry = row ? rebuild(row.value, row.revision, row.allowance, row.work, fn) : undefined;
+    const entry = row
+      ? rebuild(row.value, row.revision, row.allowance, row.work, fn, quiet(context))
+      : undefined;
     if (!entry) missing.add(fn.id);
     return entry;
   };
@@ -135,6 +144,7 @@ export function createNativeUnitPersistence(
     allowance: number,
     work: number,
     fn: FunctionRecord,
+    context: OperationContext,
   ): PreparedUnitEntry | undefined => {
     if (
       rowRevision !== revision ||
@@ -162,7 +172,6 @@ export function createNativeUnitPersistence(
       const { target_id: _id, ...rest } = dependency;
       dependencies.push({ ...rest, target });
     }
-    const context = quiet(scope.context);
     if (!verifyTracedReads(store, revision, stored.trace, context)) return undefined;
     const trace = stored.trace as readonly TracedRead[];
     const prepared: PreparedNativeUnit = {
@@ -184,7 +193,7 @@ export function createNativeUnitPersistence(
   };
 
   const save = (fn: FunctionRecord, entry: PreparedUnitEntry): void => {
-    if (!entry.trace || entry.size > MAX_PERSISTED_UNIT_SIZE) return;
+    if (!entry.trace) return;
     const {
       function: _function,
       dependencies,
@@ -224,5 +233,16 @@ export function createNativeUnitPersistence(
     }
   };
 
-  return { load, save };
+  const skip = (fn: FunctionRecord): void => {
+    store.queueNativeSummary({
+      scope: key,
+      function_id: fn.id,
+      revision,
+      allowance: NATIVE_SUMMARY_MARKER_ALLOWANCE,
+      work: 0,
+      value: { format: NATIVE_SUMMARY_FORMAT, scope: key, function: fn.id, marker: true },
+    });
+  };
+
+  return { load, save, skip };
 }

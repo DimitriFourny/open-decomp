@@ -77,6 +77,20 @@ export type WorkerSnapshot = z.output<typeof snapshotSchema>;
 export type ArtifactReadInput = z.input<typeof artifactReadArgsSchema>;
 export type ArtifactReadArgs = z.output<typeof artifactReadArgsSchema>;
 export type ArtifactReadResult = z.output<typeof artifactReadResultSchema>;
+const count = z.number().int().nonnegative();
+/** What the open-time job did (`runNativeOpenJob`). */
+export const openJobReportSchema = z.strictObject({
+  state: z.enum(['completed', 'limited', 'cancelled', 'failed', 'skipped']),
+  ms: z.number().nonnegative(),
+  work: count,
+  jobs: count,
+  prepared: count,
+  retained: count,
+  bytes: count,
+  stored: count,
+  message: z.string().max(4096).optional(),
+});
+export type OpenJobReport = z.output<typeof openJobReportSchema>;
 export const commandSchema = z.discriminatedUnion('kind', [
   z.strictObject({
     kind: z.literal('open'),
@@ -86,6 +100,8 @@ export const commandSchema = z.discriminatedUnion('kind', [
     max_queued: z.number().int().min(0).max(1024),
     /** False disables derived-analysis caching in this child (trusted host setting). */
     analysis_cache: z.boolean().default(true),
+    /** Byte cap on the project's persisted native units (trusted host setting). */
+    native_summary_bytes: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
     interrupted: z
       .strictObject({ id: jobIdSchema, reason: z.enum(['cancelled', 'deadline']) })
       .optional(),
@@ -106,6 +122,16 @@ export const commandSchema = z.discriminatedUnion('kind', [
     args: artifactReadArgsSchema,
   }),
   z.strictObject({ kind: z.literal('close'), id: jobIdSchema }),
+  /** Run the open-time job (docs/internals/project-cache.md §5a) over the current revision. */
+  z.strictObject({
+    kind: z.literal('prepare_units'),
+    id: jobIdSchema,
+    jobs: z.number().int().min(1).max(64).optional(),
+    work: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER).optional(),
+  }),
+  /** Cancel the running open-time job `target`; handled on arrival, answered by nothing but
+   * that job's own `units` event. */
+  z.strictObject({ kind: z.literal('cancel_units'), id: jobIdSchema, target: jobIdSchema }),
 ]);
 export type Command = z.output<typeof commandSchema>;
 export const eventSchema = z.discriminatedUnion('kind', [
@@ -124,6 +150,7 @@ export const eventSchema = z.discriminatedUnion('kind', [
     result: artifactReadResultSchema,
   }),
   z.strictObject({ kind: z.literal('error'), id: jobIdSchema, diagnostic: diagnosticSchema }),
+  z.strictObject({ kind: z.literal('units'), id: jobIdSchema, report: openJobReportSchema }),
 ]);
 export type WorkerEvent = z.output<typeof eventSchema>;
 

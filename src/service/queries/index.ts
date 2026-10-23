@@ -10,6 +10,7 @@ import {
 import type { ToolArgs, ToolInput, ToolName, ToolResult, WireJob } from '../../core/index.js';
 import { ProjectWorkerPool } from '../../workers/index.js';
 import type {
+  OpenJobReport,
   ArtifactReadInput,
   ArtifactReadResult,
   JobOutcome,
@@ -30,6 +31,18 @@ export interface QueryCallOptions {
   readonly auto_wait_ms?: number;
 }
 export const DEFAULT_AUTO_WAIT_MS = 10_000;
+/** Options of the open-time job (docs/internals/project-cache.md §5a). */
+export interface OpenJobOptions {
+  /** Helper processes; default half the cores, at most 8. */
+  readonly jobs?: number;
+  /** The job's own work budget (summed over its helpers); default 1G. */
+  readonly work?: number;
+}
+export interface QueryServiceOptions extends WorkerPoolOptions {
+  /** Run the open-time job at the end of every `project_open` that returns a loaded image
+   * (MCP). Default off: the API runs it itself once discovery is complete. */
+  readonly open_job?: OpenJobOptions | false;
+}
 /** The host facade for project navigation, analysis and annotation jobs. All image
  * parsing, decoding, semantic work and store access stays in persistent children.
  * Paths are host-authorized before admission; target-selected names are never paths.
@@ -38,12 +51,26 @@ export const DEFAULT_AUTO_WAIT_MS = 10_000;
 export class QueryService {
   readonly #pool: ProjectWorkerPool;
   readonly #projects = new Map<string, ProjectWorker>();
-  private constructor(pool: ProjectWorkerPool) {
+  readonly #openJob: OpenJobOptions | false;
+  private constructor(pool: ProjectWorkerPool, openJob: OpenJobOptions | false) {
     this.#pool = pool;
+    this.#openJob = openJob;
   }
 
-  static async create(options: WorkerPoolOptions): Promise<QueryService> {
-    return new QueryService(await ProjectWorkerPool.create(options));
+  static async create(options: QueryServiceOptions): Promise<QueryService> {
+    const { open_job: openJob = false, ...pool } = options;
+    return new QueryService(await ProjectWorkerPool.create(pool), openJob);
+  }
+
+  /** Run the open-time job of an open project: prepare and persist the generic native unit
+   * of every indexed function at the project's current revision. Never fails for the job's
+   * own reasons (they are its reported state); `signal` cancels it. */
+  async prepareUnits(
+    projectId: string,
+    options: OpenJobOptions = {},
+    call: Pick<QueryCallOptions, 'signal'> = {},
+  ): Promise<OpenJobReport> {
+    return this.#project(projectId).prepareUnits(options, call);
   }
 
   #project(id: string): ProjectWorker {
@@ -207,6 +234,12 @@ export class QueryService {
                   resumed: open.source.kind === 'resume' || open.source.mode === 'resume',
                 },
               };
+              // The open-time job belongs to the open; its outcome never fails it.
+              if (this.#openJob !== false)
+                await project.prepareUnits(
+                  this.#openJob,
+                  options.signal ? { signal: options.signal } : {},
+                );
             }
           }
         } catch (error) {

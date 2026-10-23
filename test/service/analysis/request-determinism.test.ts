@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { cp, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
-import { openBinary } from '../../../src/api/index.js';
+import { openBinary, type BinarySession } from '../../../src/api/index.js';
+import { SqliteProjectStore } from '../../../src/project/store/index.js';
+import { NATIVE_SUMMARY_MARKER_ALLOWANCE } from '../../../src/service/analysis/native-summaries.js';
 import { CLANG, nativeOracleSkip } from '../../support/host-tools.js';
 
 // A request's output may depend on its own budget but never on what earlier requests of the
@@ -129,5 +132,214 @@ test(
       assert.deepEqual(got.work, cold.get(name)!.work, `${name}: work after other requests`);
     }
     assert.equal(persisted[0]!.text, cold.get('user_c')!.text, 'user_c: text from persisted rows');
+  },
+);
+
+// The open-time job prepares and persists every function's generic unit before any request.
+// A request that reuses one replays its exact charge, so its text and work equal those of a
+// process that prepared everything itself, across the budgets in which the callee reserve
+// cut-off falls. Each request runs in a fresh process (in-process history is the first
+// test's subject), on a copy of the project the job left.
+test(
+  'decompiling with and without the open-time job gives identical texts and work',
+  { skip: nativeOracleSkip(), timeout: 300_000 },
+  async (t) => {
+    const root = await mkdtemp(join(tmpdir(), 'open-decomp-open-job-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const binary = join(root, 'determinism');
+    const compiled = spawnSync(
+      CLANG,
+      [
+        '-target',
+        'arm64-apple-macos13.0',
+        '-O1',
+        '-g0',
+        '-fno-inline',
+        resolve('test/service/analysis/request-determinism-source.c'),
+        '-o',
+        binary,
+      ],
+      { encoding: 'utf8' },
+    );
+    assert.equal(compiled.status, 0, compiled.stderr);
+    const names = ['root', 'mid_three'];
+    const requests = budgets.flatMap((work) => names.map((name) => ({ name, work })));
+    const decompileFresh = async (cachePath: string, name: string, work: number) => {
+      const session = await openBinary(binary, { cachePath });
+      try {
+        const result = await session.decompile({ name }, { emitter: 'c-like', budget: { work } });
+        return 'data' in result && result.data.delivery === 'inline'
+          ? { text: result.data.emission.text, work: result.data.work }
+          : { text: `unavailable: ${result.state}`, work: undefined };
+      } finally {
+        await session.close();
+      }
+    };
+    const jobCache = join(root, 'job');
+    const withJob = await openBinary(binary, { cachePath: jobCache, openJob: { jobs: 2 } });
+    const job = withJob.openJob;
+    await withJob.close();
+    assert.ok(job);
+    assert.equal(job.state, 'completed', job.message);
+    assert.ok(job.stored > 0 && job.stored === job.prepared, 'every unit or marker imported');
+    for (const [index, { name, work }] of requests.entries()) {
+      const cold = await decompileFresh(join(root, `cold-${index}`), name, work);
+      const copy = join(root, `job-${index}`);
+      await cp(jobCache, copy, { recursive: true });
+      const reused = await decompileFresh(copy, name, work);
+      assert.deepEqual(reused, cold, `${name} at work ${work}`);
+    }
+    // A later open finds nothing left to prepare.
+    const later = await openBinary(binary, { cachePath: jobCache, openJob: {} });
+    try {
+      assert.equal(later.openJob?.state, 'skipped');
+    } finally {
+      await later.close();
+    }
+  },
+);
+
+test(
+  'a cancelled open-time job leaves a usable project',
+  { skip: nativeOracleSkip(), timeout: 300_000 },
+  async (t) => {
+    const root = await mkdtemp(join(tmpdir(), 'open-decomp-open-job-cancel-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const binary = join(root, 'retained');
+    const compiled = spawnSync(
+      CLANG,
+      [
+        '-target',
+        'arm64-apple-macos13.0',
+        '-O1',
+        '-g0',
+        '-fno-inline',
+        resolve('test/service/analysis/retained-reasons-source.c'),
+        '-o',
+        binary,
+      ],
+      { encoding: 'utf8' },
+    );
+    assert.equal(compiled.status, 0, compiled.stderr);
+    const decompile = async (session: BinarySession, name: string) => {
+      const result = await session.decompile({ name }, { emitter: 'c-like' });
+      assert.ok('data' in result && result.data.delivery === 'inline');
+      return { text: result.data.emission.text, work: result.data.work };
+    };
+    const cold = new Map<string, { text: string; work: unknown }>();
+    for (const name of ['user_b', 'user_c']) {
+      const session = await openBinary(binary, { cachePath: join(root, `cold-${name}`) });
+      cold.set(name, await decompile(session, name).finally(() => session.close()));
+    }
+    // Cancelled by its own signal: before it starts, and while its helpers run. The second
+    // case needs real time (the job exposes no hook between helper batches); it accepts a job
+    // that finished first, so it cannot flake. Each case has its own project, and the first
+    // then runs the job to completion and serves another function.
+    for (const delay of [-1, 30]) {
+      const cache = join(root, `cancelled-${delay}`);
+      const controller = new AbortController();
+      if (delay < 0) controller.abort();
+      else setTimeout(() => controller.abort(), delay);
+      const session = await openBinary(binary, {
+        cachePath: cache,
+        openJob: { jobs: 2, signal: controller.signal },
+      });
+      try {
+        const report = session.openJob;
+        assert.ok(report && ['cancelled', 'completed'].includes(report.state), report?.state);
+        if (delay < 0) assert.equal(report.state, 'cancelled');
+        if (report.state === 'cancelled') assert.equal(report.stored, 0, 'nothing imported');
+        assert.deepEqual(await decompile(session, 'user_c'), cold.get('user_c'));
+      } finally {
+        await session.close();
+      }
+      if (delay >= 0) continue;
+      const resumed = await openBinary(binary, { cachePath: cache, openJob: { jobs: 2 } });
+      try {
+        assert.equal(resumed.openJob?.state, 'completed', resumed.openJob?.message);
+        assert.deepEqual(await decompile(resumed, 'user_b'), cold.get('user_b'));
+      } finally {
+        await resumed.close();
+      }
+    }
+  },
+);
+
+// Units are persisted whatever their size (instructions + IR nodes + evidence + traced reads)
+// as long as their encoding fits the store's 128 MiB graph bound; the former size bound was
+// 8,192. The open-time job persists a generated callee of size about 7.4k (about 1.8 MB
+// compressed), and a later process that reuses the row decompiles its caller with the text
+// and work of a process that prepared it.
+test(
+  'a large unit persists and is reused with identical output and work',
+  { skip: nativeOracleSkip(), timeout: 300_000 },
+  async (t) => {
+    const root = await mkdtemp(join(tmpdir(), 'open-decomp-large-unit-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const lines = Array.from(
+      { length: 200 },
+      (_, i) =>
+        `  a = a * ${2 * i + 3} + p[${i % 13}]; b ^= a >> ${(i % 5) + 1}; c += b * ${i + 1}; p[${(i * 7) % 13}] = a + c;`,
+    );
+    const source = join(root, 'large.c');
+    await writeFile(
+      source,
+      `int big(int *p, int n) {\n  int a = n, b = p[0], c = p[1];\n${lines.join('\n')}\n  return a + b + c;\n}\nint caller(int *p) { return big(p, 3) + 1; }\nint main(void) { int p[13] = {0}; return caller(p); }\n`,
+    );
+    const binary = join(root, 'large');
+    const compiled = spawnSync(
+      CLANG,
+      ['-target', 'arm64-apple-macos13.0', '-O1', '-g0', '-fno-inline', source, '-o', binary],
+      { encoding: 'utf8' },
+    );
+    assert.equal(compiled.status, 0, compiled.stderr);
+    const decompile = async (session: BinarySession) => {
+      const result = await session.decompile({ name: 'caller' }, { emitter: 'c-like' });
+      assert.ok('data' in result && result.data.delivery === 'inline');
+      return { text: result.data.emission.text, work: result.data.work };
+    };
+    const coldSession = await openBinary(binary, { cachePath: join(root, 'cold') });
+    const cold = await decompile(coldSession).finally(() => coldSession.close());
+    const cache = join(root, 'job');
+    const jobSession = await openBinary(binary, { cachePath: cache, openJob: { jobs: 1 } });
+    const projectPath = jobSession.projectPath;
+    assert.equal(jobSession.openJob?.state, 'completed', jobSession.openJob?.message);
+    await jobSession.close();
+    // The largest persisted unit is above the former bound.
+    const db = new DatabaseSync(join(projectPath, 'project.sqlite'), { readOnly: true });
+    const rows = db
+      .prepare('SELECT scope,function_id FROM native_summaries WHERE allowance<?')
+      .all(NATIVE_SUMMARY_MARKER_ALLOWANCE);
+    db.close();
+    const store = SqliteProjectStore.open(projectPath, 'resume');
+    let largest = 0;
+    try {
+      for (const row of rows) {
+        const summary = store.readNativeSummary(String(row['scope']), String(row['function_id']));
+        const value = summary?.value as
+          | {
+              unit: { instructions: number; nodes: number; evidence: unknown[] };
+              trace: unknown;
+            }
+          | undefined;
+        if (!value) continue;
+        const size =
+          value.unit.instructions +
+          value.unit.nodes +
+          value.unit.evidence.length +
+          (Array.isArray(value.trace) ? value.trace.length : 0);
+        largest = Math.max(largest, size);
+      }
+    } finally {
+      await store.close();
+    }
+    // Well above the sizes a request prepares in tens of milliseconds.
+    assert.ok(largest > 6000, `largest persisted unit size ${largest}`);
+    const later = await openBinary(binary, { cachePath: cache });
+    try {
+      assert.deepEqual(await decompile(later), cold, 'caller from the persisted large unit');
+    } finally {
+      await later.close();
+    }
   },
 );

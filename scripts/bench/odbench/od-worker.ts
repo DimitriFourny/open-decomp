@@ -87,9 +87,22 @@ async function main(): Promise<void> {
     // Runtime-selected module: the measured checkout is a parameter, so a static import cannot work.
     const api = (await import(request.api)) as typeof Api;
     const openStarted = performance.now();
-    session = await api.openBinary(request.input, { cachePath: request.cachePath });
+    session = await api.openBinary(request.input, {
+      cachePath: request.cachePath,
+      openJob: request.open_job ? {} : false,
+    });
     openFinished = performance.now();
-    emit({ kind: 'open', import_ms: openFinished - openStarted });
+    // A build without the open-time job has no `openJob` field.
+    const job = (session as { openJob?: Api.OpenJobReport | null }).openJob ?? null;
+    emit({
+      kind: 'open',
+      import_ms: openFinished - openStarted,
+      ...(job === null ? {} : { open_job_ms: job.ms, open_job_work: job.work }),
+    });
+    if (job !== null)
+      process.stderr.write(
+        `od: ${request.binary} open-time job ${job.state}: ${job.prepared} functions, ${job.retained} retained, ${job.jobs} helpers, ${Math.round(job.ms)} ms, work ${job.work}${job.message ? ` (${job.message})` : ''}\n`,
+      );
   } catch (error) {
     emit({ kind: 'open_error', message: message(error) });
     process.stderr.write(`od: ${request.binary} open failed: ${message(error)}\n`);

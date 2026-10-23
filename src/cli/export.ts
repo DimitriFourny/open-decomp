@@ -16,6 +16,8 @@ export interface ExportOptions {
   readonly name?: string | undefined;
   /** False: extra workers open their project copies without analysis caching too. */
   readonly analysisCache?: boolean | undefined;
+  /** The extra workers' project copies keep the primary's unit store cap. */
+  readonly unitStoreBytes?: number | undefined;
 }
 export interface ExportSummary {
   readonly functions: number;
@@ -732,6 +734,11 @@ export async function exportBinary(
               cachePath,
               ...(options.sliceId === undefined ? {} : { sliceId: options.sliceId }),
               ...(options.analysisCache === false ? { analysisCache: false } : {}),
+              ...(options.unitStoreBytes === undefined
+                ? {}
+                : { unitStoreBytes: options.unitStoreBytes }),
+              // A copy of the primary, whose open already ran the open-time job.
+              openJob: false,
               signal,
             }),
           );

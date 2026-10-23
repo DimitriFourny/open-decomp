@@ -532,6 +532,26 @@ export interface ProjectStore {
   /** Write the oldest `maxRows` queued summaries (all by default) in one transaction without
    * fsync; returns how many are still queued. A no-op inside a transaction. */
   flushNativeSummaries(maxRows?: number): number;
+  /** Function IDs holding a summary row (or open-job marker) of `scope` at the current
+   * revision, queued rows included. Optional: stores without the open-time job omit it. */
+  nativeSummaryFunctions?(scope: string): ReadonlySet<string>;
+  /** Compressed payload bytes of the written summary rows at the current revision (every
+   * scope) and the project's byte cap on them. */
+  nativeSummaryUsage?(): { readonly bytes: number; readonly cap: number };
+  /** Write a consistent copy of this project (database and image bytes, no artifacts) into the
+   * absent directory `destination`, after writing queued summaries: the private store of an
+   * open-time job helper process. */
+  copyProject?(destination: string): void;
+  /** Insert the summary rows of `scope` at the current revision from the project copies at
+   * `sources` (the helpers'), each re-checked against its digest, keeping a present row whose
+   * allowance is not larger. Rows are chosen in `order` (function IDs, callees first) while
+   * they fit in the byte cap and written in reverse, so eviction drops callers before the
+   * callees they share. One cache write; returns the rows inserted. */
+  importNativeSummaries?(
+    sources: readonly string[],
+    scope: string,
+    order: readonly string[],
+  ): number;
   saveJob(job: Job): void;
   readJob(jobId: string): Job | null;
   /** Live job lifecycle view in stable ID order; cursors bind the current project revision. */

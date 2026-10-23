@@ -8,7 +8,7 @@ import type { Server as HttpsServer } from 'node:https';
 import { createMcpHandler, type McpHttpHandler } from '@modelcontextprotocol/server';
 import { QueryService } from '../../service/queries/index.js';
 import { authorizePath } from '../../workers/paths.js';
-import type { WorkerPoolOptions } from '../../workers/index.js';
+import type { QueryServiceOptions } from '../../service/queries/index.js';
 import { createMcpServer, MCP_MAX_RESULT_BYTES } from '../server.js';
 import type { McpServerDefaults } from '../defaults.js';
 import { MAX_MCP_INPUT_BYTES, MAX_MCP_REQUEST_ID_BYTES } from '../limits.js';
@@ -211,8 +211,13 @@ async function writeResponse(
 export async function startHttpServer(
   input: HttpConfig,
   workerRuntime: Pick<
-    WorkerPoolOptions,
-    'entry_point' | 'exec_argv' | 'cancel_grace_ms' | 'analysis_cache'
+    QueryServiceOptions,
+    | 'entry_point'
+    | 'exec_argv'
+    | 'cancel_grace_ms'
+    | 'analysis_cache'
+    | 'open_job'
+    | 'native_summary_bytes'
   > = {},
   /** Server-wide request defaults (`decompile.language` / `view`); a request argument wins. */
   defaults: Pick<McpServerDefaults, 'decompile'> = {},

@@ -1,9 +1,10 @@
 import { DatabaseSync, type SQLInputValue, type StatementSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
-import { brotliCompressSync, brotliDecompressSync, constants as zlib } from 'node:zlib';
+import { constants as zlib, zstdCompressSync, zstdDecompressSync } from 'node:zlib';
 import {
   closeSync,
   constants,
+  cpSync,
   existsSync,
   fsyncSync,
   lstatSync,
@@ -94,9 +95,9 @@ import {
   MAX_GRAPH_BYTES,
   MAX_RECORD_BYTES,
   decodeStored,
-  decodeStoredGraph,
+  decodeStoredClone,
   encodeStored,
-  encodeStoredGraph,
+  encodeStoredClone,
   wireValue,
 } from './encoding.js';
 import {
@@ -108,9 +109,13 @@ import {
 
 // Persistence migrations are independent of the public wire/artifact schema version.
 const STORE_SCHEMA_VERSION = 7;
-/** Per-project cap on persisted prepared-callee summaries (compressed payload bytes). Entries
- * of superseded revisions go first, then the oldest write; see `flushNativeSummaries`. */
-export const DEFAULT_NATIVE_SUMMARY_BYTES = 64 * 1024 * 1024;
+/** Per-project cap on persisted prepared-callee summaries (compressed payload bytes), the
+ * default of the `unitStoreBytes` / `--unit-store-mib` open option. Entries of superseded
+ * revisions go first, then the oldest write; see `flushNativeSummaries`. The open-time job
+ * imports callees first within it. SQLite's 3.4k retained units take about 600 MB; measured
+ * on its 114 corpus functions, 256 MiB (1.6k units, callees first) kept the decompile-time
+ * gain of the whole set at 40% of the job's time (docs/internals/project-cache.md §4a). */
+export const DEFAULT_NATIVE_SUMMARY_BYTES = 256 * 1024 * 1024;
 /** Delivery-only artifacts (analysis caching disabled) kept in memory for this connection. */
 const MAX_TRANSIENT_ARTIFACT_BYTES = 64 * 1024 * 1024;
 /** Queued summaries are encoded and written later (idle slices, close, or this pressure bound),
@@ -260,6 +265,16 @@ function freezeMetadata(value: unknown): void {
   Object.freeze(value);
 }
 
+/** A summary row in its stored form, ready to insert. */
+interface EncodedSummary {
+  readonly scope: string;
+  readonly function_id: string;
+  readonly revision: number;
+  readonly allowance: number;
+  readonly work: number;
+  readonly digest: string;
+  readonly payload: Uint8Array;
+}
 interface PendingSummary {
   readonly scope: string;
   readonly function_id: string;
@@ -1503,12 +1518,9 @@ export class SqliteProjectStore implements ProjectStore {
   #encodeSummary(row: PendingSummary): { digest: string; payload: Uint8Array } | null {
     if (row.encoded !== undefined) return row.encoded;
     try {
-      const encoded = encodeStoredGraph(row.value);
-      const payload = brotliCompressSync(encoded, {
-        params: {
-          [zlib.BROTLI_PARAM_QUALITY]: 4,
-          [zlib.BROTLI_PARAM_SIZE_HINT]: encoded.length,
-        },
+      const encoded = encodeStoredClone(row.value);
+      const payload = zstdCompressSync(encoded, {
+        params: { [zlib.ZSTD_c_compressionLevel]: 3, [zlib.ZSTD_c_contentSizeFlag]: 1 },
       });
       row.encoded =
         payload.length > Math.min(this.#summaryCap, MAX_NATIVE_SUMMARY_ROW_BYTES)
@@ -1539,70 +1551,207 @@ export class SqliteProjectStore implements ProjectStore {
     }
     const rows = batch.flatMap((row) => {
       const encoded = this.#encodeSummary(row);
-      return encoded ? [{ row, ...encoded }] : [];
+      return encoded ? [{ ...row, ...encoded }] : [];
     });
-    if (rows.length > 0) {
-      let lowered = false;
+    if (rows.length > 0) this.#insertNativeSummaries(current, rows);
+    return this.#pendingSummaries.size;
+  }
+
+  /** One cache-write transaction: drop superseded revisions, insert `rows` (encoded, of the
+   * current revision) in order, evict past the byte cap. Never throws; returns the rows
+   * inserted (0 when the write failed). */
+  #insertNativeSummaries(current: number, rows: Iterable<EncodedSummary>): number {
+    let lowered = false,
+      inserted = 0;
+    try {
+      if (this.#synchronous > 1) {
+        this.#db.exec('PRAGMA synchronous=NORMAL');
+        lowered = true;
+      }
+      this.#db.exec('BEGIN IMMEDIATE');
       try {
-        if (this.#synchronous > 1) {
-          this.#db.exec('PRAGMA synchronous=NORMAL');
-          lowered = true;
+        this.#prepare('DELETE FROM native_summaries WHERE revision<?').run(current);
+        let seq = numberField(
+          this.#prepare('SELECT COALESCE(MAX(seq),0) AS seq FROM native_summaries').get(),
+          'seq',
+        );
+        const insert = this.#prepare(
+          'INSERT OR REPLACE INTO native_summaries(scope,function_id,revision,seq,allowance,work,bytes,digest,payload) VALUES (?,?,?,?,?,?,?,?,?)',
+        );
+        for (const row of rows) {
+          insert.run(
+            row.scope,
+            row.function_id,
+            row.revision,
+            ++seq,
+            row.allowance,
+            row.work,
+            row.payload.length,
+            row.digest,
+            row.payload,
+          );
+          inserted++;
         }
-        this.#db.exec('BEGIN IMMEDIATE');
-        try {
-          this.#prepare('DELETE FROM native_summaries WHERE revision<?').run(current);
-          let seq = numberField(
-            this.#prepare('SELECT COALESCE(MAX(seq),0) AS seq FROM native_summaries').get(),
-            'seq',
+        if (inserted === 0) {
+          this.#db.exec('ROLLBACK');
+          return 0;
+        }
+        let total = numberField(
+          this.#prepare('SELECT COALESCE(SUM(bytes),0) AS total FROM native_summaries').get(),
+          'total',
+        );
+        if (total > this.#summaryCap) {
+          const oldest = this.#prepare(
+            'SELECT scope,function_id,bytes FROM native_summaries ORDER BY revision,seq LIMIT 64',
           );
-          const insert = this.#prepare(
-            'INSERT OR REPLACE INTO native_summaries(scope,function_id,revision,seq,allowance,work,bytes,digest,payload) VALUES (?,?,?,?,?,?,?,?,?)',
+          const drop = this.#prepare(
+            'DELETE FROM native_summaries WHERE scope=? AND function_id=?',
           );
-          for (const { row, digest, payload } of rows)
-            insert.run(
-              row.scope,
-              row.function_id,
-              row.revision,
-              ++seq,
-              row.allowance,
-              row.work,
-              payload.length,
-              digest,
-              payload,
-            );
-          let total = numberField(
-            this.#prepare('SELECT COALESCE(SUM(bytes),0) AS total FROM native_summaries').get(),
-            'total',
-          );
-          if (total > this.#summaryCap) {
-            const oldest = this.#prepare(
-              'SELECT scope,function_id,bytes FROM native_summaries ORDER BY revision,seq LIMIT 64',
-            );
-            const drop = this.#prepare(
-              'DELETE FROM native_summaries WHERE scope=? AND function_id=?',
-            );
-            while (total > this.#summaryCap) {
-              const victims = oldest.all();
-              if (victims.length === 0) break;
-              for (const victim of victims) {
-                if (total <= this.#summaryCap) break;
-                drop.run(stringField(victim, 'scope'), stringField(victim, 'function_id'));
-                total -= numberField(victim, 'bytes');
-              }
+          while (total > this.#summaryCap) {
+            const victims = oldest.all();
+            if (victims.length === 0) break;
+            for (const victim of victims) {
+              if (total <= this.#summaryCap) break;
+              drop.run(stringField(victim, 'scope'), stringField(victim, 'function_id'));
+              total -= numberField(victim, 'bytes');
             }
           }
-          this.#db.exec('COMMIT');
-        } catch (error) {
-          this.#db.exec('ROLLBACK');
-          throw error;
         }
-      } catch {
-        // A cache write never fails a request; the rows are recomputed when next needed.
-      } finally {
-        if (lowered) this.#db.exec(`PRAGMA synchronous=${this.#synchronous}`);
+        this.#db.exec('COMMIT');
+        return inserted;
+      } catch (error) {
+        this.#db.exec('ROLLBACK');
+        throw error;
       }
+    } catch {
+      // A cache write never fails a request; the rows are recomputed when next needed.
+      return 0;
+    } finally {
+      if (lowered) this.#db.exec(`PRAGMA synchronous=${this.#synchronous}`);
     }
-    return this.#pendingSummaries.size;
+  }
+
+  nativeSummaryFunctions(scope: string): ReadonlySet<string> {
+    const current = this.#current();
+    const ids = new Set<string>();
+    for (const row of this.#prepare(
+      'SELECT function_id FROM native_summaries WHERE scope=? AND revision=?',
+    ).all(scope, current))
+      ids.add(stringField(row, 'function_id'));
+    for (const row of this.#pendingSummaries.values())
+      if (row.scope === scope && row.revision === current) ids.add(row.function_id);
+    return ids;
+  }
+
+  nativeSummaryUsage(): { readonly bytes: number; readonly cap: number } {
+    const current = this.#current();
+    return {
+      bytes: numberField(
+        this.#prepare(
+          'SELECT COALESCE(SUM(bytes),0) AS total FROM native_summaries WHERE revision=?',
+        ).get(current),
+        'total',
+      ),
+      cap: this.#summaryCap,
+    };
+  }
+
+  copyProject(destination: string): void {
+    this.#current();
+    this.flushNativeSummaries();
+    if (existsSync(destination)) fail('invalid_input', 'Project copy destination exists');
+    mkdirSync(join(destination, 'artifacts'), { recursive: true, mode: 0o700 });
+    cpSync(join(this.#path, 'images'), join(destination, 'images'), {
+      recursive: true,
+      mode: constants.COPYFILE_FICLONE,
+    });
+    this.#prepare('VACUUM INTO ?').run(join(destination, 'project.sqlite'));
+  }
+
+  importNativeSummaries(
+    sources: readonly string[],
+    scope: string,
+    order: readonly string[],
+  ): number {
+    const current = this.#current();
+    const rank = new Map(order.map((id, index) => [id, index]));
+    const dbs: DatabaseSync[] = [];
+    try {
+      for (const source of sources)
+        dbs.push(new DatabaseSync(join(source, 'project.sqlite'), { readOnly: true }));
+      const present = this.#prepare(
+        'SELECT allowance FROM native_summaries WHERE scope=? AND function_id=? AND revision=?',
+      );
+      // One candidate per function: the row of the smallest allowance any copy holds.
+      const candidates = new Map<
+        string,
+        { readonly source: number; readonly allowance: number; readonly bytes: number }
+      >();
+      dbs.forEach((db, source) => {
+        for (const row of db
+          .prepare(
+            'SELECT function_id,allowance,bytes FROM native_summaries WHERE scope=? AND revision=?',
+          )
+          .iterate(scope, current)) {
+          const id = stringField(row, 'function_id'),
+            allowance = numberField(row, 'allowance'),
+            prior = candidates.get(id);
+          if (!prior || allowance < prior.allowance)
+            candidates.set(id, { source, allowance, bytes: numberField(row, 'bytes') });
+        }
+      });
+      // Callees first, as many as fit in the cap next to the rows of this revision already
+      // held; a row this project holds at an allowance the import cannot improve stays.
+      let room = this.#summaryCap - this.nativeSummaryUsage().bytes;
+      const selected: string[] = [];
+      for (const [id, candidate] of [...candidates].sort(
+        ([a], [b]) =>
+          (rank.get(a) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b) ?? Number.MAX_SAFE_INTEGER) ||
+          (a < b ? -1 : a > b ? 1 : 0),
+      )) {
+        const prior = present.get(scope, id, current);
+        if (prior && numberField(prior, 'allowance') <= candidate.allowance) continue;
+        if (candidate.bytes > room) continue;
+        room -= candidate.bytes;
+        selected.push(id);
+      }
+      const reads = dbs.map((db) =>
+        db.prepare(
+          'SELECT allowance,work,digest,payload FROM native_summaries WHERE scope=? AND function_id=? AND revision=?',
+        ),
+      );
+      const summaryCap = this.#summaryCap;
+      // Written callers first, callees last: eviction (oldest write first) then drops the
+      // leaves of the call graph before the callees many functions share.
+      function* rows(): Generator<EncodedSummary> {
+        for (let index = selected.length - 1; index >= 0; index--) {
+          const function_id = selected[index]!;
+          const row = reads[candidates.get(function_id)!.source]!.get(scope, function_id, current);
+          const payload = row?.['payload'],
+            digest = row?.['digest'];
+          if (
+            !row ||
+            !(payload instanceof Uint8Array) ||
+            typeof digest !== 'string' ||
+            summaryDigest(scope, function_id, current, payload) !== digest ||
+            payload.length > Math.min(summaryCap, MAX_NATIVE_SUMMARY_ROW_BYTES)
+          )
+            continue;
+          yield {
+            scope,
+            function_id: entityIdSchema.parse(function_id),
+            revision: current,
+            allowance: numberField(row, 'allowance'),
+            work: numberField(row, 'work'),
+            digest,
+            payload,
+          };
+        }
+      }
+      return this.#insertNativeSummaries(current, rows());
+    } finally {
+      for (const db of dbs) db.close();
+    }
   }
 
   readNativeSummary(scope: string, functionId: string): NativeSummaryRow | null {
@@ -1656,9 +1805,7 @@ export class SqliteProjectStore implements ProjectStore {
         revision,
         allowance: stored.allowance,
         work: stored.work,
-        value: decodeStoredGraph(
-          brotliDecompressSync(payload, { maxOutputLength: MAX_GRAPH_BYTES }),
-        ),
+        value: decodeStoredClone(zstdDecompressSync(payload, { maxOutputLength: MAX_GRAPH_BYTES })),
       };
     } catch {
       // Undecodable content is a miss, never a served summary; the next preparation replaces it.

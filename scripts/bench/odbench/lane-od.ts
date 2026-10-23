@@ -39,6 +39,8 @@ export interface OdWorkerRequest {
   readonly binary: string;
   readonly cachePath: string;
   readonly inference: 'proven' | 'likely';
+  /** False opens without the open-time job (`openJob: false`). */
+  readonly open_job: boolean;
   /** JSONL file the worker appends its `OdWorkerLine`s to. */
   readonly out: string;
   readonly repeat: { readonly index: number; readonly total: number };
@@ -53,8 +55,9 @@ export type OdWorkerLine =
   | {
       readonly kind: 'open';
       readonly import_ms: number;
-      /** The open-time job's own time; set only by a build that has such a job. */
+      /** The open-time job's own time and work; set only when the job ran. */
       readonly open_job_ms?: number;
+      readonly open_job_work?: number;
     }
   | { readonly kind: 'open_error'; readonly message: string }
   | { readonly kind: 'start'; readonly id: string }
@@ -94,6 +97,7 @@ interface Repeat {
   readonly attempts: ReadonlyMap<string, Attempt>;
   readonly import_ms: number | null;
   readonly open_job_ms: number | null;
+  readonly open_job_work: number | null;
   readonly first10_ms: number | null;
   readonly peak_rss: readonly ProcessRss[];
   readonly cold_ms: number;
@@ -198,6 +202,7 @@ async function runRepeat(
   const attempts = new Map<string, Attempt>();
   let importMs: number | null = null;
   let openJobMs: number | null = null;
+  let openJobWork: number | null = null;
   let done: Extract<OdWorkerLine, { kind: 'done' }> | null = null;
   let openError: string | null = null;
   let started: string | null = null;
@@ -205,6 +210,7 @@ async function runRepeat(
     if (line.kind === 'open') {
       importMs = line.import_ms;
       openJobMs = line.open_job_ms ?? null;
+      openJobWork = line.open_job_work ?? null;
     } else if (line.kind === 'open_error') openError = line.message;
     else if (line.kind === 'start') started = line.id;
     else if (line.kind === 'fn')
@@ -244,6 +250,7 @@ async function runRepeat(
     attempts,
     import_ms: importMs,
     open_job_ms: openJobMs,
+    open_job_work: openJobWork,
     first10_ms: firstFunctionsMs(fns.map((fn) => attempts.get(fn.id)?.at_ms ?? null)),
     peak_rss: withWorkerPeak(process_.rss, done?.worker_peak_rss_bytes),
     cold_ms: done?.cold_ms ?? process_.wall_ms,
@@ -262,6 +269,8 @@ export async function runOdLane(opts: {
   only: readonly string[] | null;
   /** Request workers per binary; only 1 until roadmap 4 T9 (parallel requests over one opened project). */
   jobs: number;
+  /** Run the open-time job at open (default build behaviour); false passes `openJob: false`. */
+  openJob: boolean;
 }): Promise<LaneRun> {
   if (opts.jobs !== 1)
     throw new Error(
@@ -321,6 +330,7 @@ export async function runOdLane(opts: {
         emitter: 'c-like',
         view: 'source',
         inference: opts.inference,
+        open_job: opts.openJob,
         dist_built: new Date(distBuilt).toISOString(),
       },
     },
@@ -335,7 +345,7 @@ export async function runOdLane(opts: {
     functions,
     notes: [
       'One worker process per binary and repeat, fresh cache directory, default budgets and structures.',
-      'cold_ms = API module load + openBinary + every decompile (tsx start-up and session close excluded); import_ms = open_ms = openBinary; per-function ms = median over repeats.',
+      'cold_ms = API module load + openBinary + every decompile (tsx start-up and session close excluded); import_ms = open_ms = openBinary (import, discovery and the open-time job); open_job_ms / open_job_work = the open-time job alone; per-function ms = median over repeats.',
       'first10_ms = wall time from openBinary returning to the 10th corpus function result (corpus order); peak_rss = peak resident set size per process (ps sampling every 200 ms for the analysis workers, exact maxRSS for the bench worker), largest over repeats.',
       ...freshness,
     ],
@@ -357,6 +367,7 @@ export async function runOdLane(opts: {
               binary: binary.id,
               cachePath,
               inference: opts.inference,
+              open_job: opts.openJob,
               out: join(work, 'out.jsonl'),
               repeat: { index, total: opts.repeat },
               functions: fns.map((fn) => ({ id: fn.id, va: fn.va, name: fn.name })),
@@ -403,6 +414,9 @@ export async function runOdLane(opts: {
     const openJobs = repeats.flatMap((repeat) =>
       repeat.open_job_ms === null ? [] : [repeat.open_job_ms],
     );
+    const openJobWork = repeats.flatMap((repeat) =>
+      repeat.open_job_work === null ? [] : [repeat.open_job_work],
+    );
     binaries[binary.id] = {
       cold_ms: median(repeats.map((repeat) => repeat.cold_ms)),
       import_ms: importTimes.length === 0 ? null : median(importTimes),
@@ -410,6 +424,7 @@ export async function runOdLane(opts: {
       decompile_ms_total: median(repeats.map((repeat) => repeat.decompile_ms_total)),
       open_ms: importTimes.length === 0 ? null : median(importTimes),
       ...(openJobs.length === 0 ? {} : { open_job_ms: median(openJobs) }),
+      ...(openJobWork.length === 0 ? {} : { open_job_work: median(openJobWork) }),
       first10_ms: first10.length === 0 ? null : median(first10),
       peak_rss: largestPeak(repeats.map((repeat) => repeat.peak_rss)),
       ...(opts.repeat > 1 ? { repeats_cold_ms: repeats.map((repeat) => repeat.cold_ms) } : {}),
