@@ -1641,6 +1641,47 @@ makes a function void. `sqlite3GetToken`, `getConstraintToken`,
 integer results this way, and `rtreeInsertCell` types its `rowidWrite` /
 `parentWrite` tails.
 
+Closed-world caller consensus (`caller_consensus`; source view only; premise D1
+recorded with `requireAbi('caller_consensus', …)`). Where an undeclared function
+without an indirect result would still present a result that may be incidental,
+the planner asks once per request for `SourceEvidence.function_result_use`: tail
+transfers only; no selected register while a tail or the native interface
+forwards a result; or an integer selection whose every return exit path holds the
+unchanged entry value, a call output, or a value the function also stores or uses
+as an address, call argument or branch operand (`incidental_paths`). A path that
+computes its value only for the exit (a literal, arithmetic, a load, another
+argument) returns it deliberately, and FP or explicit selections are not asked:
+that gate only skips an attempt. It is proven for the
+function and, recursively, for every caller its result reaches: no export, global
+or weak symbol, image entry point or unwind handler names the entry; no
+relocation, rebase, bind or chained fixup targets it, in an image without
+Objective-C relative method lists or Swift metadata (relative code offsets), whose loader reported no warning other than undecoded
+semantics and whose absolute pointers all carry fixups (Mach-O PIE or dylib, ELF
+`ET_DYN`, PE dynamic base); no instruction materializes or reaches the entry other
+than through a listed BL/B (ARM64: an ADR to it, an ADRP of its page whose
+followed register is added to its page offset or escapes the scan, a conditional
+branch from another function, a fallthrough from a preceding non-terminator;
+x86-64: any non-call reference); the direct site set is complete (ARM64 sweep;
+x86-64 only with a complete reference index), not empty (a function no listed
+site reaches is reached only from outside, or never), and every site has a caller
+(`next_entry` attribution only when every loader function start is an entry);
+after each call site the integer result register (and the FP one unless the
+FP carrier is unchanged or undefined on every exit and every tail callee's
+observed interface writes no FP result) is overwritten before any read, or
+reaches only the caller's own return, whose caller then needs the same consensus;
+a tail site needs it of the tail caller. Callers under proof are assumed
+coinductively (recursion), at most 6 levels deep; a semantic read, an unknown
+window, a result left live into another tail transfer, more than 64 sites of one
+function or 128 in all abstain, and so does a spent share (a quarter of the
+remaining work, like `caller_result_use`). The sites are refuted first in the
+order of a cyclic sweep from each function's own entry; a site that fails on its
+own abstains for the swept words up to it, before the loader tables and the whole
+image sweep are charged. The function then returns nothing
+on every path (`void_like_result: 'caller_consensus'`), every tail transfer gets
+`result_void` and prints `h(...); return;`, the result registers move to
+`exit_scratch` with their exact values, and the `caller_consensus` presentation
+record names the direct sites. The checked view is unchanged.
+
 A context-specialized callee summary (constant/alias call-site assumptions)
 keeps the callee's result root. The context unit carries the baseline body's
 result, proven on every baseline exit, where an FP/vector exit whose write is
