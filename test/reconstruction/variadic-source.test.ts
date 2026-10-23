@@ -834,7 +834,7 @@ function darwinFormatCaller(variant: 'closed' | 'reread') {
       : null;
   entry.writeRegister(abi.stack_pointer, sp);
   if (reread) {
-    entry.writeRegister(x0, entry.cast('zext', u64, reread));
+    entry.writeRegister(x0, entry.cast('zero_extend', u64, reread));
     entry.return([reread]);
   } else entry.return([]);
   const ir = constructSSA(b.finish(entry, reread ? [integer(32)] : [])).value as SSAForm;
