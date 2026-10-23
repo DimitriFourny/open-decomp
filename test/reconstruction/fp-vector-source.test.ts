@@ -129,7 +129,14 @@ test(
       // The va_start area prints as `va` after `...`, not as an entry-SP formal.
       assert.doesNotMatch(variadicEmission.text, /entry_sp/);
       assert.match(variadicEmission.text, /, \.\.\.\)/);
-      assert.match(variadicEmission.text, /nearest-even/);
+      // The source view prints no FP-environment note; the premise is a recorded requirement.
+      assert.doesNotMatch(variadicEmission.text, /nearest-even/);
+      assert.ok(variadicEmission.requirements?.some((item) => item.kind === 'fp_environment'));
+      assert.ok(
+        variadicEmission.requirements?.some((item) =>
+          item.sites.some((site) => site.state_epoch === 'fp_default_environment'),
+        ),
+      );
       for (const [index, args] of variadicCases.entries())
         for (const poison of [0xa5, 0x5a]) {
           const memory = new Map<bigint, number>();

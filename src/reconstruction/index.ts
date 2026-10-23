@@ -298,6 +298,12 @@ function reconstructView(
             sourceStack.hidden.has(id) ||
             sourceStack.locals.has(id) ||
             sourceStack.saves.stores.has(id),
+          {
+            transfers: allTransfers,
+            copies: cellTransfers,
+            incoming: parameterSources,
+            make: sourcePlan.make,
+          },
           localValidation,
           context,
         )
@@ -714,7 +720,9 @@ function reconstructView(
     // A `void_like_result` rule makes every primary slice scratch of the
     // void-like interface: `incidental_result` established the integer primary
     // on no exit path and found the FP carrier unchanged or undefined on every
-    // exit; under `indirect_result` the aggregate returns through memory.
+    // exit; under `indirect_result` the aggregate returns through memory;
+    // `caller_consensus` found that no caller in the closed image observes a
+    // result register, so its tails forward nothing either.
     const voidLike = sourcePlan.presentation.void_like_result;
     // A tail into a known callee may forward its result; the runtime target of
     // an indirect tail is no result evidence, like the unresolved exit it was.
@@ -723,7 +731,7 @@ function reconstructView(
         input,
         sourcePlan.presentation,
         returns,
-        [...tails.values()].some((tail) => tail.target !== null),
+        voidLike !== 'caller_consensus' && [...tails.values()].some((tail) => tail.target !== null),
       ) &&
       [...returns.values()].every((projection) =>
         projection.outputs.every(
@@ -783,7 +791,7 @@ function reconstructView(
           exitScratch
             .map(
               ({ register, value, sources, entry, computed }) =>
-                `${register.root}[${register.offset_bits}:${register.width_bits}] = ${value.id} <- ${[...sources.slice(0, 2), ...(sources.length > 2 ? [`and ${sources.length - 2} more recorded sources`] : []), ...(entry ? ['entry'] : [])].join(', ')}${computed ? '; no result-use evidence gathered; callers not scanned' : ''}`,
+                `${register.root}[${register.offset_bits}:${register.width_bits}] = ${value.id} <- ${[...sources.slice(0, 2), ...(sources.length > 2 ? [`and ${sources.length - 2} more recorded sources`] : []), ...(entry ? ['entry'] : [])].join(', ')}${computed ? (voidLike === 'caller_consensus' ? '; every direct caller ignores it (caller_consensus)' : '; no result-use evidence gathered; callers not scanned') : ''}`,
             )
             .join('; '),
         )
@@ -792,7 +800,7 @@ function reconstructView(
       localValidation.requireAbi(
         'exit_scratch',
         [id],
-        `Moving these exit slices out of line assumes ABI conformance: ${voidPrimary ? `the signature layer agrees to a void-like interface with no ${voidLike ? `primary result (${voidLike})` : 'written primary'} or positive result-use evidence, and callers consume no result` : 'callers read only the established return storage, and other caller-saved slices hold no additional result'}. No result-use evidence gathered for the moved slices; callers not scanned. Exact slice values and sources remain in the exit metadata and checked view; this is not proof of non-consumption.`,
+        `Moving these exit slices out of line assumes ABI conformance: ${voidPrimary ? `the signature layer agrees to a void-like interface with no ${voidLike ? `primary result (${voidLike})` : 'written primary'} or positive result-use evidence, and callers consume no result` : 'callers read only the established return storage, and other caller-saved slices hold no additional result'}. ${voidLike === 'caller_consensus' ? 'Every direct caller in the closed image was scanned (caller_consensus).' : 'No result-use evidence gathered for the moved slices; callers not scanned.'} Exact slice values and sources remain in the exit metadata and checked view; this is not proof of non-consumption.`,
       );
       returns.set(id, { ...projection, outputs, exit_scratch: exitScratch });
     }

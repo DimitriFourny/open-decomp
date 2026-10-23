@@ -9,7 +9,7 @@ import { constructSSA } from '../../../src/analysis/ssa/index.js';
 import type { AbiProfile } from '../../../src/core/index.js';
 import { integer, type DataType, type SSAForm, type Value } from '../../../src/ir/index.js';
 import type { BlockBuilder } from '../../../src/ir/builder.js';
-import { builder } from '../../ir/support.js';
+import { builder, image } from '../../ir/support.js';
 import { emit, emittedFormals, execute } from './support.js';
 
 type Language = 'c-like' | 'python-like';
@@ -80,6 +80,15 @@ const FP_CASES: Record<32 | 64, readonly bigint[]> = {
   ],
 };
 
+/** IEEE bits of the given width are a NaN. */
+const isNaNBits = (value: bigint, bits: 32 | 64): boolean =>
+  bits === 32
+    ? (value & 0x7fffffffn) > 0x7f800000n
+    : (value & 0x7fffffffffffffffn) > 0x7ff0000000000000n;
+/** NaN payloads are unobserved: two NaNs agree, every other result is bit-exact. */
+const sameModuloPayload = (a: bigint, b: bigint, bits: 32 | 64): boolean =>
+  a === b || (isNaNBits(a, bits) && isNaNBits(b, bits));
+
 function agree(f: Fixture, language: Language, bits: 32 | 64): void {
   const source = emit(f.ir, { source: f.source }, language).emission;
   const checked = emit(f.ir, { source: f.source }, language, 'checked').emission;
@@ -95,10 +104,12 @@ function agree(f: Fixture, language: Language, bits: 32 | 64): void {
       ),
     );
     assert.equal(actual!.exit, expected!.exit, `${language} ${bits} 0x${input.toString(16)}`);
-    assert.deepEqual(
-      actual!.values,
-      expected!.values,
-      `${language} ${bits} 0x${input.toString(16)}`,
+    assert.equal(actual!.values.length, expected!.values.length);
+    actual!.values.forEach((value, index) =>
+      assert.ok(
+        sameModuloPayload(value, expected!.values[index]!, bits),
+        `${language} ${bits} 0x${input.toString(16)}: 0x${value.toString(16)} vs 0x${expected!.values[index]!.toString(16)}`,
+      ),
     );
   }
 }
@@ -131,13 +142,14 @@ for (const bits of [32, 64] as const)
 
 for (const bits of [32, 64] as const)
   for (const language of LANGUAGES)
-    test(`${language}: native FP${bits} sign-bit operations ignore payload escapes; square root does not`, () => {
+    test(`${language}: native FP${bits} operations stored to memory keep no helper (NaN payloads are unobserved)`, () => {
       for (const op of ['neg', 'abs', 'sqrt'] as const) {
         const f = build(bits, op, unary(op), true);
         const text = emit(f.ir, { source: f.source }, language).emission.text;
-        const native = op !== 'sqrt' && (language === 'c-like' || bits === 64);
+        const native = language === 'c-like' || (bits === 64 && op !== 'sqrt');
         assert.equal(text.includes(`fp_${op}(`), !native, text);
-        // The sign-bit result escapes through memory but stays bit-exact.
+        // The result escapes through memory; negation and absolute value stay
+        // bit-exact, a square root of a NaN agrees modulo payload.
         agree(f, language, bits);
       }
     });
@@ -176,19 +188,37 @@ test('native FP float-to-integer conversion hides no arithmetic payload from its
       assert.equal(/fp_add\(/.test(text), language === 'python-like' && bits === 32, text);
       assert.equal(/cast_float_to_signed\(/.test(text), language === 'python-like', text);
     }
-    // The sum itself escapes: its payload is observable, so the helper stays.
-    const escaped = build(
+    // A stored sum is consumed as a value: native. An integer consumer of its
+    // bits observes the payload, so the helper stays.
+    const stored = build(
       bits,
-      'sum-escape',
+      'sum-stored',
       (block, input, fp) =>
         block.assign(fp, { kind: 'float', op: 'add', left: input, right: input }),
       true,
     );
-    for (const language of LANGUAGES)
+    const observed = build(bits, 'sum-observed', (block, input, fp) => {
+      const sum = block.assign(fp, { kind: 'float', op: 'add', left: input, right: input });
+      block.store(
+        block.constant(integer(64), 0x2000n),
+        block.int(
+          'add',
+          block.cast('bitcast', integer(bits), sum),
+          block.constant(integer(bits), 1n),
+        ),
+      );
+      return sum;
+    });
+    for (const language of LANGUAGES) {
+      assert.equal(
+        /fp_add\(/.test(emit(stored.ir, { source: stored.source }, language).emission.text),
+        language === 'python-like' && bits === 32,
+      );
       assert.match(
-        emit(escaped.ir, { source: escaped.source }, language).emission.text,
+        emit(observed.ir, { source: observed.source }, language).emission.text,
         /fp_add\(/,
       );
+    }
   }
 });
 
@@ -241,6 +271,45 @@ test('exact emitted native FP unary and conversion C executes under clang', () =
     rmSync(directory, { recursive: true, force: true });
   }
 });
+for (const language of LANGUAGES)
+  test(`${language}: the FP-environment premise is recorded, not printed, in the source view`, () => {
+    // Two dependent operations: every operation site stays listed in the requirement.
+    const f = build(64, 'environment', (block, input, fp) => {
+      const sum = block.assign(fp, { kind: 'float', op: 'add', left: input, right: input });
+      return block.assign(fp, { kind: 'float', op: 'mul', left: sum, right: input });
+    });
+    const { emission } = emit(f.ir, { source: f.source }, language);
+    assert.doesNotMatch(emission.text, /requirement_|nearest-even|FP traps/);
+    const environment = emission.requirements!.filter((item) => item.kind === 'fp_environment');
+    assert.equal(environment.length, 1);
+    assert.equal(environment[0]!.sites.length, 2);
+    assert.ok(
+      emission.local_validation!.some(
+        (item) => item.kind === 'presentation' && item.rule === 'requirement_note',
+      ),
+    );
+    const premise = emission.requirements!.filter(
+      (item) =>
+        item.kind === 'abi_conformance' &&
+        item.sites.some((site) => site.state_epoch === 'fp_default_environment'),
+    );
+    assert.equal(premise.length, 1);
+    assert.equal(premise[0]!.sites.length, 1);
+    assert.match(premise[0]!.explanation, /C11 7\.6\.1p2/);
+    // The premise cites one of the FP-environment sites, not the whole function.
+    const spans = new Set(environment[0]!.output_spans.map((span) => `${span.start}:${span.end}`));
+    assert.ok(premise[0]!.output_spans.length > 0);
+    for (const span of premise[0]!.output_spans) assert.ok(spans.has(`${span.start}:${span.end}`));
+    assert.ok(premise[0]!.instruction_refs.length < 10);
+    const checked = emit(f.ir, { source: f.source }, language, 'checked').emission;
+    assert.match(checked.text, /Requirement requirement_[0-9a-f]+ \(assumption\)/);
+    assert.ok(
+      !checked.requirements!.some((item) =>
+        item.sites.some((site) => site.state_epoch === 'fp_default_environment'),
+      ),
+    );
+    agree(f, language, 64);
+  });
 
 /** Integer arguments in their SysV registers, an f64 result from `make`,
  * returned and, with `store`, also stored through one more pointer argument. */
@@ -248,11 +317,11 @@ function integers(
   name: string,
   count: number,
   make: (block: BlockBuilder, inputs: readonly Value[], fp: DataType) => Value,
-  store = false,
+  store: boolean | 'observed' = false,
 ): Fixture {
   const abi = sysvAMD64Abi,
     fp: DataType = { kind: 'float', bits: 64 },
-    parameters = Array.from({ length: count + Number(store) }, () => ({
+    parameters = Array.from({ length: count + Number(Boolean(store)) }, () => ({
       kind: 'integer' as const,
       bits: 64,
       signed: false,
@@ -271,7 +340,14 @@ function integers(
       return entry.readRegister(location.register);
     });
   const result = make(entry, inputs.slice(0, count), fp);
-  if (store) entry.store(inputs[count]!, entry.cast('bitcast', integer(64), result));
+  // 'observed': an integer consumer of the result's bits observes its payload.
+  if (store) {
+    const bits = entry.cast('bitcast', integer(64), result);
+    entry.store(
+      inputs[count]!,
+      store === 'observed' ? entry.int('add', bits, entry.constant(integer(64), 1n)) : bits,
+    );
+  }
   entry.return([result]);
   const ir = constructSSA(b.finish(entry, [fp])).value as SSAForm;
   return { ir, source: { abi, callees: [], addresses: [] } };
@@ -291,6 +367,7 @@ function agreeIntegers(
   f: Fixture,
   language: Language,
   cases: readonly (readonly bigint[])[],
+  exactStore = false,
 ): void {
   const source = emit(f.ir, { source: f.source }, language).emission;
   const checked = emit(f.ir, { source: f.source }, language, 'checked').emission;
@@ -309,8 +386,17 @@ function agreeIntegers(
     });
     const label = `${language} ${args.map((value) => `0x${value.toString(16)}`).join(', ')}`;
     assert.equal(actual!.exit, expected!.exit, label);
-    assert.deepEqual(actual!.values, expected!.values, label);
-    assert.equal(stored(actual!.memory), stored(expected!.memory), label);
+    assert.equal(actual!.values.length, expected!.values.length, label);
+    actual!.values.forEach((value, index) =>
+      assert.ok(sameModuloPayload(value, expected!.values[index]!, 64), label),
+    );
+    // The stored bits are exact when an integer consumer observes them.
+    assert.ok(
+      exactStore
+        ? stored(actual!.memory) === stored(expected!.memory)
+        : sameModuloPayload(stored(actual!.memory), stored(expected!.memory), 64),
+      label,
+    );
   }
 }
 
@@ -374,8 +460,10 @@ test('NaN-free: a u64 conversion times a literal is native even when stored', ()
   clangAgrees(f, U64_CASES, true);
 });
 
-test('NaN-free negatives: argument operands, variable divisors and bound overflows keep helpers', () => {
-  // A stored product of an FP argument may carry its NaN payload.
+test('NaN-free negatives: argument operands and variable divisors are payload-unobserved when stored; bits observed by integer code and bound overflows keep helpers', () => {
+  // A stored product of an FP argument may be a NaN: its payload is unobserved
+  // (fp_nan_payload_unobserved), so the product is native and agrees modulo
+  // payload; an integer consumer of its bits keeps the helper.
   const argument = build(
     64,
     'argument-scaled',
@@ -383,13 +471,13 @@ test('NaN-free negatives: argument operands, variable divisors and bound overflo
     true,
   );
   for (const language of LANGUAGES) {
-    assert.match(
+    assert.doesNotMatch(
       emit(argument.ir, { source: argument.source }, language).emission.text,
       /fp_mul\(/,
     );
     agree(argument, language, 64);
   }
-  // 0/0 is invalid: a stored quotient by a variable keeps its helper; the
+  // 0/0 is invalid: a stored quotient by a variable is native; the
   // conversions themselves are native.
   const quotient = integers(
     'variable-divisor',
@@ -403,14 +491,30 @@ test('NaN-free negatives: argument operands, variable divisors and bound overflo
     true,
   );
   const text = emit(quotient.ir, { source: quotient.source }).emission.text;
-  assert.match(text, /fp_div\(/);
-  assert.doesNotMatch(text, /cast_unsigned_to_float\(/);
-  for (const language of LANGUAGES)
-    agreeIntegers(quotient, language, [
-      [0n, 0n],
-      [1n, 0n],
-      [6n, 3n],
-    ]);
+  assert.doesNotMatch(text, /fp_div\(|cast_unsigned_to_float\(/);
+  const observedQuotient = integers(
+    'variable-divisor-observed',
+    2,
+    (block, [left, right], fp) =>
+      block.fp(
+        'div',
+        block.cast('unsigned_to_float', fp, left!),
+        block.cast('unsigned_to_float', fp, right!),
+      ),
+    'observed',
+  );
+  const observedText = emit(observedQuotient.ir, { source: observedQuotient.source }).emission.text;
+  assert.match(observedText, /fp_div\(/);
+  assert.doesNotMatch(observedText, /cast_unsigned_to_float\(/);
+  const QUOTIENTS = [
+    [0n, 0n],
+    [1n, 0n],
+    [6n, 3n],
+  ] as const;
+  for (const language of LANGUAGES) {
+    agreeIntegers(quotient, language, QUOTIENTS);
+    agreeIntegers(observedQuotient, language, QUOTIENTS, true);
+  }
   // 2^64 * 1e300 overflows the binary64 bound: the outer product of that
   // infinity with zero is a NaN, so it keeps its helper; the inner one is native.
   const overflow = integers(
@@ -426,12 +530,12 @@ test('NaN-free negatives: argument operands, variable divisors and bound overflo
         ),
         block.constant(fp, 0n),
       ),
-    true,
+    'observed',
   );
   for (const language of LANGUAGES) {
     const text = emit(overflow.ir, { source: overflow.source }, language).emission.text;
     assert.equal(text.match(/fp_mul\(/g)?.length, 1, text);
-    agreeIntegers(overflow, language, U64_CASES);
+    agreeIntegers(overflow, language, U64_CASES, true);
   }
 });
 
@@ -501,3 +605,169 @@ test('integer-to-float conversions of zero- and sign-extended values convert the
     clangAgrees(f, runs, false);
   }
 });
+
+/** `a * b` of two FP arguments (xmm0, xmm1), a possibly-NaN product: stored
+ * through a pointer argument, passed to `sub_4000(double)`, or both with an
+ * integer consumer of the stored bits (`observed`). */
+type Product = 'store' | 'call' | 'observed';
+function product(bits: 32 | 64, how: Product): Fixture & { readonly call?: string } {
+  const abi = sysvAMD64Abi,
+    fp: DataType = { kind: 'float', bits },
+    word = integer(bits),
+    pointer = { kind: 'integer' as const, bits: 64, signed: false };
+  const locations = abi
+    .classifyCall({
+      returns: fp,
+      parameters: [fp, fp, pointer],
+      variadic: false,
+      fixed_parameter_count: 3,
+    })
+    .parameters.map(({ locations: [location] }) => {
+      if (location?.kind !== 'register') throw new Error('Argument register required');
+      return location.register;
+    });
+  const b = builder(`native-product-${bits}-${how}`),
+    entry = b.block('entry');
+  const cell = (index: number) => ({ ...locations[index]!, width_bits: bits });
+  const read = (index: number): Value => entry.cast('bitcast', fp, entry.readRegister(cell(index)));
+  const result = entry.fp('mul', read(0), read(1));
+  const target = { image_id: image, space: 'va' as const, value: 0x4000n };
+  if (how !== 'store') entry.writeRegister(cell(0), entry.cast('bitcast', word, result));
+  if (how !== 'call') {
+    const bitsOf = entry.cast('bitcast', word, result);
+    entry.store(
+      entry.readRegister(locations[2]!),
+      how === 'observed' ? entry.int('add', bitsOf, entry.constant(word, 1n)) : bitsOf,
+    );
+  }
+  if (how !== 'store')
+    entry.call({ kind: 'direct', address: target }, [], [], abi.unknown_call_clobbers);
+  entry.return([]);
+  const ir = constructSSA(b.finish(entry, [])).value as SSAForm;
+  const call = ir.blocks[0]!.instructions.find((node) => node.kind === 'call');
+  const source = {
+    abi,
+    callees: [] as [],
+    addresses: [] as [],
+    ...(call && {
+      call_argument_signatures: new Map([
+        [
+          call.id,
+          {
+            returns: { kind: 'void' },
+            parameters: [fp],
+            variadic: false,
+            fixed_parameter_count: 1,
+            argument_list_complete: true,
+          } as const,
+        ],
+      ]),
+    }),
+  };
+  return { ir, source };
+}
+
+/** The IEEE product of two same-width operands, from JS double arithmetic
+ * (exact for binary32 inputs, then rounded once). */
+function multiplied(bits: 32 | 64, left: bigint, right: bigint): bigint {
+  const view = new DataView(new ArrayBuffer(8));
+  const decode = (value: bigint): number => {
+    if (bits === 32) {
+      view.setUint32(0, Number(value));
+      return view.getFloat32(0);
+    }
+    view.setBigUint64(0, value);
+    return view.getFloat64(0);
+  };
+  const result = decode(left) * decode(right);
+  if (bits === 32) {
+    view.setFloat32(0, result);
+    return BigInt(view.getUint32(0));
+  }
+  view.setFloat64(0, result);
+  return view.getBigUint64(0);
+}
+
+for (const bits of [32, 64] as const)
+  for (const language of LANGUAGES)
+    for (const how of ['store', 'call', 'observed'] as const)
+      test(`${language}: FP${bits} product ${how === 'store' ? 'stored to caller memory' : how === 'call' ? 'passed to a call' : 'passed to a call and added as an integer'} (fp_nan_payload_unobserved)`, () => {
+        const f = product(bits, how);
+        const { emission } = emit(f.ir, { source: f.source }, language);
+        // Python binary32 arithmetic always keeps its helper.
+        const operator = !(language === 'python-like' && bits === 32);
+        const premise = (emission.requirements ?? []).some(
+          (item) =>
+            item.kind === 'abi_conformance' &&
+            item.explanation.includes('NaN payloads are unspecified'),
+        );
+        if (how === 'observed') assert.match(emission.text, /fp_mul\(/, emission.text);
+        else {
+          assert.equal(/fp_mul\(/.test(emission.text), !operator, emission.text);
+          // Python binary32 prints its helper whatever the premise records.
+          if (operator) assert.ok(premise, emission.text);
+        }
+        if (how === 'observed') assert.equal(premise, false, emission.text);
+        const checked = emit(f.ir, { source: f.source }, language, 'checked').emission;
+        // The checked view never passes the product (its call arguments are
+        // unknown) but keeps the helper wherever it stores the product.
+        if (how !== 'call') assert.match(checked.text, /fp_mul\(/, 'checked view keeps the helper');
+        const cases = FP_CASES[bits];
+        for (const left of cases)
+          for (const right of cases) {
+            const label = `${language} ${bits} ${how} 0x${left.toString(16)} * 0x${right.toString(16)}`;
+            const expected = multiplied(bits, left, right);
+            const inputs = (emitted: typeof emission): Map<string, bigint> =>
+              new Map(
+                emittedFormals(emitted).flatMap((formal, index) =>
+                  formal.semantic_ids.map(
+                    (id) =>
+                      [
+                        id,
+                        how === 'call'
+                          ? index === 0
+                            ? left
+                            : right
+                          : index === 0
+                            ? POINTER
+                            : index === 1
+                              ? left
+                              : right,
+                      ] as const,
+                  ),
+                ),
+              );
+            const run = (emitted: typeof emission) =>
+              execute(
+                emitted,
+                inputs(emitted),
+                zeroed(),
+                0n,
+                new Map(),
+                new Map(),
+                new Map([['sub_4000', () => []]]),
+              );
+            const observed = run(emission);
+            if (how !== 'call') {
+              const width = BigInt(bits / 8);
+              const memory = Array.from(
+                { length: Number(width) },
+                (_, i) => BigInt(observed.memory.get(POINTER + BigInt(i)) ?? 0) << BigInt(8 * i),
+              ).reduce((total, byte) => total | byte, 0n);
+              const wanted = how === 'observed' ? BigInt.asUintN(bits, expected + 1n) : expected;
+              assert.ok(
+                how === 'observed'
+                  ? memory === wanted || isNaNBits(expected, bits)
+                  : sameModuloPayload(memory, wanted, bits),
+                `${label}: stored 0x${memory.toString(16)}`,
+              );
+            }
+            if (how !== 'store') {
+              const argument = observed.source_calls?.[0]?.arguments[0];
+              assert.ok(
+                argument !== undefined && sameModuloPayload(argument, expected, bits),
+                `${label}: call argument 0x${argument?.toString(16)}`,
+              );
+            }
+          }
+      });

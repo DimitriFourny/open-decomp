@@ -91,7 +91,14 @@ int main(void) {
       );
       assert.ok('data' in result && result.data.delivery === 'inline');
       const emission: WireEmission = result.data.emission;
-      assert.match(emission.text, /nearest-even/);
+      // The source view prints no FP-environment note; the premise is a recorded requirement.
+      assert.doesNotMatch(emission.text, /nearest-even/);
+      assert.ok(emission.requirements?.some((item) => item.kind === 'fp_environment'));
+      assert.ok(
+        emission.requirements?.some((item) =>
+          item.sites.some((site) => site.state_epoch === 'fp_default_environment'),
+        ),
+      );
       const formals = emittedFormals(emission).filter((formal) => formal.name !== 'entry_sp');
       assert.equal(formals.length, 2, emission.text);
       for (const [index, [a, b]] of cases.entries()) {
@@ -202,6 +209,80 @@ int main(void) {
           { name: 'fixture_float', arguments: [bits(a), bits(b)] },
         ]);
       }
+    }
+  },
+);
+
+test(
+  'source-built Mach-O: a local fesetround wrapper keeps its caller FP guards; an ordinary callee preserves the environment',
+  { skip: nativeOracleSkip(), timeout: 60000 },
+  async (t) => {
+    const root = await mkdtemp(join(tmpdir(), 'open-decomp-fp-writer-'));
+    let session: BinarySession | undefined;
+    t.after(async () => {
+      await session?.close();
+      await rm(root, { recursive: true, force: true });
+    });
+    const source = join(root, 'writer.c'),
+      binary = join(root, 'writer');
+    // Compiled, never executed: the decompiler receives only the binary.
+    await writeFile(
+      source,
+      `
+#include <fenv.h>
+#include <unistd.h>
+__attribute__((noinline)) void fixture_set_upward(void) { fesetround(FE_UPWARD); }
+__attribute__((noinline)) int fixture_ordinary(void) { return getpid(); }
+__attribute__((noinline)) double fixture_writer_caller(double a, double b) {
+  double x = a * b;
+  fixture_set_upward();
+  return x + b;
+}
+__attribute__((noinline)) double fixture_plain_caller(double a, double b) {
+  double x = a * b;
+  fixture_ordinary();
+  return x + b;
+}
+int main(void) {
+  volatile double a = 1.5, b = 2.5;
+  return (int)(fixture_writer_caller(a, b) + fixture_plain_caller(a, b));
+}
+`,
+    );
+    const compiled = spawnSync(
+      '/usr/bin/clang',
+      [
+        '-target',
+        'arm64-apple-macos13.0',
+        '-O1',
+        '-ffp-contract=off',
+        '-fno-optimize-sibling-calls',
+        source,
+        '-o',
+        binary,
+      ],
+      { encoding: 'utf8' },
+    );
+    assert.equal(compiled.status, 0, compiled.stderr);
+    session = await openBinary(binary, { cachePath: join(root, 'cache') });
+    for (const emitter of ['c-like', 'python-like'] as const) {
+      const text = async (name: string): Promise<string> => {
+        const result: ToolResult<'function_decompile'> = await session!.decompile(
+          { name },
+          { emitter },
+        );
+        assert.ok('data' in result && result.data.delivery === 'inline', name);
+        return result.data.emission.text;
+      };
+      // The wrapper's summary shows a changed FPCR (a writer-import call on its
+      // exit path), so the caller keeps the guard of every FP operation.
+      const writer = await text('_fixture_writer_caller');
+      assert.match(writer, /fixture_set_upward\(/, writer);
+      assert.equal([...writer.matchAll(/requirement_predicate\(/g)].length, 2, writer);
+      // getpid preserves FPCR (AAPCS64 6.1.2): the default environment is assumed.
+      const plain = await text('_fixture_plain_caller');
+      assert.match(plain, /fixture_ordinary\(/, plain);
+      assert.doesNotMatch(plain, /requirement_predicate\(/, plain);
     }
   },
 );

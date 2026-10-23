@@ -451,6 +451,115 @@ for (const language of ['c-like', 'python-like'] as const)
       }
     });
 
+    test('a do/while test on its copy source through a truncation restates over the copy destination (mod 2^32)', () => {
+      const b = program('source-control-restate-source'),
+        entry = b.block('entry', [i64]),
+        loop = b.block('loop', [i64, i32]),
+        exit = b.block('exit', [i32]);
+      const start = entry.parameters[0]!;
+      entry.jump(loop, [start, entry.constant(i32, 0n)]);
+      const [x, count] = loop.parameters as [Value, Value];
+      const next = loop.int('add', count, loop.constant(i32, 1n));
+      // Exit once (uint32_t)x + 16 == 8; otherwise repeat with the 64-bit x + 16.
+      loop.branch(
+        loop.compare(
+          'ne',
+          loop.int('add', loop.cast('truncate', i32, x), loop.constant(i32, 16n)),
+          loop.constant(i32, 8n),
+        ),
+        loop.edge(loop, [loop.int('add', x, loop.constant(i64, 16n)), next]),
+        loop.edge(exit, [next]),
+      );
+      exit.return(exit.parameters);
+      const output = emit(b.finish(entry, [i32]), language);
+      const text = output.emission.text;
+      if (c) {
+        assert.match(
+          text,
+          /\n {2}do \{\n[^]*\n {2}\} while \(\(?(\(uint32_t\)\w+|cast_truncate\("bits32_t", "bits64_t", \w+\)) != (0x)?8\)?\);\n/,
+        );
+        assert.doesNotMatch(text, /while \(true\)|\bbreak\b/);
+      }
+      assert.equal(rules(output).includes('loop_test_restatement'), c);
+      // The low word reaches 0xfffffff8 after a carry out of bit 31 (and of bit 63).
+      for (const initial of [0xfffffff8n, 0xffffffd8n, 0x1_ffffffe8n, 0xffff_ffff_ffff_ffd8n]) {
+        let value = initial,
+          expected = 0n;
+        for (;;) {
+          expected += 1n;
+          if (BigInt.asUintN(32, value + 16n) === 8n) break;
+          value = BigInt.asUintN(64, value + 16n);
+        }
+        const observed = execute(output.emission, new Map([[start.id, initial]]), memory());
+        assert.deepEqual(observed.values, [expected], `${initial}`);
+      }
+    });
+
+    test('a do/while equality against a bound the repeat copies do not write restates as x != B + c (mod 2^8), folding B = y - m', () => {
+      for (const [variant, restated] of [
+        ['folded', true],
+        ['offset', true],
+        ['written', false],
+        ['ordered', false],
+      ] as const) {
+        const b = program(`source-control-restate-bound-${variant}`),
+          entry = b.block('entry', [i8]),
+          loop = b.block('loop', [i8, i8, i32]),
+          exit = b.block('exit', [i32]);
+        const n = entry.parameters[0]!;
+        entry.jump(loop, [entry.constant(i8, 0n), n, entry.constant(i32, 0n)]);
+        const [index, other, sum] = loop.parameters as [Value, Value, Value];
+        const total = loop.int('add', sum, loop.cast('zero_extend', i32, index));
+        // folded: exit once n - 1 == index; offset: n - 3 == index; written: other
+        // == index, where the repeat copy also writes other; ordered: index >= n - 1.
+        const bound =
+          variant === 'written'
+            ? other
+            : loop.int('sub', n, loop.constant(i8, variant === 'offset' ? 3n : 1n));
+        loop.branch(
+          variant === 'ordered'
+            ? loop.compare('uge', index, bound)
+            : loop.compare('eq', bound, index),
+          loop.edge(exit, [total]),
+          loop.edge(loop, [
+            loop.int('add', loop.constant(i8, 1n), index),
+            loop.int('add', other, loop.constant(i8, 2n)),
+            total,
+          ]),
+        );
+        exit.return(exit.parameters);
+        const output = emit(b.finish(entry, [i32]), language);
+        const text = output.emission.text;
+        if (c && restated) {
+          assert.match(
+            text,
+            variant === 'folded'
+              ? /\n {2}do \{\n[^]*\n {2}\} while \(\(?(\w+) != (?!\1)\w+\)?\);\n/
+              : /\n {2}do \{\n[^]*\n {2}\} while \(\(?\w+ != (wrap\(8, \(\w+ - (0x)?2\)\)|\(uint8_t\)\(\w+ - (0x)?2\))\)?\);\n/,
+          );
+          assert.doesNotMatch(text, /while \(true\)|\bbreak\b/);
+        } else assert.doesNotMatch(text, /\bdo \{/);
+        assert.equal(rules(output).includes('loop_test_restatement'), c && restated, variant);
+        for (const value of [0n, 1n, 3n, 200n]) {
+          let i = 0n,
+            o = value,
+            expected = 0n;
+          for (;;) {
+            expected += i;
+            const limit =
+              variant === 'written'
+                ? o
+                : BigInt.asUintN(8, value - (variant === 'offset' ? 3n : 1n));
+            if (variant === 'ordered' ? i >= limit : i === limit) break;
+            i = BigInt.asUintN(8, i + 1n);
+            o = BigInt.asUintN(8, o + 2n);
+          }
+          const observed = execute(output.emission, new Map([[n.id, value]]), memory());
+          assert.deepEqual(observed.values, [expected], `${variant}/${value}`);
+        }
+      }
+    });
+
     test('a loop exit edge with copies prints them after the loop only when it is the sole exit', () => {
       for (const second of [false, true]) {
         const b = program(`source-control-exit-copies-${second}`),

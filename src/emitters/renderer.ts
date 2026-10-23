@@ -494,7 +494,12 @@ export class Renderer {
   private readonly globals: GlobalPlan;
   private readonly usedGlobals = new Map<
     string,
-    { readonly object: GlobalObject; readonly name: string }
+    {
+      readonly object: GlobalObject;
+      readonly name: string;
+      /** `symbol+0x<offset>` when the name is relative to a preceding symbol. */
+      readonly relative?: string;
+    }
   >();
   private readonly sourceValueTypes = new Map<string, string>();
   /** Single call results, by result value id (their library return spelling). */
@@ -2342,7 +2347,12 @@ export class Renderer {
         'data_address',
         'Exact image-backed byte storage address: identity, original VA base, byte offset, known extent (or unknown), mutability and data kind. Returns base + offset without reading, folding, allocating or rebasing storage. Not indexing into a neighbouring literal; original memory ordering and faults remain explicit.',
         [
-          this.writer.quote(item.name ?? `data_${object.address.value.toString(16)}`),
+          this.writer.quote(
+            item.name ??
+              (item.symbol_relative && object.offset === 0n
+                ? `${item.symbol_relative.name}+0x${item.symbol_relative.offset.toString(16)}`
+                : `data_${object.address.value.toString(16)}`),
+          ),
           `0x${object.address.value.toString(16)}`,
           `0x${object.offset.toString(16)}`,
           object.byte_length === null
@@ -2418,9 +2428,40 @@ export class Renderer {
     const used = this.usedGlobals.get(global.key);
     if (used) return used.name;
     if (global.native_name !== undefined) this.names.set(global.key, global.native_name);
-    const name = this.sourceIdentifier(global.key, global.stem, global.native_name !== undefined);
-    this.usedGlobals.set(global.key, { object: global, name });
+    const relative = global.relative && this.relativeName(global.relative);
+    const name = this.sourceIdentifier(
+      global.key,
+      relative?.stem ?? global.stem,
+      global.native_name !== undefined,
+    );
+    this.usedGlobals.set(global.key, {
+      object: global,
+      name,
+      ...(relative ? { relative: relative.text } : {}),
+    });
     return name;
+  }
+
+  /** `symbol_0x<offset>` for storage no symbol covers, named after the preceding
+   * object symbol of its section (`symbol+0x<offset>` for comments), when the
+   * `symbol_relative_name` record is admitted. One record per function states the
+   * rule; the declaration's mapping carries each symbol's evidence. */
+  private relativeName(relative: {
+    readonly symbol: string;
+    readonly offset: bigint;
+  }): { readonly stem: string; readonly text: string } | undefined {
+    const offset = `0x${relative.offset.toString(16)}`;
+    return this.localValidation.presentation(
+      'symbol_relative_name',
+      this.input.function.id,
+      'image storage that no symbol or data record covers is named after the nearest preceding object symbol of its section plus the exact byte offset, when no other symbol or data record starts in between; naming only, the extent stays unknown',
+    )
+      ? {
+          stem: `${relative.symbol}_${offset}`,
+          // Comment text: an asserted name cannot close the comment.
+          text: `${relative.symbol.replace(/\*\//g, '* /')}+${offset}`,
+        }
+      : undefined;
   }
 
   /** Integer address of an image object (or of an imported object, offset 0). */
@@ -3211,10 +3252,35 @@ export class Renderer {
   /** Name of a declared scalar pointer of exactly `bits` element width and
    * `kind` (C): a printed variable, or an inline reload of a typed slot. */
   private scalarPointerBase(value: Value, bits: number, kind: PointeeKind): string | null {
+    const member = this.language === 'c-like' ? this.scalarPointerMember(value, bits, kind) : null;
+    if (member !== null) return member;
     const pointer = this.scalarPointer(value);
     if (this.language !== 'c-like' || pointer?.bits !== bits || pointer.kind !== kind) return null;
     const load = this.inlined.get(value.id)?.node;
     return load?.kind === 'load' && this.slotType(load.id) ? this.storage(load) : this.local(value);
+  }
+
+  /** The lvalue `p->field` of an inline read of a declared pointer member
+   * whose pointee is an unsigned integer (or float) of exactly `bits`/`kind`:
+   * `*p->field` dereferences it without an integer round trip. */
+  private scalarPointerMember(value: Value, bits: number, kind: PointeeKind): string | null {
+    if (!this.inline.has(value.id) || value.type.kind !== 'integer' || value.type.bits !== 64)
+      return null;
+    const load = this.inlined.get(value.id)?.node;
+    if (load?.kind !== 'load' || this.slotType(load.id) || this.punnedLocal(load)) return null;
+    const text = this.storage(load),
+      id = this.memberPointers.get(load.id),
+      pointer = id ? this.typeRecords.get(id)?.definition : undefined;
+    if (pointer?.kind !== 'pointer') return null;
+    const pointee = this.typeRecords.get(this.naturalScalar(pointer.to) ?? pointer.to)?.definition;
+    const matches =
+      kind === 'integer'
+        ? pointee?.kind === 'integer' && !pointee.signed && pointee.bits === bits
+        : pointee?.kind === 'float' && pointee.bits === bits;
+    if (!matches) return null;
+    // The dereference reads the pointee's own unsigned integer type.
+    if (kind === 'integer') this.memberTypes.set(`*${text}`, { bits, signed: false });
+    return text;
   }
 
   /** A stored value converted to a declared pointer member's type: the same
@@ -3850,9 +3916,14 @@ export class Renderer {
     if (!this.usedGlobals.size) return;
     const python = this.language === 'python-like';
     const lines: string[] = [],
-      spans: { readonly object: GlobalObject; readonly start: number; readonly end: number }[] = [];
+      spans: {
+        readonly object: GlobalObject;
+        readonly start: number;
+        readonly end: number;
+        readonly relative: boolean;
+      }[] = [];
     let offset = at;
-    for (const { object: global, name } of this.usedGlobals.values()) {
+    for (const { object: global, name, relative } of this.usedGlobals.values()) {
       this.context.checkpoint(1);
       const declared = global.declared;
       if (declared && !python) this.registerTypedefs(declared.type);
@@ -3882,8 +3953,12 @@ export class Renderer {
           : `import ${plain(native!)}`
         : [
             ...(python || name.split('_').includes(hex) ? [] : [`VA 0x${hex}`]),
+            ...(relative === undefined ? [] : [plain(relative)]),
             ...(global.object.byte_length === null ? [] : [`${global.object.byte_length} bytes`]),
             ...(global.object.kind === 'bytes' ? [] : [global.object.kind.replace('_', ' ')]),
+            ...(global.initial_import === undefined
+              ? []
+              : [`initially ${plain(global.initial_import)}`]),
           ].join(', ');
       const comment = where === '' ? '' : python ? `  # ${where}` : ` /* ${where} */`;
       if (python) {
@@ -3907,7 +3982,12 @@ export class Renderer {
             : `extern ${global.object.mutable || global.import ? '' : 'const '}${type} ${name}${global.shape === 'scalar' ? '' : '[]'};${comment}`,
         );
       const length = lines.slice(first).reduce((sum, line) => sum + line.length + 1, 0);
-      spans.push({ object: global, start: offset, end: offset + length });
+      spans.push({
+        object: global,
+        start: offset,
+        end: offset + length,
+        relative: relative !== undefined,
+      });
       offset += length;
     }
     const delta = insert(at, lines);
@@ -3920,6 +4000,7 @@ export class Renderer {
         [
           span.object.object.evidence_ids,
           ...(span.object.import ? [span.object.import.evidence_ids] : []),
+          ...(span.relative && span.object.relative ? [span.object.relative.evidence_ids] : []),
         ],
         span.end,
       );
@@ -3941,6 +4022,7 @@ export class Renderer {
       readonly first: string;
       readonly address: string;
       readonly table: IndexedDataAccess;
+      readonly relative: string | undefined;
       reach: bigint;
     }
     const groups = new Map<string, Group>();
@@ -3958,8 +4040,22 @@ export class Renderer {
       )
         continue;
       const key = `${this.addressKey(object.address)}:u${table.bits}`;
+      const symbolRelative = table.data.symbol_relative;
+      const relative =
+        symbolRelative?.source_name !== undefined &&
+        table.data.source_name === undefined &&
+        table.data.name === undefined &&
+        object.offset === 0n
+          ? this.relativeName({
+              symbol: symbolRelative.source_name,
+              offset: symbolRelative.offset,
+            })
+          : undefined;
       const stem =
-        table.data.source_name ?? table.data.name ?? `data_${object.address.value.toString(16)}`;
+        table.data.source_name ??
+        table.data.name ??
+        relative?.stem ??
+        `data_${object.address.value.toString(16)}`;
       if (table.data.name !== undefined) this.names.set(key, table.data.name);
       const name = this.sourceIdentifier(key, stem);
       this.dataTables.set(id, { ...table, name });
@@ -3972,6 +4068,7 @@ export class Renderer {
           first: id,
           address: node.address.id,
           table,
+          relative: relative?.text,
           reach: table.last + 1n,
         });
     }
@@ -3996,19 +4093,29 @@ export class Renderer {
         if (this.language === 'c-like')
           this.writer.line(
             0,
-            `extern ${object.mutable ? '' : 'const '}uint${table.bits}_t ${group.name}[]; /* VA 0x${hex}, ${extent} */`,
+            `extern ${object.mutable ? '' : 'const '}uint${table.bits}_t ${group.name}[]; /* VA 0x${hex}, ${group.relative === undefined ? '' : `${group.relative}, `}${extent} */`,
           );
         else
           this.writer.line(
             0,
-            `${group.name} = memory_view(0x${hex}, "uint${table.bits}_t", ${object.mutable ? 'True' : 'False'})  # ${extent}`,
+            `${group.name} = memory_view(0x${hex}, "uint${table.bits}_t", ${object.mutable ? 'True' : 'False'})  # ${group.relative === undefined ? '' : `${group.relative}, `}${extent}`,
           );
         this.writer.helper(
           this.language === 'c-like' ? group.name : 'memory_view',
           'Image-backed indexed storage view at the declared VA; no allocation or invented extent. Index units are the declared scalar width. Reads retain original byte order, aliasing and faults; no Python sequence bounds or negative-index rebasing.',
         );
       }
-      this.mapped(node, start, [group.address], [object.evidence_ids]);
+      this.mapped(
+        node,
+        start,
+        [group.address],
+        [
+          object.evidence_ids,
+          ...(group.relative !== undefined && table.data.symbol_relative
+            ? [table.data.symbol_relative.evidence_ids]
+            : []),
+        ],
+      );
     }
   }
 
@@ -7976,6 +8083,19 @@ export class Renderer {
       )
     )
       for (const site of rematerialized) candidates.delete(site.node.result.id);
+    const reloads = [...candidates.values()].filter((site) => site.nonfaulting);
+    if (
+      reloads.length &&
+      !this.localValidation.presentation(
+        'nonfaulting_load_order',
+        subject,
+        'a nonvolatile load of an address range that a printed nonvolatile access of the same structural address and at least its width reached (through its block and single-predecessor blocks, with only assignments, register reads and nonvolatile loads/stores in between) expands at its unconditional same-block single use across independent nonvolatile loads, never across a store, call, unknown effect, fence or volatile access; it cannot fault, so the faults of the loads it crosses keep their order, and loads change no memory',
+        reloads.map(({ node }) => node.id),
+      )
+    ) {
+      calls = new Map();
+      for (const site of reloads) candidates.delete(site.node.result.id);
+    }
     if (
       candidates.size &&
       this.localValidation.presentation(
@@ -7985,6 +8105,12 @@ export class Renderer {
         [...candidates.values()].map(({ node }) => node.id),
       )
     ) {
+      if (reloads.some((site) => candidates.has(site.node.result.id)))
+        this.localValidation.requireAbi(
+          'nonfaulting_reload',
+          [...new Set(reloads.map(({ anchor }) => anchor))].slice(0, 64),
+          'A successful access to [a, a+w) implies that a later read of it does not fault, absent an intervening call, unknown effect or volatile access: no other agent unmaps, protects or remaps those bytes in between. Each moved reload keeps its address, width and value; the checked view keeps every load at its original position.',
+        );
       for (const [id, site] of candidates) {
         this.inlined.set(id, site);
         this.inline.add(id);
@@ -8618,13 +8744,21 @@ export class Renderer {
     }
   }
 
-  /** Restate a do-while test over the variable its repeat copy just wrote: for
-   * a copy `x <- x + c` and test `(x or zext x) ==/!= K`, test `x ==/!= K + c`;
-   * for a copy `x <- x >> c` (logical or arithmetic, 0 < c < width) and an
-   * unsigned range test `x < 2^c` (or `x <= 2^c - 1`, or their negations), test
-   * `x ==/!= 0`. The derivation is exact over the IR; while the shared
-   * allowance remains, the bit-vector checker independently re-proves the
-   * restated test (over the copy's source value) and may veto it. */
+  /** Restate a do-while test over the variable its repeat copy just wrote, so
+   * the copy prints before the test:
+   * - for a copy `x <- x + c` and an equality `L ==/!= B` whose `L` is `x` (or
+   *   `x mod 2^w`) plus a constant k through casts and constant steps, test
+   *   `x (mod 2^w) ==/!= B + c - k` (mod 2^w). `B` is a constant (a zero
+   *   extended `L` against a constant in its range tests the narrower value),
+   *   or an expression over variables the repeat copies do not write, without
+   *   inline loads or calls; `B + d` folds into `B = y ± m`. A test on the
+   *   copy's source value is the case k = c: the same predicate over `x`.
+   * - for a copy `x <- x >> c` (logical or arithmetic, 0 < c < width) and an
+   *   unsigned range test `x < 2^c` (or `x <= 2^c - 1`, or their negations),
+   *   test `x ==/!= 0`. Other ordered compares are not restated.
+   * The derivation is exact over the IR; while the shared allowance remains,
+   * the bit-vector checker independently re-proves the restated test (over the
+   * copy's source value) and may veto it. */
   private restateTest(
     control: Extract<Control, { kind: 'if' }>,
     repeat: ParallelTransfer,
@@ -8643,70 +8777,202 @@ export class Renderer {
       compare = program.expressions.get(tested.id);
     }
     if (compare?.kind !== 'compare') return false;
-    const right = constant(compare.right),
-      bound = right ?? constant(compare.left);
-    let leaf = right === undefined ? compare.right : compare.left;
-    if (bound === undefined) return false;
-    // The predicate with the variable on its left.
-    const op =
-      right !== undefined
-        ? compare.op
-        : compare.op === 'ult'
-          ? 'ugt'
-          : compare.op === 'ule'
-            ? 'uge'
-            : compare.op === 'ugt'
-              ? 'ult'
-              : compare.op === 'uge'
-                ? 'ule'
-                : compare.op;
-    if (!['eq', 'ne', 'ult', 'ule', 'ugt', 'uge'].includes(op)) return false;
-    for (let i = 0; i < 16 && this.inline.has(leaf.id); i++) {
-      const cast = program.expressions.get(leaf.id);
-      if (cast?.kind !== 'cast' || (cast.op !== 'zero_extend' && cast.op !== 'bitcast'))
-        return false;
-      leaf = cast.value;
-    }
-    if (this.inline.has(leaf.id) || leaf.type.kind !== 'integer') return false;
-    const width = leaf.type.bits;
-    if (bound >= 1n << BigInt(width)) return false;
+    const original = compare;
     const key = (value: Value): string => (this.variables.get(value.id) ?? value).id;
-    const copies = this.printedCopies(repeat),
-      copy = copies.find((item) => key(item.destination) === key(leaf));
-    if (!copy || copy.destination.type.kind !== 'integer' || copy.destination.type.bits !== width)
-      return false;
-    let restatedOp: 'eq' | 'ne', bits: bigint, scope: string;
-    if (op === 'eq' || op === 'ne') {
-      const offset = (value: Value, depth: number): bigint | null => {
-        if (value.id === leaf.id) return 0n;
-        const expression = program.expressions.get(value.id);
-        if (depth > 8 || !expression || value.type.kind !== 'integer' || value.type.bits < width)
-          return null;
+    const copies = this.printedCopies(repeat);
+    // `value - leaf` when `value` is `leaf` plus a constant modulo 2^|leaf|,
+    // through casts and constant steps no narrower than `leaf`.
+    const offset = (value: Value, leaf: Value, depth = 0): bigint | null => {
+      if (value.id === leaf.id) return 0n;
+      const expression = program.expressions.get(value.id);
+      if (
+        depth > 8 ||
+        !expression ||
+        value.type.kind !== 'integer' ||
+        leaf.type.kind !== 'integer' ||
+        value.type.bits < leaf.type.bits
+      )
+        return null;
+      if (
+        expression.kind === 'cast' &&
+        ['bitcast', 'zero_extend', 'sign_extend', 'truncate'].includes(expression.op)
+      )
+        return offset(expression.value, leaf, depth + 1);
+      if (expression.kind === 'extract' && expression.offset === 0)
+        return offset(expression.value, leaf, depth + 1);
+      if (expression.kind !== 'integer' || (expression.op !== 'add' && expression.op !== 'sub'))
+        return null;
+      const step = constant(expression.right);
+      if (step !== undefined) {
+        const base = offset(expression.left, leaf, depth + 1);
+        return base === null ? null : expression.op === 'add' ? base + step : base - step;
+      }
+      const first = constant(expression.left);
+      if (first === undefined || expression.op !== 'add') return null;
+      const base = offset(expression.right, leaf, depth + 1);
+      return base === null ? null : base + first;
+    };
+    const synthetic = new Map<string, Expression>();
+    const make = (suffix: string, type: DataType, expression: Expression): Value => {
+      const value = { id: `${control.id}#${suffix}`, type };
+      synthetic.set(value.id, expression);
+      return value;
+    };
+    type Restated = {
+      readonly copy: { readonly destination: Value; readonly source: Value };
+      readonly op: 'eq' | 'ne';
+      /** The restated left operand over the copy's destination, and the same over its source. */
+      readonly subject: Value;
+      readonly source: Value;
+      readonly bound: Value;
+      readonly scope: string;
+    };
+    const equality = (side: Value, other: Value, op: 'eq' | 'ne'): Restated | undefined => {
+      synthetic.clear();
+      const fixed = constant(other);
+      let operand = side;
+      // `zext v ==/!= K` with K < 2^|v| is `v ==/!= K`.
+      for (let i = 0; i < 16 && fixed !== undefined && this.inline.has(operand.id); i++) {
+        const cast = program.expressions.get(operand.id);
         if (
-          expression.kind === 'cast' &&
+          cast?.kind !== 'cast' ||
+          (cast.op !== 'bitcast' && cast.op !== 'zero_extend') ||
+          cast.value.type.kind !== 'integer' ||
+          fixed >= 1n << BigInt(cast.value.type.bits)
+        )
+          break;
+        operand = cast.value;
+      }
+      if (operand.type.kind !== 'integer') return undefined;
+      const width = operand.type.bits,
+        type = integer(width);
+      // operand = (leaf mod 2^width) + step, through inline casts and constant steps.
+      let leaf = operand,
+        step = 0n;
+      for (let i = 0; i < 16 && this.inline.has(leaf.id); i++) {
+        const expression = program.expressions.get(leaf.id);
+        let next: Value | undefined;
+        if (
+          expression?.kind === 'cast' &&
           ['bitcast', 'zero_extend', 'sign_extend', 'truncate'].includes(expression.op)
         )
-          return offset(expression.value, depth + 1);
-        if (expression.kind === 'extract' && expression.offset === 0)
-          return offset(expression.value, depth + 1);
-        if (expression.kind !== 'integer' || (expression.op !== 'add' && expression.op !== 'sub'))
-          return null;
-        const step = constant(expression.right);
-        if (step !== undefined) {
-          const base = offset(expression.left, depth + 1);
-          return base === null ? null : expression.op === 'add' ? base + step : base - step;
+          next = expression.value;
+        else if (expression?.kind === 'extract' && expression.offset === 0) next = expression.value;
+        else if (
+          expression?.kind === 'integer' &&
+          (expression.op === 'add' || expression.op === 'sub')
+        ) {
+          const right = constant(expression.right),
+            left = expression.op === 'add' ? constant(expression.left) : undefined;
+          if (right !== undefined) {
+            step += expression.op === 'add' ? right : -right;
+            next = expression.left;
+          } else if (left !== undefined) {
+            step += left;
+            next = expression.right;
+          }
         }
-        const first = constant(expression.left);
-        if (first === undefined || expression.op !== 'add') return null;
-        const base = offset(expression.right, depth + 1);
-        return base === null ? null : base + first;
+        if (!next || next.type.kind !== 'integer' || next.type.bits < width) return undefined;
+        leaf = next;
+      }
+      if (this.inline.has(leaf.id) || leaf.type.kind !== 'integer') return undefined;
+      const full = leaf.type.bits,
+        copy = copies.find((item) => key(item.destination) === key(leaf));
+      if (!copy || copy.destination.type.kind !== 'integer' || copy.destination.type.bits !== full)
+        return undefined;
+      const shift = offset(copy.source, leaf);
+      if (shift === null) return undefined;
+      const delta = BigInt.asUintN(width, shift - step),
+        x = width === full ? 'x' : `(x mod 2^${width})`,
+        tested = `${x}${step === 0n ? '' : ` + ${BigInt.asUintN(width, step)}`}`,
+        copied = `x <- x ${shift < 0n ? '-' : '+'} ${shift < 0n ? -shift : shift} (mod 2^${full})`;
+      let bound: Value, scope: string;
+      if (fixed !== undefined) {
+        const bits = BigInt.asUintN(width, fixed + delta);
+        bound = make('restated_bound', type, { kind: 'constant', bits });
+        scope = `test of ${tested} ==/!= ${fixed} restated after the repeat copy ${copied} as ${x} ==/!= ${bits}`;
+      } else {
+        // B prints the same after the repeat copies: they write none of its variables.
+        const written = new Set(copies.map((item) => key(item.destination)));
+        if (
+          other.type.kind !== 'integer' ||
+          other.type.bits !== width ||
+          this.leafIds(other).some(
+            (id) => this.inlined.get(id)?.node.kind === 'load' || this.inlinedCalls.has(id),
+          ) ||
+          liveness.leaves(other).some((index) => written.has(key(liveness.values[index]!)))
+        )
+          return undefined;
+        let base = other,
+          total = delta;
+        const folded = this.inline.has(other.id) ? program.expressions.get(other.id) : undefined;
+        if (folded?.kind === 'integer' && (folded.op === 'add' || folded.op === 'sub')) {
+          const right = constant(folded.right),
+            left = folded.op === 'add' ? constant(folded.left) : undefined;
+          if (right !== undefined) {
+            base = folded.left;
+            total += folded.op === 'add' ? right : -right;
+          } else if (left !== undefined) {
+            base = folded.right;
+            total += left;
+          }
+        }
+        total = BigInt.asUintN(width, total);
+        const negative = total >= 1n << BigInt(width - 1),
+          magnitude = negative ? (1n << BigInt(width)) - total : total;
+        bound =
+          total === 0n
+            ? base
+            : make('restated_bound', type, {
+                kind: 'integer',
+                op: negative ? 'sub' : 'add',
+                left: base,
+                right: make('restated_step', type, { kind: 'constant', bits: magnitude }),
+              });
+        scope = `test of ${tested} ==/!= B, an expression without inline loads or calls over variables the repeat copies do not write, restated after the repeat copy ${copied} as ${x} ==/!= B + ${delta} (mod 2^${width})${base === other ? '' : ', folded into B = y ± m'}`;
+      }
+      const narrow = (value: Value, suffix: string): Value =>
+        width === full ? value : make(suffix, type, { kind: 'cast', op: 'truncate', value });
+      return {
+        copy,
+        op,
+        subject: narrow(copy.destination, 'restated_subject'),
+        source: narrow(copy.source, 'restated_source'),
+        bound,
+        scope,
       };
-      const shift = offset(copy.source, 0);
-      if (shift === null) return false;
-      restatedOp = op;
-      bits = BigInt.asUintN(width, bound + shift);
-      scope = `test of x ==/!= ${bound} restated after the repeat copy x <- x ${shift < 0n ? '-' : '+'} ${shift < 0n ? -shift : shift} (mod 2^${width}) as x ==/!= ${bits}`;
-    } else {
+    };
+    const range = (): Restated | undefined => {
+      const right = constant(original.right),
+        fixed = right ?? constant(original.left);
+      if (fixed === undefined) return undefined;
+      // The predicate with the variable on its left.
+      const op =
+        right !== undefined
+          ? original.op
+          : original.op === 'ult'
+            ? 'ugt'
+            : original.op === 'ule'
+              ? 'uge'
+              : original.op === 'ugt'
+                ? 'ult'
+                : original.op === 'uge'
+                  ? 'ule'
+                  : original.op;
+      if (op !== 'ult' && op !== 'ule' && op !== 'ugt' && op !== 'uge') return undefined;
+      let leaf = right === undefined ? original.right : original.left;
+      for (let i = 0; i < 16 && this.inline.has(leaf.id); i++) {
+        const cast = program.expressions.get(leaf.id);
+        if (cast?.kind !== 'cast' || (cast.op !== 'zero_extend' && cast.op !== 'bitcast'))
+          return undefined;
+        leaf = cast.value;
+      }
+      if (this.inline.has(leaf.id) || leaf.type.kind !== 'integer') return undefined;
+      const width = leaf.type.bits;
+      if (fixed >= 1n << BigInt(width)) return undefined;
+      const copy = copies.find((item) => key(item.destination) === key(leaf));
+      if (!copy || copy.destination.type.kind !== 'integer' || copy.destination.type.bits !== width)
+        return undefined;
       const uncast = (value: Value): Value => {
         for (let i = 0; i < 16; i++) {
           const cast = program.expressions.get(value.id);
@@ -8728,49 +8994,59 @@ export class Renderer {
         count <= 0n ||
         count >= BigInt(width)
       )
-        return false;
+        return undefined;
       // x >> c == 0 iff x <u 2^c (an arithmetic shift too: 2^c <= 2^(width-1)).
       const limit = 1n << count,
         below = op === 'ult' || op === 'ule';
-      if (bound !== (op === 'ult' || op === 'uge' ? limit : limit - 1n)) return false;
-      restatedOp = below ? 'eq' : 'ne';
-      bits = 0n;
-      scope = `unsigned test x ${below ? '<' : '>='} 2^${count} restated after the repeat copy x <- x >> ${count} (${shifted.op}, width ${width}) as x ${below ? '==' : '!='} 0`;
-    }
-    const restated: Value = { id: `${control.id}#restated_bound`, type: copy.destination.type };
-    const original = compare,
-      subject = tested;
+      if (fixed !== (op === 'ult' || op === 'uge' ? limit : limit - 1n)) return undefined;
+      synthetic.clear();
+      return {
+        copy,
+        op: below ? 'eq' : 'ne',
+        subject: copy.destination,
+        source: copy.source,
+        bound: make('restated_bound', copy.destination.type, { kind: 'constant', bits: 0n }),
+        scope: `unsigned test x ${below ? '<' : '>='} 2^${count} restated after the repeat copy x <- x >> ${count} (${shifted.op}, width ${width}) as x ${below ? '==' : '!='} 0`,
+      };
+    };
+    const op = original.op;
+    const restated =
+      op === 'eq' || op === 'ne'
+        ? (equality(original.left, original.right, op) ??
+          equality(original.right, original.left, op))
+        : range();
+    if (!restated) return false;
     const expressions = new Map(program.expressions);
-    expressions.set(restated.id, { kind: 'constant', bits });
+    for (const [id, expression] of synthetic) expressions.set(id, expression);
     const record = this.localValidation.allowance.exhausted
       ? undefined
       : this.localValidation.check(
           'bitvector',
-          subject.id,
+          tested.id,
           'do-while test restated over its repeat copy result; not whole-function equivalence',
           () =>
             validateBitvectorCandidate(
-              subject,
+              tested,
               original,
-              { kind: 'compare', op: restatedOp, left: copy.source, right: restated },
+              { kind: 'compare', op: restated.op, left: restated.source, right: restated.bound },
               expressions,
               this.localValidation.allowance,
             ),
         );
     if (
       record?.status === 'rejected' ||
-      !this.localValidation.presentation('loop_test_restatement', control.id, scope, [
+      !this.localValidation.presentation('loop_test_restatement', control.id, restated.scope, [
         tested.id,
-        copy.destination.id,
+        restated.copy.destination.id,
       ])
     )
       return false;
-    this.synthetic.set(restated.id, { kind: 'constant', bits });
+    for (const [id, expression] of synthetic) this.synthetic.set(id, expression);
     this.rebased.set(control.id, {
       kind: 'compare',
-      op: restatedOp,
-      left: copy.destination,
-      right: restated,
+      op: restated.op,
+      left: restated.subject,
+      right: restated.bound,
     });
     return true;
   }
@@ -9398,28 +9674,37 @@ export class Renderer {
         }
       }
     };
-    // Source view: the FP-environment assumption trails the signature, naming
-    // its requirement by an unambiguous ID prefix.
-    const ids = (this.program.source?.requirements ?? []).map((requirement) => requirement.id);
-    const reference = (id: string): string => {
-      for (let length = 'requirement_'.length + 12; length < id.length; length += 4) {
-        const prefix = id.slice(0, length);
-        if (ids.every((other) => other === id || !other.startsWith(prefix))) return `${prefix}…`;
-      }
-      return id;
-    };
-    const note =
+    // Source view: the FP-environment assumption is a language premise (C11
+    // 7.6.1p2: code compiled with FENV_ACCESS off, the default, runs under the
+    // default modes), recorded instead of printed. The checked view prints it.
+    const environmentOmitted =
       this.sourceView &&
       environment.length > 0 &&
       this.localValidation.presentation(
         'requirement_note',
         this.input.function.id,
-        'the FP-environment assumption is a trailing signature comment naming each requirement by an unambiguous ID prefix; full ID, explanation and sites remain in requirements metadata',
+        'the FP-environment assumption prints no comment: emitted source without #pragma STDC FENV_ACCESS ON presumes nearest-even rounding and masked FP traps (C11 7.6.1p2), recorded as the fp_default_environment ABI requirement; full ID, explanation and sites remain in requirements metadata',
         environment.map((requirement) => requirement.id),
-      )
-        ? `assumes nearest-even rounding and masked FP traps (${environment.map((requirement) => reference(requirement.id)).join(', ')})`
-        : undefined;
-    if (!note)
+      );
+    // The premise is function-wide; its provenance is the FP-environment site
+    // the fp_environment requirement already lists whose origin cites the
+    // fewest instructions (the first on ties). The function origin would
+    // repeat every instruction of the function, and a larger site every
+    // instruction it covers.
+    let premiseSite: Requirement['sites'][number] | undefined;
+    if (environmentOmitted) {
+      let fewest = Infinity;
+      for (const requirement of environment)
+        for (const site of requirement.sites) {
+          this.context.checkpoint(1);
+          const origin = this.origins.get(site.subject_ids[0]!);
+          if (origin && origin.provenance.instruction_ids.length < fewest) {
+            fewest = origin.provenance.instruction_ids.length;
+            premiseSite = site;
+          }
+        }
+    }
+    if (!environmentOmitted)
       for (const requirement of environment) {
         this.context.checkpoint(1);
         const start = w.offset;
@@ -9635,15 +9920,6 @@ export class Renderer {
     if (methodName && method?.kind === 'class' && this.language === 'python-like')
       w.line(0, '@classmethod');
     this.headerStart = w.offset;
-    let noteSpan: { start: number; end: number } | undefined;
-    const closing = (text: string): void => {
-      if (!note) return w.line(0, text);
-      const separator = this.language === 'c-like' ? ' ' : '  ',
-        comment = this.language === 'c-like' ? `/* ${note} */` : `# ${note}`,
-        start = w.offset + text.length + separator.length;
-      w.line(0, `${text}${separator}${comment}`);
-      noteSpan = { start, end: start + comment.length };
-    };
     // Source view: a callee-side variadic interface ends its formals with `...`.
     const ellipsis = this.sourceView && this.program.source?.variadic !== undefined;
     if (this.program.source && parameters.length <= 4) {
@@ -9652,7 +9928,8 @@ export class Renderer {
       );
       const prefix =
         this.language === 'c-like' ? `${returnShown} ${headerName}(` : `def ${headerName}(`;
-      closing(
+      w.line(
+        0,
         `${prefix}${this.writer.join(ellipsis ? [...declarations, '...'] : declarations)}${this.language === 'c-like' ? ') {' : `) -> ${returnShown}:`}`,
       );
       let offset = this.headerStart + prefix.length;
@@ -9694,9 +9971,10 @@ export class Renderer {
         this.inferenceSites.set(parameter.value.id, { start, end: w.offset });
       }
       if (ellipsis) w.line(1, '...');
-      closing(this.language === 'c-like' ? ') {' : `) -> ${returnShown}:`);
+      w.line(0, this.language === 'c-like' ? ') {' : `) -> ${returnShown}:`);
     } else
-      closing(
+      w.line(
+        0,
         this.language === 'c-like'
           ? `${returnShown} ${headerName}() {`
           : `def ${headerName}() -> ${returnShown}:`,
@@ -9709,8 +9987,9 @@ export class Renderer {
       proof ? [...proof.ids] : [],
       proof ? [proof.evidence] : [],
     );
-    if (noteSpan)
-      for (const requirement of environment) mapSites(requirement, noteSpan.start, noteSpan.end);
+    if (environmentOmitted)
+      for (const requirement of environment)
+        mapSites(requirement, this.headerStart, this.headerEnd);
     const formals = new Set(parameters.map((parameter) => parameter.value.id));
     const stack = this.program.source?.stack;
     if (stack?.kind === 'private') {
@@ -10034,18 +10313,46 @@ export class Renderer {
       );
     } else {
       try {
-        requirements = sourceRequirementProofs(
-          this.program,
-          w.mappings,
-          { ids: w.ids.items, ranges: w.ranges.items },
-          this.context,
-          abiConformanceRequirements(
-            this.input.function.id,
-            this.localValidation.abiConformance,
-            (id) => this.origins.get(id),
+        const publish = (): readonly Requirement[] =>
+          sourceRequirementProofs(
+            this.program,
+            w.mappings,
+            { ids: w.ids.items, ranges: w.ranges.items },
             this.context,
-          ),
-        ).map((record) =>
+            abiConformanceRequirements(
+              this.input.function.id,
+              this.localValidation.abiConformance,
+              (id) => this.origins.get(id),
+              this.context,
+            ),
+          );
+        const premise = (record: Requirement): boolean =>
+          record.kind === 'abi_conformance' &&
+          record.sites.some((site) => site.state_epoch === 'fp_default_environment');
+        const explanation =
+          'Floating-point operations assume the default environment, nearest-even rounding with FP traps masked, as C11 7.6.1p2 presumes for code compiled with FENV_ACCESS off.';
+        if (environmentOmitted)
+          this.localValidation.requireAbi(
+            'fp_default_environment',
+            [premiseSite?.subject_ids[0] ?? this.input.function.id],
+            explanation,
+          );
+        let proofs = publish();
+        // A premise site that prints nowhere publishes nothing: anchor the
+        // premise at the function, which the signature always maps.
+        if (
+          environmentOmitted &&
+          proofs.some((record) => record.kind === 'fp_environment') &&
+          !proofs.some(premise)
+        ) {
+          this.localValidation.requireAbi(
+            'fp_default_environment',
+            [this.input.function.id],
+            explanation,
+          );
+          proofs = publish();
+        }
+        requirements = proofs.map((record) =>
           w.requirement(
             this.fpPresentation.guards.size && record.kind === 'fp_environment'
               ? { ...record, explanation: SOURCE_FP_ENVIRONMENT }

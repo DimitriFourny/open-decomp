@@ -175,7 +175,10 @@ test(
     const [, otherName, highName] = conflict;
     assert.notEqual(otherName, highName);
     assert.doesNotMatch(wide, new RegExp(`\\b${highName}\\b`));
-    assert.doesNotMatch(high, new RegExp(`\\b${otherName}\\b`));
+    // A lone +4 read is a record field, not an array element; the partial-record
+    // note may name the conflicting view, but no declaration or use does.
+    assert.match(high, /->field_0x4\b/, high);
+    assert.doesNotMatch(high.replace(/\/\*.*?\*\//g, ''), new RegExp(`\\b${otherName}\\b`));
 
     // One member read as integer bits by one callee and as a double by another
     // (both reached from one object): one merged type whose +16 holds an

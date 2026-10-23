@@ -55,7 +55,12 @@ import {
 import { withMetadataOmissions } from '../../project/cache/limits.js';
 import { loadFunctionGraph, loadFunctionIndex, loadFunctionScope } from '../queries/scope.js';
 import { MAX_FRAME_BYTES } from '../../workers/protocol.js';
-import { callDeclarations, nativeCallIndex, resolveCalls } from './calls.js';
+import {
+  applyEnvironmentWriters,
+  callDeclarations,
+  nativeCallIndex,
+  resolveCalls,
+} from './calls.js';
 import { boundedEvidence, semanticCatalog } from './catalog.js';
 import { pipelineComponents, pipelineVersions } from './versions.js';
 import { boundIR, requirePass } from './passes.js';
@@ -154,8 +159,18 @@ export async function executeDecompilation(
           evidence_ids: [],
         });
       context.progress('lift', 1, 7);
+      const { functions, references } = loadFunctionIndex(scope, args.revision, image);
       const lifted = components.lifter.lift(graph, components.abi, context);
-      let requiredNodes = boundIR(lifted.ir, context);
+      // Environment-writer calls clobber the FP control state before SSA cells exist.
+      const liftedIR = applyEnvironmentWriters(
+        lifted.ir,
+        image,
+        functions,
+        references,
+        components.abi,
+        context,
+      );
+      let requiredNodes = boundIR(liftedIR, context);
       const observable_register_masks = abiObservableRegisterMasks(components.abi, context);
       const passOptions = {
         max_work: context.budget.work,
@@ -165,7 +180,7 @@ export async function executeDecompilation(
         checkpoint: (work: number) => context.checkpoint(work),
       };
       context.progress('ssa', 2, 7);
-      const constructed = constructSSA(lifted.ir, passOptions);
+      const constructed = constructSSA(liftedIR, passOptions);
       requirePass(constructed.state, constructed.diagnostics, context);
       if (constructed.value.form !== 'ssa')
         throw new OperationError({
@@ -185,7 +200,6 @@ export async function executeDecompilation(
         { image, abi: components.abi, revision: args.revision },
         fullContext,
       );
-      const { functions, references } = loadFunctionIndex(scope, args.revision, image);
       const calls = resolveCalls(
         ir,
         image,
