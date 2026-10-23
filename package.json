@@ -20,13 +20,13 @@
     "mcp",
     "llm"
   ],
-  "homepage": "https://github.com/DimitriFourny/open_decomp#readme",
+  "homepage": "https://github.com/DimitriFourny/open-decomp#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/DimitriFourny/open_decomp.git"
+    "url": "git+https://github.com/DimitriFourny/open-decomp.git"
   },
   "bugs": {
-    "url": "https://github.com/DimitriFourny/open_decomp/issues"
+    "url": "https://github.com/DimitriFourny/open-decomp/issues"
   },
   "engines": {
     "node": ">=24.0.0"
