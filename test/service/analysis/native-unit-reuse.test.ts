@@ -78,8 +78,12 @@ function loadOnce(
   fn: FunctionRecord,
   allowance: number,
   cached: boolean,
+  signal?: AbortSignal,
 ) {
-  const root = createOperationContext({ budget: { work: 100_000_000 } });
+  const root = createOperationContext({
+    budget: { work: 100_000_000 },
+    ...(signal === undefined ? {} : { signal }),
+  });
   const contracts = nativeLibraryContracts(base);
   prepareNativeUnit(
     { ...base, scope: { store, context: root, job_id: 'native-unit-history' } },
@@ -306,4 +310,28 @@ test('a memoized preparation prefix leaves exactly what a cold preparation would
   const complete = load(allowances.complete, 'complete from the prefix');
   assert.equal(complete.ir, full.ssa.value.ir);
   load(allowances.complete, 'complete unit reused');
+});
+
+// The process tier, with its persisted tier, is created by the first request that loads a
+// unit at this identity. A later request that reads a persisted row checks it under its own
+// cancellation and deadline, not those of the creating request, which may be cancelled
+// (or past its deadline) by then.
+test('a persisted row is checked under the loading request, not the request that created the tier', async (t) => {
+  const { store, base, fn } = await nativeBase(t, '_fixture_check');
+  const other = base.functions.find((item) => item.original_name === '_fixture_loop');
+  assert.ok(other);
+  const allowance = 1_000_000;
+  const cold = loadOnce(base, store, other, allowance, false);
+  // An earlier process tier persists `other`.
+  loadOnce({ ...base, functions: [...base.functions] }, store, other, allowance, true);
+  // A new tier is created by a request that is then cancelled; `other` is then loaded from
+  // the row by a live request.
+  const tier = { ...base, functions: [...base.functions] };
+  const ended = new AbortController();
+  loadOnce(tier, store, fn, allowance, true, ended.signal);
+  ended.abort();
+  const served = loadOnce(tier, store, other, allowance, true);
+  assert.equal(served.work, cold.work);
+  assert.deepEqual(served.reads, cold.reads);
+  assert.deepEqual(observable(served.unit), observable(cold.unit));
 });
