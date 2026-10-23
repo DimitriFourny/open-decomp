@@ -55,7 +55,13 @@ These encodings expose some operands as opaque display text in the pinned decode
 - `CMEQ` register (`CMEQ_asimdsame_only`): per-lane all-ones/zero equality mask for 8/16/32/64-bit lanes (`Q=0` with 64-bit lanes is reserved).
 - `AND` register (`AND_asimdsame_only`) joins `ORR_asimdsame_only` in the canonical-field logical handler (64-bit forms clear the high half).
 
+- `INS` (general register, `INS_asimdins_IR_r`): inserts the low 8/16/32/64 bits of Wn/Xn into the lane of Vd that `imm5` selects (element size from its lowest set bit, index from the bits above) and keeps every other bit of the 128-bit root; `imm5` without a set bit in 0..3 is reserved and stays an unknown effect.
+
 Other encodings of the same mnemonic families (e.g. `FCVTZS` fixed-point, `FCVT{N,M,P,A}*`, FP16, lane-indexed `DUP`) remain unknown effects.
+
+## Bounded effects of unlifted SIMD&FP data processing
+
+An unlifted encoding normally becomes an `unknown_effect` that clobbers every modeled register, SP, FPCR and all memory. A valid instruction that falls through and whose canonical encoding has an `_`-separated class segment starting with `asimd`, `asisd`, `float` or `crypto` (but not `asisdls`, the SIMD loads and stores) gets the ISA bound instead (`boundedUnknownClobbers`): registers V0–V31, plus GP `Rd` for the to-general forms (`UMOV`/`SMOV`, and `*_float2int`/`*_float2fix` with opcode not 010, 011 or 111) when `Rd` is not 31; flags NZCV and FPSR; memory `none`; never SP, x19–x28 or FPCR. The A64 "Data Processing – Scalar Floating-Point and Advanced SIMD" and cryptographic groups access no memory, never name SP (register 31 is ZR) and read FPCR without writing it. Forms that read a general register (`INS`/`DUP` from general, `SCVTF`/`UCVTF` and `FMOV` from general) keep the unbounded effect: the IR records no dependence from an effect's inputs to its outputs, so a frame address read from Rn could not be followed. Instructions the decoder marks undefined (e.g. `AESE` without FEAT_AES) also keep it. The diagnostic and coverage reason are unchanged. Because FPCR is not an output, FP-guard presentation survives these effects, and a memory-free effect is no frame escape (only a frame address in one of its vector inputs is exposed), so frame saves are elided across it. Measured on SQLite (A1): `isDate` (`FMADD_D_floatdp3`, `FCVTZS_asisdmisc_R`, `FCCMP_D_floatccmp`) and `sqlite3VdbeDisplayComment` (`INS_asimdins_IV_v`) print no save lines; `unicodeNext` keeps its exposed frame because of its `ST1_asisdlsop_S1_i1s` store.
 
 ## Conformance evidence and integration commands
 
