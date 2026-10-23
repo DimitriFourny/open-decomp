@@ -947,6 +947,7 @@ Files that several items touch:
   - **Tests:** `source-control.test.ts`: an `-O0`-style IR executed for n = 0, 1, 3; negative: a second store in the loop.
   - **Acceptance:** those 8 texts print `for (index = 0; index < argN; index = index + 1)`. Nothing else changes.
   - **Depends on:** L1 (`acceptStatementFor`).
+  - **Done:** `od-rm4-l3` vs `od-main-07f4b12`: exactly the 8 acceptance texts change (`for (index = 0; index < argN; index = index + 1)`), nothing else; work deterministic, checked view byte-identical; `test/emitters/c/source-control.test.ts` executes the `-O0` slot loop for n = 0, 1, 3 in both dialects plus a second-store negative.
 
 ### L4: Rotate loop-carried copies so bottom tests become do-while
 
