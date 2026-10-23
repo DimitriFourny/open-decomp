@@ -14,7 +14,7 @@ import type { NativePreparationInput, PreparedNativeUnit } from './native-prepar
 import type { NativeDependency } from './native-worklist.js';
 
 /** Bump when the stored shape of a prepared unit changes. */
-const NATIVE_SUMMARY_FORMAT = 6;
+const NATIVE_SUMMARY_FORMAT = 7;
 
 /** A prepared callee body kept for reuse, with exactly what reusing it must replay. */
 export interface PreparedUnitEntry {
@@ -34,12 +34,6 @@ export interface PreparedUnitEntry {
 /** Retained prepared size (instructions + IR nodes + evidence + traced reads). */
 export const preparedSize = (unit: PreparedNativeUnit, trace?: readonly TracedRead[]): number =>
   unit.instructions + unit.nodes + unit.evidence.length + (trace?.length ?? 0);
-
-/** Larger prepared units (instructions + IR nodes + evidence + traced reads) are not persisted:
- * encoding one costs more than the cold request can recover, and loading one approaches the cost
- * of preparing it. Measured: a 32k-size unit is ~30 MB of JSON, ~330 ms to write and ~260 ms to
- * load against ~450 ms to prepare, while units below this bound write and load in a few ms. */
-const MAX_PERSISTED_UNIT_SIZE = 8192;
 
 /** The second tier of the prepared-unit cache: the project's persisted summaries. */
 export interface NativeUnitPersistence {
@@ -188,7 +182,7 @@ export function createNativeUnitPersistence(
   };
 
   const save = (fn: FunctionRecord, entry: PreparedUnitEntry): void => {
-    if (!entry.trace || entry.size > MAX_PERSISTED_UNIT_SIZE) return;
+    if (!entry.trace) return;
     const {
       function: _function,
       dependencies,

@@ -1,3 +1,4 @@
+import { serialize } from 'node:v8';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -12,7 +13,7 @@ import {
   newIdentity,
   type CacheIdentity,
 } from '../../../src/core/index.js';
-import { decodeStoredGraph, encodeStoredGraph } from '../../../src/project/store/encoding.js';
+import { decodeStoredClone, encodeStoredClone } from '../../../src/project/store/encoding.js';
 import { SqliteProjectStore } from '../../../src/project/store/index.js';
 
 function open(t: TestContext, options: { native_summary_bytes?: number } = {}) {
@@ -56,8 +57,8 @@ const query = (path: string, sql: string) => {
   }
 };
 
-test('graph encoding keeps Maps, bigints, shared substructure and drops nothing else', () => {
-  const shared = { register: 'arm64:x0', width: 64 };
+test('clone encoding keeps Maps, bigints, shared substructure, undefined fields and frozenness', () => {
+  const shared = Object.freeze({ register: 'arm64:x0', width: 64 });
   const identifier = `evidence_${'a'.repeat(64)}`;
   const value: {
     memory: Map<bigint, { byte: number }>;
@@ -66,6 +67,7 @@ test('graph encoding keeps Maps, bigints, shared substructure and drops nothing 
     list: unknown[];
     gone: undefined;
     nested: { memory: Map<string, unknown[]> };
+    open: { width: number };
   } = {
     memory: new Map<bigint, { byte: number }>([
       [0n, { byte: 1 }],
@@ -73,37 +75,43 @@ test('graph encoding keeps Maps, bigints, shared substructure and drops nothing 
     ]),
     first: shared,
     second: shared,
-    list: [shared, identifier, identifier, 18446744073709551615n, null, true, 0.5],
+    list: Object.freeze([shared, identifier, 18446744073709551615n, null, true, 0.5, -0, NaN]),
     gone: undefined,
     nested: { memory: new Map<string, unknown[]>([['k', [shared]]]) },
-  };
-  const decoded = decodeStoredGraph<typeof value>(encodeStoredGraph(value));
+    open: { width: 8 },
+  } as never;
+  const decoded = decodeStoredClone<typeof value>(encodeStoredClone(value));
   assert.deepEqual(decoded.memory, value.memory);
   assert.ok(decoded.first === decoded.second, 'shared object stays shared');
   assert.ok(
     decoded.list[0] === decoded.first && decoded.nested.memory.get('k')![0] === decoded.first,
   );
   assert.deepEqual(decoded.list.slice(1), value.list.slice(1));
-  assert.ok(!Object.hasOwn(decoded, 'gone'));
+  assert.ok(Object.is(decoded.list[6], -0));
+  assert.ok(Object.hasOwn(decoded, 'gone') && decoded.gone === undefined);
   assert.deepEqual({ ...decoded.first }, shared);
-  // The identifier is stored once.
-  const text = Buffer.from(encodeStoredGraph(value)).toString('utf8');
-  assert.equal(text.split(identifier).length - 1, 1);
+  // Exactly the containers that were frozen are frozen again.
+  assert.ok(Object.isFrozen(decoded.first) && Object.isFrozen(decoded.list));
+  assert.ok(!Object.isFrozen(decoded) && !Object.isFrozen(decoded.open));
+  assert.ok(!Object.isFrozen(decoded.nested.memory.get('k')));
 });
 
-test('graph encoding rejects what it cannot reproduce exactly and malformed input', () => {
-  for (const bad of [new Date(), new Set([1]), Number.NaN, -0, [undefined], new Uint8Array(1)])
-    assert.throws(() => encodeStoredGraph({ bad }), TypeError, String(bad));
+test('clone encoding rejects what it cannot reproduce exactly and malformed input', () => {
+  class Box {
+    value = 1;
+  }
+  for (const bad of [new Date(), new Set([1]), new Uint8Array(1), new Box(), () => 1])
+    assert.throws(() => encodeStoredClone({ bad }), TypeError, String(bad));
+  assert.throws(() => decodeStoredClone(Buffer.from('{"version":3}')), Error);
   assert.throws(
-    () =>
-      decodeStoredGraph(Buffer.from('{"version":2,"strings":[],"shared":[],"value":["ref",0]}')),
+    () => decodeStoredClone(serialize({ version: 2, frozen: [], value: {} })),
     TypeError,
   );
+  // A frozen index the value does not have.
   assert.throws(
-    () => decodeStoredGraph(Buffer.from('{"version":2,"strings":[],"shared":[],"value":["s",3]}')),
+    () => decodeStoredClone(serialize({ version: 3, frozen: [5], value: {} })),
     TypeError,
   );
-  assert.throws(() => decodeStoredGraph(Buffer.from('{"version":1,"value":null}')), TypeError);
 });
 
 test('queued summaries are written in one batch and read back with their numbers', (t) => {
@@ -252,7 +260,7 @@ test('queueing rejects invalid weights and never encodes the value', (t) => {
   assert.equal(state.store.queueNativeSummary({ ...row(0, 'w'), weight: -1 }), false);
   assert.equal(state.store.queueNativeSummary({ ...row(0, 'w'), weight: 1.5 }), false);
   // An unencodable value is accepted (it is only looked at by the write) and then dropped.
-  const bad = { ...row(0, 'bad'), value: { bad: Number.NaN } };
+  const bad = { ...row(0, 'bad'), value: { bad: new Set([1]) } };
   assert.equal(state.store.queueNativeSummary(bad), true);
   state.store.releaseNativeSummaries();
   assert.equal(state.store.readNativeSummary(bad.scope, bad.function_id), null);

@@ -1,6 +1,6 @@
 import { DatabaseSync, type SQLInputValue, type StatementSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
-import { brotliCompressSync, brotliDecompressSync, constants as zlib } from 'node:zlib';
+import { constants as zlib, zstdCompressSync, zstdDecompressSync } from 'node:zlib';
 import {
   closeSync,
   constants,
@@ -94,9 +94,9 @@ import {
   MAX_GRAPH_BYTES,
   MAX_RECORD_BYTES,
   decodeStored,
-  decodeStoredGraph,
+  decodeStoredClone,
   encodeStored,
-  encodeStoredGraph,
+  encodeStoredClone,
   wireValue,
 } from './encoding.js';
 import {
@@ -1503,12 +1503,9 @@ export class SqliteProjectStore implements ProjectStore {
   #encodeSummary(row: PendingSummary): { digest: string; payload: Uint8Array } | null {
     if (row.encoded !== undefined) return row.encoded;
     try {
-      const encoded = encodeStoredGraph(row.value);
-      const payload = brotliCompressSync(encoded, {
-        params: {
-          [zlib.BROTLI_PARAM_QUALITY]: 4,
-          [zlib.BROTLI_PARAM_SIZE_HINT]: encoded.length,
-        },
+      const encoded = encodeStoredClone(row.value);
+      const payload = zstdCompressSync(encoded, {
+        params: { [zlib.ZSTD_c_compressionLevel]: 1, [zlib.ZSTD_c_contentSizeFlag]: 1 },
       });
       row.encoded =
         payload.length > Math.min(this.#summaryCap, MAX_NATIVE_SUMMARY_ROW_BYTES)
@@ -1656,9 +1653,7 @@ export class SqliteProjectStore implements ProjectStore {
         revision,
         allowance: stored.allowance,
         work: stored.work,
-        value: decodeStoredGraph(
-          brotliDecompressSync(payload, { maxOutputLength: MAX_GRAPH_BYTES }),
-        ),
+        value: decodeStoredClone(zstdDecompressSync(payload, { maxOutputLength: MAX_GRAPH_BYTES })),
       };
     } catch {
       // Undecodable content is a miss, never a served summary; the next preparation replaces it.
