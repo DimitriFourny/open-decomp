@@ -183,7 +183,7 @@ type Nest =
     }
   | { readonly kind: 'switch'; readonly id: string; readonly follow: string | null };
 /** A statement a `for` header prints as its init or step. */
-type HeaderStatement = Extract<Instruction, { kind: 'assign' | 'load' }>;
+type HeaderStatement = Extract<Instruction, { kind: 'assign' | 'load' | 'store' }>;
 /** Source view: one stack object kept as memory (the frame object, or the
  * incoming object of S4) in entry-SP coordinates, with its member naming. */
 interface StackObjectView {
@@ -5063,6 +5063,37 @@ export class Renderer {
     return `((${signature})${enclosed || /^[A-Za-z_]\w*$/.test(target) ? target : `(${target})`})`;
   }
 
+  /** Source view: `storage = value` for a store (promoted local, frame member
+   * or dereference), converting to the lvalue's own type. */
+  private storeText(node: Extract<Instruction, { kind: 'store' }>, storage: string): string {
+    const punned = this.punnedLocal(node);
+    if (punned)
+      return `${storage} = ${this.reinterpret(this.value(node.value), node.value.type, punned.type, node.id, true)!.text}`;
+    if (this.vaPointerStores.has(node.id))
+      return `${storage} = ${this.pointerValue(this.printed(node.value), 'void *')}`;
+    // Storing converts to the lvalue's own width (a local is declared
+    // unsigned; a dereference has exactly the stored width).
+    const typed = this.language === 'c-like' ? this.slotType(node.id) : undefined;
+    const floating = this.floatSlot(node.id);
+    const pointer = typed && this.pointerText(node.value, typed);
+    const member = this.memberPointers.get(node.id);
+    const literal =
+      !floating && !pointer && !member
+        ? this.valueLiteral(node.value, typed ? this.formalSpelling(typed) : undefined)
+        : undefined;
+    return `${storage} = ${
+      pointer ??
+      (member && this.memberPointerValue(node.value, member)) ??
+      (floating
+        ? this.floatingValue(node.value, floating).text
+        : literal
+          ? literal.text
+          : typed
+            ? this.pointerValue(this.printed(node.value), this.formalSpelling(typed))
+            : this.converted(this.printed(node.value), bitWidth(node.value.type)))
+    }`;
+  }
+
   /** Shared assignment spelling for retained pure definitions and source loads.
    * Source view: the target is always a declared variable; a pure definition
    * of any other value prints nothing, and a load of one prints as a bare
@@ -5216,38 +5247,10 @@ export class Renderer {
         }
         if (this.program.source) {
           const storage = this.storage(node);
-          const punned = this.punnedLocal(node);
-          if (node.kind === 'store' && punned) {
-            text = `${storage} = ${this.reinterpret(this.value(node.value), node.value.type, punned.type, node.id, true)!.text}`;
-            break;
-          }
-          if (node.kind === 'store' && this.vaPointerStores.has(node.id)) {
-            text = `${storage} = ${this.pointerValue(this.printed(node.value), 'void *')}`;
-            break;
-          }
-          if (node.kind === 'store') {
-            // Storing converts to the lvalue's own width (a local is declared
-            // unsigned; a dereference has exactly the stored width).
-            const typed = this.language === 'c-like' ? this.slotType(node.id) : undefined;
-            const floating = this.floatSlot(node.id);
-            const pointer = typed && this.pointerText(node.value, typed);
-            const member = this.memberPointers.get(node.id);
-            const literal =
-              !floating && !pointer && !member
-                ? this.valueLiteral(node.value, typed ? this.formalSpelling(typed) : undefined)
-                : undefined;
-            text = `${storage} = ${
-              pointer ??
-              (member && this.memberPointerValue(node.value, member)) ??
-              (floating
-                ? this.floatingValue(node.value, floating).text
-                : literal
-                  ? literal.text
-                  : typed
-                    ? this.pointerValue(this.printed(node.value), this.formalSpelling(typed))
-                    : this.converted(this.printed(node.value), bitWidth(node.value.type)))
-            }`;
-          } else text = this.assignmentText(node, storage);
+          text =
+            node.kind === 'store'
+              ? this.storeText(node, storage)
+              : this.assignmentText(node, storage);
           break;
         }
         let address = this.value(node.address);
@@ -5934,6 +5937,7 @@ export class Renderer {
     if (!liveness || loop.bottom) return false;
     const step = this.trailingStatement(loop.step);
     if (!step) return false;
+    if (step.kind === 'store') return this.acceptSlotFor(loop, step, held);
     const variable = this.variableKey(step.result);
     const writes = (ids: readonly number[]): boolean =>
       ids.some((index) => this.variableKey(liveness.values[index]!) === variable);
@@ -5956,7 +5960,10 @@ export class Renderer {
     }
     if (definitions !== 1) return false;
     const entry = this.trailingStatement(loop.init);
-    const init = entry && this.variableKey(entry.result) === variable ? entry : undefined;
+    const init =
+      entry && entry.kind !== 'store' && this.variableKey(entry.result) === variable
+        ? entry
+        : undefined;
     // Otherwise the entry edge's copy into the variable, when it reads no other
     // destination of that edge (it then runs after them, in the header).
     const copies = this.printedCopies(loop.init);
@@ -5982,6 +5989,64 @@ export class Renderer {
     return true;
   }
 
+  /** `acceptStatementFor` for a store step into a promoted private stack slot
+   * (an `-O0` induction variable kept in memory): the slot is the variable. It
+   * qualifies when the test reads it, no other store to it exists in the loop
+   * (private slots are written only by their own stores: no frame address
+   * reaches them), and the entry block's last statement is its init store. */
+  private acceptSlotFor(
+    loop: Parameters<LoopFacts['induction']>[0],
+    step: Extract<HeaderStatement, { kind: 'store' }>,
+    held?: Instruction,
+  ): boolean {
+    const locals = this.program.source?.locals,
+      local = locals?.get(step.id);
+    if (!locals || !local) return false;
+    // The test reads the slot through a load printed inside it, or through the
+    // load its header holds.
+    const reads = [loop.test.condition, ...(held ? this.liveness!.operands(held) : [])];
+    const heldLoad = held?.kind === 'load' ? locals.get(held.id) : undefined;
+    if (heldLoad?.id !== local.id && !this.slotReads(reads).has(local.id)) return false;
+    for (const id of loop.inside) {
+      const block = this.program.blocks.get(id);
+      if (!block) return false;
+      for (const node of block.statements)
+        if (node !== step && node.kind === 'store' && locals.get(node.id)?.id === local.id)
+          return false;
+    }
+    const init = this.trailingStatement(loop.init);
+    if (init?.kind !== 'store' || locals.get(init.id)?.id !== local.id) return false;
+    this.forStatements.set(loop.test.id, { init, step });
+    this.headerStatements.add(step.id);
+    this.headerStatements.add(init.id);
+    return true;
+  }
+
+  /** The promoted slots (by local id) whose inlined loads printing `values`
+   * reads (the leaves walk of VariableLiveness, which stops at variables). */
+  private slotReads(values: readonly Value[]): Set<string> {
+    const locals = this.program.source!.locals,
+      liveness = this.liveness!,
+      found = new Set<string>(),
+      seen = new Set<string>(),
+      pending = [...values];
+    while (pending.length) {
+      const current = pending.pop()!;
+      if (seen.has(current.id)) continue;
+      seen.add(current.id);
+      const load = this.inlined.get(current.id)?.node;
+      if (load?.kind === 'load') {
+        const local = locals.get(load.id);
+        if (local) found.add(local.id);
+        continue;
+      }
+      if (liveness.index.has(current.id) && !this.program.inline.has(current.id)) continue;
+      const expression = this.program.expressions.get(current.id);
+      if (expression) pending.push(...expressionOperands(expression));
+    }
+    return found;
+  }
+
   /** The last statement of the block that ends by taking `transfer`, when that
    * edge prints nothing and the statement prints exactly one plain assignment. */
   private trailingStatement(transfer: ParallelTransfer): HeaderStatement | undefined {
@@ -5991,21 +6056,31 @@ export class Renderer {
       const node = block.statements.at(-1);
       if (
         !node ||
-        (node.kind !== 'assign' && node.kind !== 'load') ||
+        (node.kind !== 'assign' && node.kind !== 'load' && node.kind !== 'store') ||
         !this.program.retained.has(node.id) ||
-        !this.program.live.has(node.result.id) ||
-        this.inlined.has(node.result.id) ||
+        (node.kind !== 'store' &&
+          (!this.program.live.has(node.result.id) || this.inlined.has(node.result.id))) ||
         this.deferredStores.has(node.id) ||
         this.flagAccesses.has(node.id) ||
         this.deferred.get(node.id)?.length ||
         this.notes.get(node.id)?.length ||
+        // A store qualifies only into a promoted private slot printed as its
+        // own local; the other loads and stores keep their own statements.
+        (node.kind === 'store' &&
+          (!this.sourceView ||
+            !this.program.source?.locals.has(node.id) ||
+            this.punnedLocal(node) ||
+            this.vaPointerStores.has(node.id))) ||
         (node.kind === 'load' &&
           (!this.program.source ||
             this.globals.import_loads.has(node.id) ||
             this.punnedLocal(node))) ||
-        (node.kind === 'assign' ? expressionOperands(node.expression) : [node.address]).some(
-          (value) => this.inlinedCalls.has(value.id),
-        ) ||
+        (node.kind === 'assign'
+          ? expressionOperands(node.expression)
+          : node.kind === 'store'
+            ? [node.value]
+            : [node.address]
+        ).some((value) => this.inlinedCalls.has(value.id)) ||
         [node.id, block.control.id].some((anchor) =>
           (this.program.source?.definitions?.get(anchor) ?? []).some(
             (definition) => !this.inlined.has(definition.result.id),
@@ -6022,7 +6097,9 @@ export class Renderer {
   private headerStatement(node: HeaderStatement): string {
     return node.kind === 'assign'
       ? this.assignmentText(node)
-      : this.assignmentText(node, this.storage(node));
+      : node.kind === 'store'
+        ? this.storeText(node, this.storage(node))
+        : this.assignmentText(node, this.storage(node));
   }
 
   /** A bottom test also runs before the first iteration of a `for`: an
@@ -8407,7 +8484,7 @@ export class Renderer {
         this.localValidation.presentation(
           'for_loop',
           subject,
-          'a while/do-while prints as for (init; test; step) when its single entry and single repeat edges only initialize and step (x = x ± c) induction variables nothing else in the loop writes, and its test reads one; a bottom test must hold on entry; a while whose sole repeat edge prints nothing may take as step the body’s last statement assigning a variable its test reads and nothing else in the loop writes, and as init the statement assigning it that ends the entry block',
+          'a while/do-while prints as for (init; test; step) when its single entry and single repeat edges only initialize and step (x = x ± c) induction variables nothing else in the loop writes, and its test reads one; a bottom test must hold on entry; a while whose sole repeat edge prints nothing may take as step the body’s last statement assigning a variable its test reads and nothing else in the loop writes, and as init the statement assigning it that ends the entry block; the same holds for a store into a promoted private stack slot (no frame address reaches it) that the test reads through a load, when no other store to the slot exists in the loop and its init store ends the entry block',
           fors,
         )) &&
       (!exits.length ||
