@@ -9200,22 +9200,25 @@ export class Renderer {
         'the FP-environment assumption prints no comment: emitted source without #pragma STDC FENV_ACCESS ON presumes nearest-even rounding and masked FP traps (C11 7.6.1p2), recorded as the fp_default_environment ABI requirement; full ID, explanation and sites remain in requirements metadata',
         environment.map((requirement) => requirement.id),
       );
-    // The premise is function-wide; its provenance is the first FP-environment
-    // site the fp_environment requirement already lists, mapped to the
-    // signature (the function origin would repeat every instruction of the
-    // function).
-    const premiseSite = environmentOmitted
-      ? environment
-          .flatMap((requirement) => requirement.sites)
-          .find((site) => this.origins.has(site.subject_ids[0]!))
-      : undefined;
-    if (environmentOmitted)
-      this.localValidation.requireAbi(
-        'fp_default_environment',
-        [premiseSite?.subject_ids[0] ?? this.input.function.id],
-        'Floating-point operations assume the default environment, nearest-even rounding with FP traps masked, as C11 7.6.1p2 presumes for code compiled with FENV_ACCESS off.',
-      );
-    else
+    // The premise is function-wide; its provenance is the FP-environment site
+    // the fp_environment requirement already lists whose origin cites the
+    // fewest instructions (the first on ties). The function origin would
+    // repeat every instruction of the function, and a larger site every
+    // instruction it covers.
+    let premiseSite: Requirement['sites'][number] | undefined;
+    if (environmentOmitted) {
+      let fewest = Infinity;
+      for (const requirement of environment)
+        for (const site of requirement.sites) {
+          this.context.checkpoint(1);
+          const origin = this.origins.get(site.subject_ids[0]!);
+          if (origin && origin.provenance.instruction_ids.length < fewest) {
+            fewest = origin.provenance.instruction_ids.length;
+            premiseSite = site;
+          }
+        }
+    }
+    if (!environmentOmitted)
       for (const requirement of environment) {
         this.context.checkpoint(1);
         const start = w.offset;
@@ -9501,13 +9504,6 @@ export class Renderer {
     if (environmentOmitted)
       for (const requirement of environment)
         mapSites(requirement, this.headerStart, this.headerEnd);
-    if (premiseSite && !this.fpPresentation.guards.has(premiseSite.subject_ids[0]!))
-      this.map(
-        this.origins.get(premiseSite.subject_ids[0]!)!,
-        this.headerStart,
-        premiseSite.subject_ids,
-        this.headerEnd,
-      );
     const formals = new Set(parameters.map((parameter) => parameter.value.id));
     const stack = this.program.source?.stack;
     if (stack?.kind === 'private') {
@@ -9806,18 +9802,46 @@ export class Renderer {
       );
     } else {
       try {
-        requirements = sourceRequirementProofs(
-          this.program,
-          w.mappings,
-          { ids: w.ids.items, ranges: w.ranges.items },
-          this.context,
-          abiConformanceRequirements(
-            this.input.function.id,
-            this.localValidation.abiConformance,
-            (id) => this.origins.get(id),
+        const publish = (): readonly Requirement[] =>
+          sourceRequirementProofs(
+            this.program,
+            w.mappings,
+            { ids: w.ids.items, ranges: w.ranges.items },
             this.context,
-          ),
-        ).map((record) =>
+            abiConformanceRequirements(
+              this.input.function.id,
+              this.localValidation.abiConformance,
+              (id) => this.origins.get(id),
+              this.context,
+            ),
+          );
+        const premise = (record: Requirement): boolean =>
+          record.kind === 'abi_conformance' &&
+          record.sites.some((site) => site.state_epoch === 'fp_default_environment');
+        const explanation =
+          'Floating-point operations assume the default environment, nearest-even rounding with FP traps masked, as C11 7.6.1p2 presumes for code compiled with FENV_ACCESS off.';
+        if (environmentOmitted)
+          this.localValidation.requireAbi(
+            'fp_default_environment',
+            [premiseSite?.subject_ids[0] ?? this.input.function.id],
+            explanation,
+          );
+        let proofs = publish();
+        // A premise site that prints nowhere publishes nothing: anchor the
+        // premise at the function, which the signature always maps.
+        if (
+          environmentOmitted &&
+          proofs.some((record) => record.kind === 'fp_environment') &&
+          !proofs.some(premise)
+        ) {
+          this.localValidation.requireAbi(
+            'fp_default_environment',
+            [this.input.function.id],
+            explanation,
+          );
+          proofs = publish();
+        }
+        requirements = proofs.map((record) =>
           w.requirement(
             this.fpPresentation.guards.size && record.kind === 'fp_environment'
               ? { ...record, explanation: SOURCE_FP_ENVIRONMENT }

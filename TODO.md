@@ -578,7 +578,7 @@ Files that several items touch:
     - checked view byte-identical.
   - **Acceptance:** the 55 texts lose exactly the trailing signature comment. No other change.
   - **Expected effect:** Claude tokens geomean about −0.03 [estimate]; wrong claims −3 to −4; noise on about 13 functions. Lexical tokens are unchanged.
-  - **Evidence (rm4-f3):** OD lane `od-rm4-f3` vs `od-rm3-final`: exactly the 55 noted texts changed, each only by the trailing signature comment; checked view byte-identical on 4 functions in both dialects. The premise's provenance is the first listed FP-environment site mapped to the signature, so work stays within noise on the near-limit functions.
+  - **Evidence (rm4-f3):** OD lane `od-rm4-f3` vs `od-rm3-final`: exactly the 55 noted texts changed, each only by the trailing signature comment; checked view byte-identical on 4 functions in both dialects. The premise's provenance is the listed FP-environment site citing the fewest instructions (the function origin only as fallback), so work stays within noise on the near-limit functions.
 
 ### F4: Native FP where NaN-freedom is provable; value-preserving conversion spelling
 

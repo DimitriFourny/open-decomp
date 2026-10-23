@@ -1333,10 +1333,10 @@ prints no comment for the FP environment requirement: emitted C without
 `#pragma STDC FENV_ACCESS ON` presumes the default modes (C11 7.6.1p2, a language
 premise of the same class as `frame_object`), recorded as one
 `fp_default_environment` `abi_conformance` requirement beside the unchanged
-`fp_environment` requirement. Its provenance is the first site the
-`fp_environment` requirement lists (not the function origin, which would repeat
-every instruction of the function), mapped to the signature like the omitted
-guards, whose sites map to the signature too. Its full explanation is in the `requirements`
+`fp_environment` requirement. Its provenance is the listed FP-environment site
+whose origin cites the fewest instructions (not the function origin, which would
+repeat every instruction of the function; the function anchors it only when
+that site prints nowhere). Omitted guard sites map to the signature. Its full explanation is in the `requirements`
 metadata, and checked rendering keeps the full `/* Requirement … */` line.
 `c_bitcast` uses same-width `memcpy` helpers for integer/IEEE32/IEEE64
 reinterpretation under an explicit native-representation ABI requirement.
