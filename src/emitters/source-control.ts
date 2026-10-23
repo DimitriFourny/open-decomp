@@ -808,17 +808,25 @@ export function loopCopyRotations(
     }
     return into;
   };
-  // Incoming edges of every block, counted once on first use.
-  let incoming: Map<string, number> | undefined;
-  const entries = (): ReadonlyMap<string, number> => {
-    if (incoming) return incoming;
-    incoming = new Map();
-    for (const block of program.blocks.values())
-      for (const transfer of controlTransfers(block.control)) {
-        context.checkpoint(1);
-        incoming.set(transfer.target, (incoming.get(transfer.target) ?? 0) + 1);
-      }
-    return incoming;
+  // Lexical actions of the edges entering each block in this layout, found
+  // once on first use.
+  let incoming: Map<string, { transfer: ParallelTransfer; action: TransferAction }[]> | undefined;
+  const entries = (
+    header: string,
+  ): readonly { transfer: ParallelTransfer; action: TransferAction }[] => {
+    if (!incoming) {
+      const found = new Map<string, { transfer: ParallelTransfer; action: TransferAction }[]>();
+      visitTransfers(body, 'c-like', context, (occurrence) => {
+        const list = found.get(occurrence.transfer.target) ?? [];
+        list.push({
+          transfer: occurrence.transfer,
+          action: occurrenceAction(occurrence, 'c-like'),
+        });
+        found.set(occurrence.transfer.target, list);
+      });
+      incoming = found;
+    }
+    return incoming.get(header) ?? [];
   };
   const consider = (loop: Extract<Region, { kind: 'loop' }>): void => {
     let last: Region | undefined = loop.body;
@@ -844,8 +852,8 @@ export function loopCopyRotations(
     )
       return;
     const inside = blocksOf(loop.body);
-    // The repeat edge is the only edge back, and one edge enters from outside
-    // (a do-while is entered only by falling into it).
+    // The repeat edge is the only edge back, and every other edge falls into
+    // the loop (as bottom tests require: `continue` would reach the test).
     if (
       leave.transfer.target === loop.header ||
       inside.some((block) => block.id === leave.transfer.target) ||
@@ -854,7 +862,9 @@ export function loopCopyRotations(
           (transfer) => transfer !== again.transfer && transfer.target === loop.header,
         ),
       ) ||
-      entries().get(loop.header) !== 2
+      entries(loop.header).some(
+        ({ transfer, action }) => transfer !== again.transfer && action !== 'fallthrough',
+      )
     )
       return;
     const exit = liveness.live(leave.transfer.target),
