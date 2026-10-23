@@ -71,11 +71,18 @@ import type { AnalysisScope } from './index.js';
 import { environmentWriterCalls, imageEnvironmentWriters, type CallScope } from './calls.js';
 import { fpEnvironmentRegister } from '../../reconstruction/source-fp.js';
 import {
+  liftNativeUnit,
   nativeDependencies,
+  nativeSSA,
+  nativeSSALimit,
   prepareNativeUnit,
+  type NativeLift,
   type NativePreparationInput,
+  type NativeSSA,
+  type NativeSSALimit,
   type PreparedNativeUnit,
 } from './native-prepare.js';
+import type { TracedRead } from '../../project/cache/dependencies.js';
 import {
   budgetReason,
   nativeDependencyWorklist,
@@ -1107,17 +1114,53 @@ function sourceAddresses(
  * the replayed charge (W on the load's context, then the recorded reads with their
  * capture charges) fits every enclosing allowance; it returns the recorded unit. So a
  * load leaves exactly what preparing it would, and a request's result and work never
- * depend on what earlier requests in this process (or a persisted row) prepared. */
+ * depend on what earlier requests in this process (or a persisted row) prepared.
+ *
+ * Prefix reuse. A unit that is not retained keeps its preparation prefix
+ * (`prepareNativePrefix`) in the same LRU, as a `PreparedPrefixEntry`: the lift
+ * segment (graph, lift, entry prefix) and, when SSA completed within its limit, the
+ * SSA segment, each with the work it charged and the reads it made. The lift segment
+ * sets no limit from the allowance; the SSA segment is the same IR, work and reads under
+ * every SSA limit of at least its work W. A load replays a segment only when running it
+ * here could not have failed or differed: its capacity fits, its charge fits every
+ * enclosing allowance (`fits`), and for SSA the limit preparing would set now
+ * (`nativeSSALimit`, after the replayed lift) is at least W. Otherwise that segment and
+ * every later one run for real. The rest of the preparation always runs; so a load
+ * charges, reads and returns exactly what a cold preparation would. */
 type PreparedUnitCache = {
   readonly identity: string;
   readonly functions: readonly FunctionRecord[];
   readonly references: readonly ReferenceRecord[];
-  /** Least recently used first. */
-  readonly entries: Map<string, PreparedUnitEntry>;
+  /** Least recently used first; prefix entries are keyed `prefixKey(fn.id)`. */
+  readonly entries: Map<string, PreparedUnitEntry | PreparedPrefixEntry>;
   /** The persisted tier behind `entries`; absent when the store offers none. */
   readonly persistence?: NativeUnitPersistence;
   size: number;
 };
+/** A recorded preparation segment: its value, the work it charged on the worklist
+ * context and the reads it made (absent without a dependency collector). */
+interface PreparedSegment<T> {
+  readonly value: T;
+  readonly work: number;
+  readonly trace?: readonly TracedRead[];
+}
+/** The memoized prefix of a unit that was not retained (see `PreparedUnitCache`). */
+interface PreparedPrefixEntry {
+  readonly lift: PreparedSegment<NativeLift>;
+  /** Only an SSA that completed within its limit. */
+  readonly ssa?: PreparedSegment<NativeSSA>;
+  readonly size: number;
+}
+const prefixKey = (id: string): string => `prefix:${id}`;
+const prefixSize = (prefix: Omit<PreparedPrefixEntry, 'size'>): number =>
+  prefix.lift.value.base.instructions +
+  prefix.lift.value.base.evidence.length +
+  (prefix.lift.value.lifted?.nodes ?? 0) +
+  (prefix.lift.trace?.length ?? 0) +
+  (prefix.ssa ? prefix.ssa.value.nodes + (prefix.ssa.trace?.length ?? 0) : 0);
+const completedSSA = (
+  segment: PreparedSegment<NativeSSA | NativeSSALimit>,
+): segment is PreparedSegment<NativeSSA> => 'ir' in segment.value;
 const preparedUnits = new WeakMap<LoadedImage, PreparedUnitCache>();
 /** Retained prepared size (instructions + IR nodes + evidence + traced reads) per
  * image. Measured on SQLite at roughly 1 KiB of heap per unit, so ~256 MiB. */
@@ -1219,7 +1262,8 @@ export function preparedUnitCache(input: NativePreparationInput): PreparedUnitCa
 }
 
 /** Load one native body: reuse a prepared unit only where preparing it here would
- * provably return it (charging its work and replaying its reads), else prepare it.
+ * provably return it (charging its work and replaying its reads), else prepare it, from
+ * its memoized prefix where that is provably what preparing would compute.
  * `fits(work, reads)` states whether that charge fits every enclosing allowance. */
 export function nativeUnitLoader(
   input: NativePreparationInput,
@@ -1235,7 +1279,7 @@ export function nativeUnitLoader(
     return (fn, boundedContext) => prepareNativeUnit(input, fn, boundedContext, libraryContracts);
   const { persistence } = cache;
   /** Keep `entry` in the process tier, evicting least recently used entries to fit. */
-  const retain = (id: string, entry: PreparedUnitEntry): boolean => {
+  const retain = (id: string, entry: PreparedUnitEntry | PreparedPrefixEntry): boolean => {
     if (entry.size > MAX_PREPARED_UNIT_SIZE) return false;
     for (const [other, old] of cache.entries) {
       if (cache.size + entry.size <= MAX_PREPARED_UNIT_SIZE) break;
@@ -1247,7 +1291,8 @@ export function nativeUnitLoader(
     return true;
   };
   const reuse = (fn: FunctionRecord, boundedContext: OperationContext) => {
-    let entry = cache.entries.get(fn.id);
+    const cached = cache.entries.get(fn.id);
+    let entry = cached && 'unit' in cached ? cached : undefined;
     // A unit this process has not prepared may be one an earlier process persisted. It is
     // used exactly as if it had been prepared here, so the checks below are the same.
     if (!entry && persistence) {
@@ -1293,12 +1338,65 @@ export function nativeUnitLoader(
         work += amount;
       },
     };
-    const run = () => prepareNativeUnit(input, fn, measured, libraryContracts);
+    const key = prefixKey(fn.id);
+    const cached = cache.entries.get(key);
+    const stored = allowance !== undefined && cached && 'lift' in cached ? cached : undefined;
+    const { budget } = boundedContext;
+    /** Run `compute` on `measured`, recording the work it charges and the reads it makes. */
+    const record = <T>(compute: () => T): PreparedSegment<T> => {
+      const before = work;
+      const { value, trace } = scope.dependencies
+        ? scope.dependencies.traced(compute)
+        : { value: compute(), trace: undefined };
+      return { value, work: work - before, ...(trace ? { trace } : {}) };
+    };
+    /** Charge `segment` as running it here would, but only where running it could not
+     * have failed: its work is within `limit` and its charge fits every enclosing
+     * allowance, so the interleaved charges of a fresh run all succeed too. */
+    const replay = (segment: PreparedSegment<unknown>, limit: number): boolean => {
+      if (segment.work > limit || (scope.dependencies !== undefined && !segment.trace))
+        return false;
+      const reads = scope.dependencies ? scope.dependencies.traceCharges(segment.trace!) : 0;
+      if (reads === undefined || !fits(segment.work, reads)) return false;
+      scope.dependencies?.replayTrace(segment.trace!);
+      measured.checkpoint(segment.work);
+      return true;
+    };
+    let lift: PreparedSegment<NativeLift> | undefined,
+      ssa: PreparedSegment<NativeSSA | NativeSSALimit> | undefined;
+    const run = () => {
+      // Capacities as for a retained unit: a body that fits stays the same body.
+      const lifted = stored?.lift.value.lifted;
+      lift =
+        stored &&
+        stored.lift.value.base.instructions < budget.instructions &&
+        Math.max(stored.lift.value.base.blocks, lifted?.ir.blocks.length ?? 0) < budget.blocks &&
+        (lifted?.nodes ?? 0) < budget.ir_nodes &&
+        replay(stored.lift, allowance!)
+          ? stored.lift
+          : record(() => liftNativeUnit(input, fn, measured));
+      const body = lift.value.lifted;
+      if (!body)
+        return prepareNativeUnit(input, fn, measured, libraryContracts, { lift: lift.value });
+      // The SSA limit is set from what remains after the lift, here as in a fresh run.
+      ssa =
+        stored?.ssa &&
+        stored.ssa.value.ir.blocks.length < budget.blocks &&
+        stored.ssa.value.required_nodes < budget.ir_nodes &&
+        replay(stored.ssa, nativeSSALimit(measured))
+          ? stored.ssa
+          : record(() => nativeSSA(input, fn, body, measured));
+      return prepareNativeUnit(input, fn, measured, libraryContracts, {
+        lift: lift.value,
+        ssa: ssa.value,
+      });
+    };
     const { value: unit, trace } = scope.dependencies
       ? scope.dependencies.traced(run)
       : { value: run(), trace: undefined };
     if (allowance !== undefined && reusablePreparation(unit)) {
-      const prior = cache.entries.get(fn.id);
+      const old = cache.entries.get(fn.id);
+      const prior = old && 'unit' in old ? old : undefined;
       if (prior) {
         cache.entries.delete(fn.id);
         cache.size -= prior.size;
@@ -1314,6 +1412,16 @@ export function nativeUnitLoader(
       // at an allowance this one cannot improve.
       if (retain(fn.id, entry) && (prior?.stored === undefined || entry.allowance < prior.stored))
         persistence?.save(fn, entry);
+    } else if (allowance !== undefined && lift && !lift.value.base.budget_truncated) {
+      // A unit that is not retained keeps its prefix: the newest lift, and an SSA that
+      // completed (a limited SSA run under a smaller limit leaves the recorded one).
+      const completed = ssa && completedSSA(ssa) ? ssa : stored?.ssa;
+      if (stored) {
+        cache.entries.delete(key);
+        cache.size -= stored.size;
+      }
+      const prefix = { lift, ...(completed ? { ssa: completed } : {}) };
+      retain(key, { ...prefix, size: prefixSize(prefix) });
     }
     return unit;
   };
