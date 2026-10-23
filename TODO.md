@@ -618,7 +618,7 @@ Files that several items touch:
 
 ### F5: NaN payloads are unobserved
 
-- [ ] After F1 and F4, 11 helpers remain:
+- [x] After F1 and F4, 11 helpers remain:
   - 9× `fp_mul` in the `matrix_aggregate` cells, stored to caller memory (source `input.weight *= scale`);
   - one `fp_add` (ELF `-O0` `matrix_variadic`);
   - one `fp_div` (`cume_distValueFunc`).
@@ -628,6 +628,7 @@ Files that several items touch:
   - **Tests:** `test/emitters/c/source-fp-native.test.ts`: a possibly-NaN product stored to caller memory and one passed to a call print as operators. Oracles compare NaN results modulo payload and every other result bit-exact, in both dialects.
   - **Acceptance** (measured): all 11 become operators; the `matrix_aggregate` cells print `address->field_0x10_f = arg2 * value0` (or the member's name). Checked view unchanged.
   - **Depends on:** F1, F4.
+  - _Done: stores and call arguments/inputs (same-width bitcasts of floats included) are not payload roots; `fp_nan_payload_unobserved` `abi_conformance` requirement anchored at the arithmetic that relies on it. OD lane vs `od-main-ad6a967`: exactly the 11 acceptance texts change (9 `fp_mul` incl. the 3 stripped `sub` cells, `matrix_variadic` `fp_add`, `cume_distValueFunc` `fp_div`), `fp_*(` helpers in lane texts 32 → 21, checked view byte-identical, coverage unchanged._
 
 ## A: ARM64 lifting and frames
 
