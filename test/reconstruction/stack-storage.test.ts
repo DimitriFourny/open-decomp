@@ -530,3 +530,126 @@ for (const { abi } of targets.filter(({ abi }) => abi.stack_return_address_bytes
       assert.deepEqual(execute(output.emission).values, [77n]);
     }
   });
+
+/** A 9-argument call to a callee whose observed interface reads its stack
+ * arguments from its incoming stack (`stack_parameters`; the 9th on Darwin,
+ * the 7th-9th on SysV, the 5th-9th on Win64): their outgoing stores print
+ * only as the arguments, unless the last slot is read back after the call (a
+ * volatile reload keeps it memory and its store). */
+for (const { abi } of targets)
+  for (const variant of ['consumed', 'reread'] as const)
+    test(`${abi.id}: a 9-argument call's stack-parameter store ${variant === 'consumed' ? 'prints only as the argument' : 'stays when the slot is read back'}`, () => {
+      const layout = abi.classifyCall({
+        returns: { kind: 'void' },
+        parameters: Array.from({ length: 9 }, () => ({
+          kind: 'integer' as const,
+          bits: 64,
+          signed: false,
+        })),
+        variadic: false,
+        fixed_parameter_count: 9,
+      });
+      const values = Array.from(
+        { length: 9 },
+        (_, index) => 0x1111111111111111n * BigInt(index + 1),
+      );
+      const b = builder(`stack-parameter-store-${abi.id}-${variant}`),
+        block = b.block('entry');
+      const entry = block.readRegister(abi.stack_pointer),
+        frame = block.int('sub', entry, block.constant(u64, 128n));
+      block.writeRegister(abi.stack_pointer, frame);
+      const registers = [],
+        stackParameters = [];
+      let slot: ReturnType<typeof block.int> | undefined;
+      for (const parameter of layout.parameters) {
+        const location = parameter.locations[0]!;
+        const value = block.constant(u64, values[parameter.index]!);
+        if (location.kind === 'register') {
+          block.writeRegister(location.register, value);
+          registers.push(location.register);
+        } else {
+          assert.ok(location.kind === 'stack');
+          slot = block.int(
+            'add',
+            frame,
+            block.constant(u64, location.offset - abi.stack_return_address_bytes),
+          );
+          block.store(slot, value);
+          stackParameters.push({ offset: location.offset, width_bits: 64, type: u64 });
+        }
+      }
+      assert.ok(stackParameters.length > 0);
+      // An x86 call pushes its return address: the callee-entry SP is below.
+      if (abi.stack_return_address_bytes) {
+        const pushed = block.int('sub', frame, block.constant(u64, abi.stack_return_address_bytes));
+        block.writeRegister(abi.stack_pointer, pushed);
+        block.store(pushed, block.address({ image_id: image, space: 'va', value: 0x1010n }));
+      }
+      block.call(
+        { kind: 'direct', address: { image_id: image, space: 'va', value: 0x2000n } },
+        [],
+        [],
+        abi.unknown_call_clobbers,
+        [newIdentity('evidence')],
+      );
+      const reread =
+        variant === 'reread'
+          ? block.load(u64, slot!, { endian: 'little', alignment: 1, volatile: true })
+          : block.constant(u64, 0n);
+      block.writeRegister(abi.stack_pointer, frame);
+      block.writeRegister(abi.stack_pointer, entry);
+      block.return([reread]);
+      const { ir, extra } = source(b.finish(block, [u64]), abi);
+      const call = ir.blocks[0]!.instructions.find((node) => node.kind === 'call')!;
+      const sourceEvidence = {
+        abi,
+        addresses: [],
+        callees: [
+          {
+            call_id: call.id,
+            parameters: registers,
+            stack_parameters: stackParameters,
+            returns: [],
+            parameter_state: 'observed' as const,
+            argument_list_complete: false,
+            evidence_ids: [],
+          },
+        ],
+      };
+      for (const language of ['c-like', 'python-like'] as const) {
+        const { emission } = emit(ir, { ...extra, source: sourceEvidence }, language);
+        // The call and every stack-argument store but the reloaded one.
+        assert.equal(
+          emission.local_validation?.find((record) => record.rule === 'stack_argument_store')
+            ?.subject_ids?.length ?? 1,
+          1 + stackParameters.length - (variant === 'reread' ? 1 : 0),
+          emission.text,
+        );
+        const entrySp = formalInput(emission, 'entry_sp');
+        const observed = execute(
+          emission,
+          new Map(entrySp ? [[entrySp.statement_id, 0x9000n]] : []),
+          new Map(),
+          0x9000n,
+          new Map(),
+          new Map(),
+          new Map([['sub_2000', () => 0n]]),
+        );
+        assert.deepEqual(
+          observed.source_calls,
+          [{ name: 'sub_2000', arguments: values }],
+          `${language}\n${emission.text}`,
+        );
+        // Only the x86 return-address push and the reloaded slot's store remain.
+        assert.equal(
+          observed.events.filter((event) => event === 'store').length,
+          (abi.stack_return_address_bytes ? 1 : 0) + (variant === 'reread' ? 1 : 0),
+          emission.text,
+        );
+        assert.deepEqual(observed.values, [variant === 'reread' ? values[8]! : 0n]);
+      }
+      const checked = emit(ir, { ...extra, source: sourceEvidence }, 'c-like', 'checked').emission;
+      assert.ok(
+        !checked.local_validation?.some((record) => record.rule === 'stack_argument_store'),
+      );
+    });

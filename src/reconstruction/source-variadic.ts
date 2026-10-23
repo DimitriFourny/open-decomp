@@ -1,10 +1,8 @@
 import type { AbiProfile, OperationContext, RegisterDescriptor } from '../core/index.js';
-import type { StackByte, StackFact } from '../analysis/stack/index.js';
 import { instructionOperands } from '../analysis/effects/index.js';
 import {
   bitWidth,
   expressionOperands,
-  sameType,
   type DataType,
   type Expression,
   type Instruction,
@@ -16,321 +14,47 @@ import type { EmissionInput } from '../emitters/model.js';
 import type { BoundaryProjection } from './model.js';
 import type { LocalValidationSession } from './local-validation.js';
 import type { InferredCallee } from './source-model.js';
-import {
-  createStackArgumentJoins,
-  sourceStackArgumentParts,
-  type StackArgumentJoins,
-} from './source-stack-arguments.js';
-type Store = Extract<Instruction, { kind: 'store' }>;
+import type { JoinedSlot, OutgoingSlot, OutgoingStackSlots } from './source-stack-arguments.js';
 
 /** Darwin arm64 passes every variadic argument in 8-byte outgoing stack slots
  * starting at SP+0. When the callee lets a pointer into its incoming argument
  * area escape (an escaping `va_list`), a contiguous run of such slots written
  * by this body is presented as observed anonymous trailing arguments. Each slot
- * must be written by exactly one store that reaches the call on every path,
- * or (a slot written on several branches) by one store in the predecessor of
- * each incoming edge of the call's block: the argument is then the value the
- * join already carries, or a source-only block parameter each edge assigns
- * its stored value (`variadic_stack_join`). Every such store starts at the
- * slot, is not a frame save, a private local or hidden traffic, holds no stack
- * address, and is read by no load and visible at no other call or tail call
- * that may read it (a boundary whose SP lies at or above the slot, such as a
- * tail call, cannot). The run stops at the first slot failing any condition;
- * later stores stay explicit statements and the remainder marker stays, so no
- * argument is dropped and the source arity remains open. */
+ * must be eligible (`createOutgoingStackSlots`): written by exactly one store
+ * that reaches the call on every path, or (a slot written on several branches)
+ * by one store in the predecessor of each incoming edge of the call's block,
+ * and observed by no load and no other boundary. A joined slot's argument is
+ * the value the join already carries, or a source-only block parameter each
+ * edge assigns its stored value (`variadic_stack_join`). The run stops at the
+ * first slot failing any condition; later stores stay explicit statements and
+ * the remainder marker stays, so no argument is dropped and the source arity
+ * remains open. Consumed stores are recorded in the slots' `consumed`. */
 export function planVariadicStackArguments(
   input: EmissionInput,
   blocks: Map<string, BlockRegion>,
   expressions: ReadonlyMap<string, Expression>,
   calls: Map<string, BoundaryProjection>,
-  excluded: (store: string) => boolean,
+  slots: () => OutgoingStackSlots | null,
   storage: StackJoinStorage,
   validation: LocalValidationSession,
   context: OperationContext,
-): ReadonlyMap<string, string> {
-  const consumed = new Map<string, string>();
+): void {
   const source = input.source,
     stack = input.types?.calls?.stack;
-  if (source?.abi.id !== 'darwin-arm64' || stack?.state !== 'complete') return consumed;
+  if (source?.abi.id !== 'darwin-arm64' || stack?.state !== 'complete') return;
   // Source-view refinements (e.g. a known variadic Objective-C selector) replace
   // the observed record of the same call.
-  const inferred = new Map(
-    [...source.callees, ...(source.source_callees ?? [])].map(
-      (callee) => [callee.call_id, callee] as const,
-    ),
-  );
   const callees = new Map(
-    [...inferred].filter(([, callee]) => callee.variadic_stack || callee.variadic),
+    [...source.callees, ...(source.source_callees ?? [])]
+      .map((callee) => [callee.call_id, callee] as const)
+      .filter(([, callee]) => callee.variadic_stack || callee.variadic),
   );
-  if (!callees.size) return consumed;
+  if (!callees.size) return;
   const writes = createRegisterWrites(blocks, expressions, input.function.entry, context);
   const integerArguments = argumentRegisters(source.abi, 'integer', 8);
-  // The stack analysis treats a live frame pointer at any call as an escape.
-  // Under ABI conformance (recorded with each rewrite) callees use preserved
-  // registers and SP only as such; any other stack address leaving this body
-  // (a scratch/argument register at a boundary, or a stored value) may alias
-  // the outgoing slots and disables the rewrite for the whole function.
-  const stackKind = (fact: StackFact | undefined): boolean =>
-    fact?.value.kind === 'stack' ||
-    fact?.value.kind === 'stack_fragment' ||
-    fact?.value.kind === 'dynamic_stack';
-  const preserved = new Set(source.abi.preserved.map((register) => register.root));
-  // A callee with a published `va_start` footprint (S8) reads, under the
-  // variadic convention recorded with each rewrite, its named registers (the
-  // observed prefix) and its anonymous stack slots only: a stack address in
-  // another register at its call reaches nothing.
-  const leaks = (id: string): boolean => {
-    const callee = inferred.get(id),
-      named = callee?.variadic && callee.parameters;
-    return (
-      stack.snapshots
-        .get(id)
-        ?.registers.some(
-          (row) =>
-            row.register.root !== source.abi.stack_pointer.root &&
-            !preserved.has(row.register.root) &&
-            (!named || named.some((register) => register.root === row.register.root)) &&
-            stackKind(row.fact),
-        ) ?? true
-    );
-  };
-  const stores = new Map<string, Store>();
-  for (const block of blocks.values()) {
-    for (const node of block.statements) {
-      context.checkpoint(1);
-      if (node.kind === 'store') {
-        if (stackKind(stack.values.get(node.value.id))) return consumed;
-        stores.set(node.id, node);
-      } else if ((node.kind === 'call' || node.kind === 'unknown_effect') && leaks(node.id))
-        return consumed;
-    }
-    if (block.control.kind === 'indirect' && block.control.tail_call && leaks(block.control.id))
-      return consumed;
-  }
-  const owners = new Map<StackFact, { store: Store; offset: bigint; size: bigint }>(),
-    reads: { start: bigint; end: bigint }[] = [];
-  for (const access of stack.accesses) {
-    context.checkpoint(1);
-    if (access.kind === 'read') {
-      // An unknown read offset may observe any slot.
-      if (access.offset === null) return consumed;
-      reads.push({ start: access.offset, end: access.offset + access.size });
-      continue;
-    }
-    const store = stores.get(access.node_id);
-    if (store && access.offset !== null)
-      owners.set(access.value, { store, offset: access.offset, size: access.size });
-  }
-  // The stack analysis keeps the fact of a byte whose stored value is itself of
-  // unknown initialization across a clobbering barrier, so fact identity proves
-  // such a byte's store only when no barrier (a call, an unknown effect or a
-  // store at an unknown offset) lies between that store and the call: in one
-  // block, or (a joined slot) from the store to its block's exit and from the
-  // call block's entry to the call.
-  const exact = new Set(
-    stack.accesses
-      .filter((access) => access.kind === 'write' && access.offset !== null)
-      .map((access) => access.node_id),
-  );
-  const positions = new Map<string, { readonly block: BlockRegion; readonly index: number }>();
-  for (const block of blocks.values())
-    block.statements.forEach((node, index) => positions.set(node.id, { block, index }));
-  // No barrier among `block`'s statements in [from, to).
-  const barrierFree = (block: BlockRegion, from: number, to: number): boolean => {
-    for (let index = from; index < to; index++) {
-      context.checkpoint(1);
-      const node = block.statements[index]!;
-      if (
-        node.kind === 'call' ||
-        node.kind === 'unknown_effect' ||
-        (node.kind === 'store' && !exact.has(node.id))
-      )
-        return false;
-    }
-    return true;
-  };
-  const unbarred = (store: string, call: string): boolean => {
-    const from = positions.get(store),
-      to = positions.get(call);
-    if (!from || !to || from.block !== to.block || from.index > to.index) return false;
-    return barrierFree(from.block, from.index + 1, to.index);
-  };
-  // Boundaries that may read their incoming stack (our outgoing area). A
-  // consumed store must be visible at no such boundary but its own call. Only
-  // an observed callee without stack inputs, or an established complete
-  // non-variadic register-only contract, is known not to read those bytes.
-  const stackContracts = new Set(
-    (input.types?.calls?.calls ?? []).flatMap((call) =>
-      call.contracts.some(
-        (contract) =>
-          contract.status !== 'established' ||
-          contract.parameters.some((parameter) =>
-            parameter.locations.some((location) => location.location.kind === 'stack'),
-          ),
-      )
-        ? [call.node_id]
-        : [],
-    ),
-  );
-  const stackBlind = (id: string): boolean => {
-    const callee = inferred.get(id),
-      projection = calls.get(id);
-    if (callee)
-      return (
-        callee.parameter_state === 'observed' &&
-        !callee.variadic_stack &&
-        !callee.variadic &&
-        !callee.stack_parameters?.length
-      );
-    return (
-      projection?.kind === 'source' &&
-      projection.argument_list_complete !== false &&
-      projection.signature?.signature.variadic === false &&
-      !stackContracts.has(id)
-    );
-  };
-  const boundaries: string[] = [];
-  for (const block of blocks.values()) {
-    for (const node of block.statements)
-      if (node.kind === 'call' && !stackBlind(node.id)) boundaries.push(node.id);
-    if (block.control.kind === 'indirect' && block.control.tail_call)
-      boundaries.push(block.control.id);
-  }
+  const outgoing = slots();
+  if (!outgoing) return;
   const slot = BigInt(source.abi.layout.pointer_bits / 8);
-  // The store owning slot `start` in `memory` (a boundary's or an edge exit's
-  // snapshot): it starts the slot, its value covers exactly its bytes, it is
-  // not volatile, hidden, private, a save or already consumed, and every other
-  // slot byte is absent or owned by no store.
-  const ownedSlot = (
-    memory: ReadonlyMap<bigint, StackByte>,
-    start: bigint,
-  ): { readonly store: Store; readonly fact: StackFact; readonly size: bigint } | null => {
-    const cell = memory.get(start),
-      owner = cell && owners.get(cell.fact);
-    if (
-      !cell ||
-      !owner ||
-      owner.offset !== start ||
-      owner.size > slot ||
-      cell.value_offset_bits !== 0 ||
-      owner.store.access.volatile ||
-      BigInt(Math.ceil(bitWidth(owner.store.value.type) / 8)) !== owner.size ||
-      excluded(owner.store.id) ||
-      consumed.has(owner.store.id)
-    )
-      return null;
-    for (let byte = 0n; byte < slot; byte++) {
-      context.checkpoint(1);
-      const other = memory.get(start + byte);
-      if (
-        !(byte < owner.size
-          ? other?.fact === cell.fact && other.value_offset_bits === Number(byte) * 8
-          : other === undefined || owners.get(other.fact) === undefined)
-      )
-        return null;
-    }
-    return { store: owner.store, fact: cell.fact, size: owner.size };
-  };
-  // Bytes [start, start + size) holding one of `facts` (the slot's stores)
-  // are read by no load and visible at no stack-reading boundary but `call`,
-  // unless a known different store owns them there (a barrier's unknown copy
-  // may still hold a stored value; an absent byte was never written there).
-  // Under the Darwin variadic convention (recorded with each rewrite) a callee
-  // reads its arguments at or above its entry SP, so a boundary whose SP is an
-  // exact stack offset at or above the bytes' end (a tail call: SP is back at
-  // this function's entry SP) cannot read them.
-  const unobserved = (
-    call: string,
-    start: bigint,
-    size: bigint,
-    facts: ReadonlySet<StackFact>,
-  ): boolean =>
-    !reads.some((read) => read.start < start + size && read.end > start) &&
-    !boundaries.some((id) => {
-      if (id === call) return false;
-      const snapshot = stack.snapshots.get(id);
-      if (!snapshot) return true;
-      const sp = snapshot.stack_pointer.value;
-      if (sp.kind === 'stack' && sp.offset >= start + size) return false;
-      for (let byte = 0n; byte < size; byte++) {
-        const other = snapshot.memory.get(start + byte);
-        if (other && (facts.has(other.fact) || !owners.has(other.fact))) return true;
-      }
-      return false;
-    });
-  // A slot whose bytes merge at the call block's entry (written on several
-  // branches). Every incoming edge carries one eligible store of one common
-  // size and type, placed in the edge's predecessor block (so its value is
-  // available at the edge) and owning the slot at that block's exit; the call
-  // block writes nothing before the call. The join proof of
-  // `sourceStackArgumentParts` (one value dominating every edge, or one
-  // existing block parameter every edge copies the stored value into) gives
-  // the argument; otherwise `joinStackSlot` adds a source-only block
-  // parameter assigned the stored value on each edge. Each store is consumed.
-  let joins: StackArgumentJoins | undefined;
-  const storeValues = new Map([...stores].map(([id, store]) => [id, store.value] as const));
-  const incoming = new Map<string, { transfer: ParallelTransfer; block: BlockRegion }[]>();
-  for (const edge of storage.transfers) {
-    const list = incoming.get(edge.transfer.target) ?? [];
-    list.push(edge);
-    incoming.set(edge.transfer.target, list);
-  }
-  const joinedSlot = (
-    call: string,
-    memory: ReadonlyMap<bigint, StackByte>,
-    offset: bigint,
-    start: bigint,
-  ): JoinedSlot | null => {
-    const position = positions.get(call),
-      edges = position && incoming.get(position.block.id);
-    if (
-      !position ||
-      !edges?.length ||
-      position.block.id === input.function.entry ||
-      !barrierFree(position.block, 0, position.index)
-    )
-      return null;
-    let size: bigint | undefined;
-    const taken: JoinedSlot['edges'][number][] = [],
-      facts = new Set<StackFact>();
-    for (const { transfer, block } of edges) {
-      context.checkpoint(1);
-      const exit = stack.snapshots.get(block.control.id)?.memory,
-        owned = exit && ownedSlot(exit, start),
-        from = owned && positions.get(owned.store.id);
-      if (
-        !owned ||
-        from?.block.id !== block.id ||
-        (size !== undefined && owned.size !== size) ||
-        !sameType(owned.store.value.type, taken[0]?.store.value.type ?? owned.store.value.type) ||
-        (owned.fact.initialization !== 'initialized' &&
-          !barrierFree(block, from.index + 1, block.statements.length))
-      )
-        return null;
-      size = owned.size;
-      taken.push({ transfer, exit: block.control.id, store: owned.store });
-      facts.add(owned.fact);
-    }
-    if (size === undefined) return null;
-    // The call sees merged bytes only, and no store owns the slot's rest.
-    for (let byte = 0n; byte < slot; byte++) {
-      const other = memory.get(start + byte);
-      if (byte < size ? !other || owners.has(other.fact) : other && owners.has(other.fact))
-        return null;
-    }
-    if (!unobserved(call, start, size, facts)) return null;
-    joins ??= createStackArgumentJoins(blocks, input.function.entry);
-    const width = Number(size) * 8,
-      part = sourceStackArgumentParts(stack, storeValues, call, offset, width, context, joins);
-    const shared =
-      part?.length === 1 &&
-      part[0]!.value_offset_bits === 0 &&
-      part[0]!.width_bits === width &&
-      bitWidth(part[0]!.value.type) === width
-        ? part[0]!.value
-        : null;
-    return { block: position.block.id, offset, shared, edges: taken };
-  };
   for (const block of blocks.values())
     for (const node of block.statements) {
       context.checkpoint(1);
@@ -364,24 +88,17 @@ export function planVariadicStackArguments(
           .some((register) => writes(node.register_inputs, register))
       )
         continue;
-      const snapshot = stack.snapshots.get(node.id),
-        sp = snapshot?.stack_pointer.value;
-      if (!snapshot || sp?.kind !== 'stack') continue;
-      const taken: {
-        readonly stores: readonly Store[];
-        readonly value?: Value;
-        readonly join?: JoinedSlot;
-      }[] = [];
+      const sp = stack.snapshots.get(node.id)?.stack_pointer.value;
+      if (sp?.kind !== 'stack') continue;
+      const taken: OutgoingSlot[] = [];
       for (let index = 0n; index < 32n; index++) {
         context.checkpoint(1);
         const offset = (callee.variadic?.named_stack_bytes ?? 0n) + index * slot,
-          start = sp.offset + offset,
-          cell = snapshot.memory.get(start);
-        if (!cell) break;
-        if (!owners.has(cell.fact)) {
-          const join = joinedSlot(node.id, snapshot.memory, offset, start);
-          if (
-            !join ||
+          found = outgoing.slot(node.id, offset, slot),
+          join = found?.join;
+        if (
+          !found ||
+          (join &&
             !validation.presentation(
               'variadic_stack_join',
               node.id,
@@ -392,20 +109,10 @@ export function planVariadicStackArguments(
                 ...join.edges.map(({ store }) => store.id),
                 ...new Set(join.edges.map(({ exit }) => exit)),
               ],
-            )
-          )
-            break;
-          taken.push({ stores: join.edges.map(({ store }) => store), join });
-          continue;
-        }
-        const owned = ownedSlot(snapshot.memory, start);
-        if (
-          !owned ||
-          (owned.fact.initialization !== 'initialized' && !unbarred(owned.store.id, node.id)) ||
-          !unobserved(node.id, start, owned.size, new Set([owned.fact]))
+            ))
         )
           break;
-        taken.push({ value: owned.store.value, stores: [owned.store] });
+        taken.push(found);
       }
       if (
         !taken.length ||
@@ -429,14 +136,13 @@ export function planVariadicStackArguments(
           value ?? join!.shared ?? joinStackSlot(blocks, storage, node.id, join!),
       );
       for (const argument of taken)
-        for (const store of argument.stores) consumed.set(store.id, node.id);
+        for (const store of argument.stores) outgoing.consumed.set(store.id, node.id);
       calls.set(node.id, {
         ...projection,
         arguments: [...projection.arguments, ...values],
         argument_list_complete: false,
       });
     }
-  return consumed;
 }
 
 /** Source-view reconstruction state a joined variadic slot extends: every
@@ -457,20 +163,6 @@ export interface StackJoinStorage {
     expression?: Expression,
     contributors?: readonly Value[],
   ) => Value;
-}
-
-/** A variadic slot written on every incoming edge of the call block by one
- * store in that edge's predecessor. `shared` is the value the existing join
- * already carries (`sourceStackArgumentParts`), when there is one. */
-interface JoinedSlot {
-  readonly block: string;
-  readonly offset: bigint;
-  readonly shared: Value | null;
-  readonly edges: readonly {
-    readonly transfer: ParallelTransfer;
-    readonly exit: string;
-    readonly store: Store;
-  }[];
 }
 
 /** The source-only block parameter of a joined slot: each incoming edge

@@ -852,6 +852,17 @@ or load, the call block writing nothing before the call) instead feeds a
 source-only block parameter assigned on every edge (`variadic_stack_join`), and
 the stores print as those assignments. A tail call (SP back at the entry SP)
 does not observe an outgoing slot below its SP.
+An outgoing store whose bytes a call's projection already binds as an argument
+through the stack (a closed format rule, a callee's observed stack parameters, a
+published `va_start` footprint) prints only as that argument
+(`stack_argument_store`) when the same slot conditions hold: one eligible store
+(or one per incoming edge whose join value is the argument) covering the bound
+bytes — under a complete projection also the ABI padding of a pointer-sized slot
+no other argument occupies — read by no load and seen by no other stack-reading
+boundary before the call. A boundary that sees the store only through the call
+does not observe it: the callee owns and may overwrite its stack arguments
+(`open_call_argument_area`, recorded on those stores). Any stack address leaving
+the body disables this, as for variadic slots.
 Discovery-established tails to uniquely resolved imported callable entries may
 use complete nonvariadic register-only library contracts. Their interfaces
 propagate through the same bounded native dependency worklist as source-only
@@ -1200,7 +1211,10 @@ function of the image (symbol or discovered; `function_entry`) prints as
 `(uintptr_t)name` with an `extern void name();` declaration of unknown prototype
 (`function_address("name")` in Python-like), a named data object as its address,
 and an immutable string literal added to a variable offset in a load/store address
-as `(uintptr_t)"create" + i`. Unnamed data addresses stay numbers.
+as `(uintptr_t)"create" + i`. Unnamed data addresses stay numbers. An integer call
+or tail argument whose value is such a constant prints the same way
+(`sqlite3_config(4, (uintptr_t)sqlite3MemSetDefault_defaultMethods)`), so a
+consumed argument store (`stack_argument_store`) never takes the only name away.
 
 Indexed read-only tables (`indexed_data_load`) print their contents as
 `static const uintN_t name[N] = {...}` (16 bytes per line, decimal below 2^32). `N`

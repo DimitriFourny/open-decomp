@@ -32,7 +32,11 @@ import {
   unchangedStorage,
   type StorageCopy,
 } from './source-register-types.js';
-import { createStackArgumentJoins, sourceStackArgumentParts } from './source-stack-arguments.js';
+import {
+  createStackArgumentJoins,
+  sourceStackArgumentParts,
+  type StackArgumentBinding,
+} from './source-stack-arguments.js';
 import { planSourceRequirements } from './source-requirements.js';
 import { possibleAbiReturnStorage } from '../analysis/calls/return-storage.js';
 import { LocalValidationSession } from './local-validation.js';
@@ -281,6 +285,10 @@ export function planSource(
   for (const block of blocks.values())
     for (const node of block.statements) if (node.kind === 'store') stores.set(node.id, node.value);
   const stackJoins = createStackArgumentJoins(blocks, input.function.entry);
+  // The stack locations bound for the boundary being projected (reset before
+  // each attempt) and, per boundary, those of its committed projection.
+  let stackBound: StackArgumentBinding[] = [];
+  const stackArguments = new Map<string, readonly StackArgumentBinding[]>();
   const bindStack = (
     key: string,
     boundary: string,
@@ -300,6 +308,10 @@ export function planSource(
       stackJoins,
     );
     if (!parts) return null;
+    const bound = (value: Value): Value => {
+      stackBound.push({ offset, width_bits: bitWidth(type), value });
+      return value;
+    };
     const values = parts.map((part, index) =>
       part.value_offset_bits === 0 && part.width_bits === bitWidth(part.value.type)
         ? part.value
@@ -309,14 +321,16 @@ export function planSource(
             offset: part.value_offset_bits,
           }),
     );
-    if (values.length === 1 && sameType(values[0]!.type, type)) return values[0]!;
-    return make(
-      key,
-      type,
-      block,
-      values.length === 1
-        ? { kind: 'cast', op: 'bitcast', value: values[0]! }
-        : { kind: 'concat', values },
+    if (values.length === 1 && sameType(values[0]!.type, type)) return bound(values[0]!);
+    return bound(
+      make(
+        key,
+        type,
+        block,
+        values.length === 1
+          ? { kind: 'cast', op: 'bitcast', value: values[0]! }
+          : { kind: 'concat', values },
+      ),
     );
   };
   const observedArguments = (
@@ -512,6 +526,7 @@ export function planSource(
         ) {
           const args: Value[] = [];
           let valid = true;
+          stackBound = [];
           for (const parameter of layout.parameters) {
             const type = machineType(declaration.parameters![parameter.index]!);
             const location = parameter.locations.length === 1 ? parameter.locations[0] : undefined;
@@ -572,6 +587,7 @@ export function planSource(
               'Library closure assumes the established contract and ABI-conforming arguments, including variadic default promotions when rule-derived. Conflicting contracts, unsupported formats, undecided open flags and unavailable argument storage remain explicit.',
             );
           if (valid) {
+            if (stackBound.length) stackArguments.set(node.id, stackBound);
             const signatures =
               input.types?.signatures.filter(
                 (signature) =>
@@ -660,9 +676,12 @@ export function planSource(
       }
       const callee = inferred.get(node.id);
       if (!projection && callee && node.arguments.length === 0 && node.results.length === 0) {
+        stackBound = [];
         const variadic = variadicArguments(callee, node.register_inputs, node.id, block.id);
+        if (!variadic) stackBound = [];
         const { arguments: args, missing } =
           variadic ?? observedArguments(callee, node.register_inputs, node.id, block.id);
+        if (stackBound.length) stackArguments.set(node.id, stackBound);
         const returned = callee.returns
           .map((register, index) =>
             result(
@@ -720,8 +739,11 @@ export function planSource(
     const control = block.control,
       callee = inferred.get(control.id);
     if (control.kind !== 'indirect' || !control.tail_call || !callee?.target) continue;
+    stackBound = [];
     const variadic = variadicArguments(callee, block.register_exit, control.id, block.id);
+    if (!variadic) stackBound = [];
     const args = variadic ?? observedArguments(callee, block.register_exit, control.id, block.id);
+    if (stackBound.length) stackArguments.set(control.id, stackBound);
     const guess =
       view === 'source' && !args.missing && !variadic && callee.argument_list_closure === undefined
         ? evidence.likely_arity?.get(control.id)
@@ -1884,6 +1906,9 @@ export function planSource(
     calls,
     returns,
     tails,
+    /** Source view (K2): the stack locations each committed call or tail
+     * projection bound through `bindStack`. */
+    stackArguments,
     parameters,
     parameterRegisters,
     signature: functionSignature?.signature ?? null,

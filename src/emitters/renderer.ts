@@ -5014,12 +5014,15 @@ export class Renderer {
       const storage = this.storage(loaded);
       if (this.memberPointers.has(loaded.id) || this.typedPointerGlobal(loaded.id)) return storage;
     }
+    // An integer argument that is the exact entry of a function or the address
+    // of a named data object prints as that name, as in an assignment
+    // (`symbolicValue`).
     const printed = pointer
       ? literal === undefined
         ? this.sourceAddressPrinted(value, !this.sourceView)
         : undefined
       : literal === undefined
-        ? this.printed(value)
+        ? ((literalsAllowed ? this.symbolicValue(value) : undefined) ?? this.printed(value))
         : undefined;
     const text = literal ?? printed!.text;
     // A message operand needs no C parameter conversion: message syntax has none.
