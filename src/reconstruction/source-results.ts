@@ -659,22 +659,28 @@ export function selectSourcePrimaryResult(
   // each path holds its unchanged entry value, a call output, or a value the function
   // also stores or observes otherwise (an address, call argument or branch operand).
   // A path that computes a value consumed only by exits (a literal, arithmetic, a load
-  // or another argument copied into the register) returns it deliberately. A literal
-  // path root decides first, before any slice walk; the whole-body passes over stored
-  // and observed values run last.
+  // or another argument copied into the register) returns it deliberately; a literal
+  // the function also stores (`*rc = 7; return;` keeping it) does not. Literal path
+  // roots decide first, before any slice walk; the whole-body pass over observed
+  // values runs last.
   const incidentalPaths = (): boolean => {
     const root = input.integer.register.root;
     const paths = exits.flatMap((block) => {
       const cell = exitValue(block, input.integer);
       return cell ? exitPaths(cell, block.id) : [];
     });
-    if (paths.some((path) => expressions.get(path.value.id)?.kind === 'constant')) return false;
+    if (
+      paths.some(
+        (path) =>
+          expressions.get(path.value.id)?.kind === 'constant' && !storedValues().has(path.value.id),
+      )
+    )
+      return false;
     const pending: (readonly Value[])[] = [];
     for (const path of paths) {
       const walked = walk(path.value, root);
       if (walked.kind !== 'written' || walked.self.length) continue;
       if (walked.leaves.some((value) => callOutputs.has(value.id))) continue;
-      if (!walked.leaves.length) return false;
       pending.push([...walked.leaves, ...walked.constants]);
     }
     return pending.every((values) =>

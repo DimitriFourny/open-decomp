@@ -13,13 +13,13 @@ import {
   callerSites,
   classifyResultUse,
   resultRoots,
-  sitesOutward,
   type CallerSite,
   type ResultUse,
 } from '../../analysis/calls/caller-sites.js';
 import { Arm64Decoder } from '../../decoders/arm64/index.js';
 import { X86Decoder } from '../../decoders/x86_64/index.js';
 import type { CallerResultDemand, FunctionResultUse } from '../../reconstruction/source-model.js';
+import { nativeAddressKey, nativeCallIndex } from './calls.js';
 import type { PreparedNativeUnit } from './native-prepare.js';
 import type { SourceFactsInput } from './source-facts.js';
 
@@ -207,16 +207,15 @@ export function callerResultDemands(
  *     into another tail transfer (its callee may read it as an argument), more than
  *     `MAX_CONSENSUS_SITES` sites of one function or `MAX_CONSENSUS_TOTAL_SITES` in
  *     all abstain.
- * A refutation pass runs first: F's sites, and recursively those of the callers its
- * result is forwarded to, each in the order of a sweep outward from that function's
- * own entry (callers of a static function mostly lie near it). The first site that
- * fails (d) on its own (or a supplied signature or import stub on the way) abstains,
- * charging only the words each visited function's sweep covered up to its last
- * examined site (`callerSiteScanWork`; at most the whole index). Otherwise the export,
- * symbol and fixup tables are charged and an excluded visited entry abstains; only
- * then is the whole index charged. Every charge depends only on the image and F. The
- * windows are charged inside a quarter of the request's remaining work; an exhausted
- * share abstains. */
+ * An exported F abstains first (the native call index's export map). Then a
+ * refutation pass: one sweep outward from F's entry meets, nearest first, F's sites
+ * and those of every caller F's result is forwarded to once a forwarding site is met.
+ * The first site that fails (d) on its own (or a supplied signature or import stub on
+ * the way) abstains, charging only the words within that site's distance of F's entry
+ * (`callerSiteScanWork`). Otherwise the export, symbol and fixup tables are charged
+ * and an excluded visited entry abstains; only then is the whole index charged. Every
+ * charge depends only on the image and F. The windows are charged inside a quarter of
+ * the request's remaining work; an exhausted share abstains. */
 export function callerResultConsensus(
   input: SourceFactsInput,
   context: OperationContext,
@@ -247,6 +246,10 @@ export function callerResultConsensus(
   );
   const fn = index.functions_by_id.get(input.ir.id);
   if (fn?.entry.space !== 'va') return undefined;
+  // An exported entry abstains at once (the request already holds the native call
+  // index's export map).
+  const native = nativeCallIndex(image, input.functions, input.references, context);
+  if (native.exports_by_address.has(nativeAddressKey(fn.entry))) return undefined;
   const local = shareContext(context, share - indexWork);
   const decoder =
     image.target.architecture === 'arm64'
@@ -291,31 +294,55 @@ export function callerResultConsensus(
     );
   };
   try {
-    const swept = new Map<string, number>(),
-      visited = new Map<string, bigint>();
-    let examined = 0;
-    const refuted = (callee: FunctionRecord, depth: number): boolean => {
+    // One sweep outward from F's entry meets the sites of every function it has to
+    // follow, nearest first: the sites of F, then those of each caller F's result is
+    // forwarded to once a forwarding site is met.
+    const entry = fn.entry.value;
+    const distance = (address: bigint): bigint =>
+      address >= entry ? address + 4n - entry : entry - address;
+    const queue: { site: CallerSite; distance: bigint; owner: string; depth: number }[] = [];
+    const visited = new Map<string, bigint>(),
+      met = new Map<string, number>();
+    let radius: bigint = entry,
+      examined = 0;
+    // Whether following `callee` refutes at once; otherwise its sites join the queue.
+    const follow = (callee: FunctionRecord, depth: number): boolean => {
       if (visited.has(callee.id) || depth > MAX_CONSENSUS_DEPTH) return false;
       if (callee.entry.space !== 'va' || callee.signature !== null || callee.kind === 'import_stub')
         return true;
-      const start = callee.entry.value;
-      visited.set(callee.id, start);
-      const sweep = sitesOutward(callerSites(index, callee.entry, local).sites, start);
-      for (const [at, site] of sweep.entries()) {
-        swept.set(callee.id, callerSiteScanWork(index, start, site.address.value));
-        if (at === MAX_CONSENSUS_SITES || ++examined > MAX_CONSENSUS_TOTAL_SITES || fails(site))
-          return true;
-        if (classify(site).kind === 'forwarded' && refuted(site.caller!, depth + 1)) return true;
+      visited.set(callee.id, callee.entry.value);
+      for (const site of callerSites(index, callee.entry, local).sites) {
+        const item = { site, distance: distance(site.address.value), owner: callee.id, depth };
+        let low = 0,
+          high = queue.length;
+        while (low < high) {
+          const middle = (low + high) >> 1,
+            other = queue[middle]!;
+          if (
+            other.distance < item.distance ||
+            (other.distance === item.distance && other.site.address.value < site.address.value)
+          )
+            low = middle + 1;
+          else high = middle;
+        }
+        queue.splice(low, 0, item);
       }
       return false;
     };
-    if (refuted(fn, 0)) {
-      context.checkpoint(
-        Math.min(
-          indexWork,
-          [...swept.values()].reduce((sum, words) => sum + words, 0),
-        ),
-      );
+    let refuted = follow(fn, 0);
+    while (!refuted && queue.length) {
+      const { site, owner, depth } = queue.shift()!;
+      radius = site.address.value;
+      const count = (met.get(owner) ?? 0) + 1;
+      met.set(owner, count);
+      refuted =
+        count > MAX_CONSENSUS_SITES ||
+        ++examined > MAX_CONSENSUS_TOTAL_SITES ||
+        fails(site) ||
+        (classify(site).kind === 'forwarded' && follow(site.caller!, depth + 1));
+    }
+    if (refuted) {
+      context.checkpoint(callerSiteScanWork(index, entry, radius));
       return undefined;
     }
     // Entries a loader record makes reachable from outside the enumerated sites:

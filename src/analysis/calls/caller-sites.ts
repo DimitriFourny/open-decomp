@@ -200,26 +200,6 @@ export function callerSiteScanWork(index: CallerSiteIndex, from: bigint, to: big
   return words;
 }
 
-/** `sites` in the order a sweep outward from `from` meets them: nearest first, the
- * lower address first at equal distance. */
-export function sitesOutward(sites: readonly CallerSite[], from: bigint): CallerSite[] {
-  const distance = (site: CallerSite): bigint =>
-    site.address.value >= from ? site.address.value + 4n - from : from - site.address.value;
-  return [...sites].sort((a, b) => {
-    const left = distance(a),
-      right = distance(b);
-    return left !== right
-      ? left < right
-        ? -1
-        : 1
-      : a.address.value < b.address.value
-        ? -1
-        : a.address.value > b.address.value
-          ? 1
-          : 0;
-  });
-}
-
 /** Subtract sorted `holes` from sorted `ranges`. */
 function subtract(ranges: readonly ByteRange[], holes: readonly ByteRange[]): ByteRange[] {
   const result: ByteRange[] = [];

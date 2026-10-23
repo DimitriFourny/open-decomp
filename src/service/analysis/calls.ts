@@ -52,7 +52,8 @@ interface NativeCallIndex {
   readonly callers_by_target: ReadonlyMap<string, readonly ReferenceRecord[]>;
 }
 const nativeIndexes = new WeakMap<LoadedImage, NativeCallIndex>();
-const nativeAddressKey = (address: Address): string =>
+/** The `NativeCallIndex` map key of an address. */
+export const nativeAddressKey = (address: Address): string =>
   `${address.image_id}:${address.space}:${address.value}`;
 
 /** Index immutable native facts once (every operation using the index pays its build cost once,
