@@ -6,6 +6,7 @@ import {
   type Instruction,
   type IntegerOp,
   type Value,
+  bitWidth,
 } from '../ir/index.js';
 import type { BlockRegion } from '../presentation/index.js';
 import type { Reconstruction } from '../reconstruction/model.js';
@@ -31,6 +32,11 @@ export interface InlineSite {
    * `shared` (the local's next write follows every reader) or `sunk` (that write
    * is printed right after the reader that follows it). */
   readonly local?: 'shared' | 'sunk';
+  /** A load of an address range already accessed by a printed access that
+   * reaches it with no call, unknown effect, register write, fence or volatile
+   * access in between (the `nonfaulting_reload` premise): it cannot fault, so
+   * it may move to its reader across independent non-volatile loads. */
+  readonly nonfaulting?: boolean;
 }
 
 export type InlineCall = Extract<Instruction, { kind: 'call' }>;
@@ -62,6 +68,11 @@ const ENVIRONMENT_CASTS: Partial<Record<CastOp, true>> = {
   float_to_unsigned: true,
   float_convert: true,
 };
+
+/** Statements and predecessor hops scanned back from a reload for the access
+ * that proves it cannot fault: the proving access is usually a few statements
+ * earlier, and the bound keeps the scan's work linear in the reloads. */
+const RELOAD_REACH = 64;
 
 /** Binary operations cheap enough to repeat at their reader (with a constant operand). */
 const REPEATABLE_OPERATIONS: Partial<Record<IntegerOp, true>> = {
@@ -100,7 +111,10 @@ function environmental(expression: Expression): boolean {
  * unconditional same-block use and an unbroken effect path: every intervening
  * load must belong to their nested address/data dependency chain or read/write
  * a private local. Independent potentially faulting loads therefore never
- * become unsequenced C operands. Blocks in `omitted` are not printed (hidden
+ * become unsequenced C operands. A reload of an address range a printed access
+ * reached with no call, unknown effect or volatile access in between cannot
+ * fault, so it may also move across independent non-volatile loads (never
+ * across a store or call). Blocks in `omitted` are not printed (hidden
  * FP-environment guard failures); their reads are no uses. */
 export function planSourceInlining(
   program: Reconstruction,
@@ -491,6 +505,138 @@ export function planSourceInlining(
       }
     }
     if (ordered) result.set(node.result.id, { node, anchor: at.anchor });
+  }
+  // A reload cannot fault (the `nonfaulting_reload` premise): a printed
+  // non-volatile access to the same address, at least as wide, reaches it
+  // through its block and single-predecessor blocks with only assignments,
+  // register reads and non-volatile loads/stores in between. It may then move
+  // across independent non-volatile loads, never across a store or call: loads
+  // do not change memory, and the faults of the loads it crosses keep their
+  // order because it adds none. Program order, so an earlier moved reload is
+  // already placed when a later one names it as its access.
+  if (program.source) {
+    const source = program.source;
+    const keys = new Map<string, string | null>();
+    /** Structural identity of a pure inline address over immutable SSA leaves. */
+    const key = (value: Value, depth = 0): string | null => {
+      const known = keys.get(value.id);
+      if (known !== undefined) return known;
+      const expression = program.inline.has(value.id)
+        ? program.expressions.get(value.id)
+        : undefined;
+      let text: string | null = value.id;
+      if (expression && expression.kind !== 'indeterminate') {
+        if (depth > 16) return null;
+        const parts: string[] = [JSON.stringify(value.type)];
+        for (const [field, item] of Object.entries(expression)) {
+          const part = Array.isArray(item)
+            ? item.map((operand: Value) => key(operand, depth + 1))
+            : typeof item === 'object' && 'id' in item
+              ? key(item as Value, depth + 1)
+              : typeof item === 'bigint'
+                ? item.toString()
+                : JSON.stringify(item, (_, inner: unknown) =>
+                    typeof inner === 'bigint' ? inner.toString() : inner,
+                  );
+          if (part === null || (Array.isArray(part) && part.includes(null))) {
+            text = null;
+            break;
+          }
+          parts.push(`${field}=${Array.isArray(part) ? part.join(',') : part}`);
+        }
+        if (text !== null) text = `(${parts.join(';')})`;
+      }
+      keys.set(value.id, text);
+      return text;
+    };
+    const entry = program.function.entry;
+    let incoming: Map<string, string[]> | undefined;
+    /** Whether a printed access of `[address, address + bytes)` reaches `position`
+     * of `block` within the nearest RELOAD_REACH statements. */
+    const accessed = (block: BlockRegion, position: number, address: string, bytes: number) => {
+      if (!incoming) {
+        incoming = new Map([[entry, ['']]]);
+        for (const from of program.blocks.values())
+          for (const successor of successors(from))
+            incoming.set(successor, [...(incoming.get(successor) ?? []), from.id]);
+      }
+      let current = block,
+        end = position,
+        remaining = RELOAD_REACH;
+      for (;;) {
+        for (let p = end - 1; p >= 0; p--) {
+          if (--remaining < 0) return false;
+          const prior = current.statements[p]!;
+          if (prior.kind === 'assign' || prior.kind === 'read_register') continue;
+          context.checkpoint(1);
+          if (prior.kind !== 'load' && prior.kind !== 'store') return false;
+          if (prior.access.volatile) return false;
+          if (!program.retained.has(prior.id) || source.locals.has(prior.id)) continue;
+          const width = bitWidth(prior.kind === 'load' ? prior.result.type : prior.value.type);
+          if (width < bytes * 8 || key(prior.address) !== address) continue;
+          if (prior.kind === 'store' || !result.has(prior.result.id)) return true;
+          // An inlined load accesses at its reader, which must precede the reload.
+          const reader = destination(prior);
+          if (
+            reader &&
+            reader.at.block === current.id &&
+            (current !== block || reader.at.position < position)
+          )
+            return true;
+        }
+        const from = incoming.get(current.id) ?? [];
+        const previous = from.length === 1 ? program.blocks.get(from[0]!) : undefined;
+        if (
+          !previous ||
+          omitted.has(previous.id) ||
+          !['jump', 'if', 'switch'].includes(previous.control.kind) ||
+          --remaining < 0
+        )
+          return false;
+        current = previous;
+        end = current.statements.length;
+      }
+    };
+    for (const { block, position, node } of candidates) {
+      if (
+        node.kind !== 'load' ||
+        node.result.type.kind !== 'integer' ||
+        preserve(node.result) ||
+        program.inline.has(node.result.id) ||
+        result.has(node.result.id) ||
+        uses.get(node.result.id)?.count !== 1 ||
+        node.access.volatile ||
+        source.locals.has(node.id) ||
+        ![8, 16, 32, 64].includes(node.result.type.bits)
+      )
+        continue;
+      const target = destination(node);
+      if (!target) continue;
+      const { at, nested } = target;
+      if (at.block !== block.id || at.position <= position || at.conditional || at.transfer)
+        continue;
+      let ordered = true;
+      for (let p = position + 1; ordered && p < at.position; p++) {
+        const between = block.statements[p]!;
+        ordered =
+          !(
+            program.retained.has(between.id) &&
+            between.kind !== 'assign' &&
+            !nested.has(between.id) &&
+            !(
+              (between.kind === 'load' || between.kind === 'store') &&
+              source.locals.has(between.id)
+            ) &&
+            !(between.kind === 'load' && !between.access.volatile)
+          ) &&
+          !source.definitions
+            ?.get(between.id)
+            ?.some((definition) => !result.has(definition.result.id));
+      }
+      const address = ordered ? key(node.address) : null;
+      if (address !== null && accessed(block, position, address, node.result.type.bits / 8))
+        result.set(node.result.id, { node, anchor: at.anchor, nonfaulting: true });
+    }
   }
   // The idiom `t = L; L = f(t); ...; reader(t)` (post-increment) and its
   // reversed order: a load of a private local read by exactly the next write to

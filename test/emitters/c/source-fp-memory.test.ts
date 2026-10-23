@@ -38,7 +38,7 @@ function pointers(abi: AbiProfile, block: BlockBuilder): [Value, Value] {
   return [read(0), read(1)];
 }
 
-/** `q[0] = -p[1]` over IEEE words that the IR moves as integer bits. With
+/** `q[0] = -p[0]` over IEEE words that the IR moves as integer bits. With
  * `mixed`, the loaded word also feeds an integer addition stored to `q[1]`,
  * and the negation is returned. */
 function negate(abi: AbiProfile, bits: 32 | 64, mixed: boolean) {
@@ -47,7 +47,7 @@ function negate(abi: AbiProfile, bits: 32 | 64, mixed: boolean) {
   const b = builder(`fp-memory-${abi.id}-${bits}-${mixed}`),
     block = b.block('entry');
   const [source, destination] = pointers(abi, block);
-  const loaded = block.load(word, block.int('add', source, block.constant(i64, BigInt(bits / 8))));
+  const loaded = block.load(word, source);
   const negative = block.assign(fp, {
     kind: 'float_unary',
     op: 'neg',
@@ -109,7 +109,7 @@ for (const abi of [sysvAMD64Abi, darwinArm64Abi])
           bits === 32 ? 0x3fc00000n : 0x3ff8000000000000n,
         ]) {
           const memory = new Map([
-            ...bytes(0x2000n + BigInt(bits / 8), value, bits / 8),
+            ...bytes(0x2000n, value, bits / 8),
             ...bytes(0x3000n, 0n, bits / 8),
           ]);
           const observed = execute(
@@ -151,7 +151,7 @@ for (const bits of [32, 64] as const)
       const [p, q] = emittedFormals(emission);
       for (const value of [0n, sign | 5n, (1n << BigInt(bits)) - 1n]) {
         const memory = new Map([
-          ...bytes(0x2000n + BigInt(bits / 8), value, bits / 8),
+          ...bytes(0x2000n, value, bits / 8),
           ...bytes(0x3000n, 0n, bits / 4),
         ]);
         const observed = execute(

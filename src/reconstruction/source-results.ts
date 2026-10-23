@@ -27,7 +27,10 @@ type RegisterLocation = Extract<AbiLocation, { kind: 'register' }>;
  * the rule that makes the function void-like: `incidental_result` when the
  * integer register qualifies, but no exit path establishes it deliberately,
  * no caller demands it and the FP carrier is unchanged, undefined or
- * incidental on every exit; the register stays in exit metadata).
+ * incidental on every exit; the register stays in exit metadata;
+ * `caller_consensus`, set by the planner over any selection here, tail
+ * transfers included, when no caller in the closed image observes a result
+ * register).
  * `incidental_floating` explains why the untyped FP carrier holds only a
  * vector copy or fill temporary and is no result (an `incidental_result`
  * premise of its own). Null means no decision: the caller's existing
@@ -40,13 +43,28 @@ export type SourcePrimaryResult =
       readonly rejected: string;
       readonly untyped?: true;
     }
-  | { readonly kind: 'integer'; readonly reason?: string; readonly incidental_floating?: string }
+  | {
+      readonly kind: 'integer';
+      readonly reason?: string;
+      readonly incidental_floating?: string;
+      readonly floating_inert?: true;
+      /** Whether the integer result register may be incidental on every return exit
+       * path (`incidentalPaths`): only then can every caller ignore a result of this
+       * function's own, so only then is caller consensus worth its image sweep. */
+      readonly incidental_paths?: () => boolean;
+    }
   | {
       readonly kind: 'explicit' | 'none';
       readonly written: boolean;
       readonly reason: string;
-      readonly void_like?: 'incidental_result' | 'indirect_result';
+      readonly void_like?: 'incidental_result' | 'indirect_result' | 'caller_consensus';
       readonly incidental_floating?: string;
+      /** `integer` and `none`: the FP carrier is unchanged or undefined (unknown entry
+       * value or unprojected call clobber) on every exit, so it carries no result of
+       * this function's own. */
+      readonly floating_inert?: true;
+      /** `none` without a void-like rule: as for `integer`. */
+      readonly incidental_paths?: () => boolean;
     };
 
 type ExitState =
@@ -637,6 +655,38 @@ export function selectSourcePrimaryResult(
     storedData = values;
     return storedData;
   };
+  // Whether the integer result register may be incidental on every return exit path:
+  // each path holds its unchanged entry value, a call output, or a value the function
+  // also stores or observes otherwise (an address, call argument or branch operand).
+  // A path that computes a value consumed only by exits (a literal, arithmetic, a load
+  // or another argument copied into the register) returns it deliberately; a literal
+  // the function also stores (`*rc = 7; return;` keeping it) does not. Literal path
+  // roots decide first, before any slice walk; the whole-body pass over observed
+  // values runs last.
+  const incidentalPaths = (): boolean => {
+    const root = input.integer.register.root;
+    const paths = exits.flatMap((block) => {
+      const cell = exitValue(block, input.integer);
+      return cell ? exitPaths(cell, block.id) : [];
+    });
+    if (
+      paths.some(
+        (path) =>
+          expressions.get(path.value.id)?.kind === 'constant' && !storedValues().has(path.value.id),
+      )
+    )
+      return false;
+    const pending: (readonly Value[])[] = [];
+    for (const path of paths) {
+      const walked = walk(path.value, root);
+      if (walked.kind !== 'written' || walked.self.length) continue;
+      if (walked.leaves.some((value) => callOutputs.has(value.id))) continue;
+      pending.push([...walked.leaves, ...walked.constants]);
+    }
+    return pending.every((values) =>
+      values.some((value) => storedValues().has(value.id) || observedElsewhere(value)),
+    );
+  };
   // Reason the FP result register is an incidental vector copy or fill
   // temporary, or undefined. Callers must not demand it; on every exit, each
   // slice leaf of every FP-root cell is the datum of a >=128-bit store, a
@@ -828,6 +878,11 @@ export function selectSourcePrimaryResult(
       : item?.kind === 'unchanged'
         ? 'holds the unchanged entry value of a non-argument register on some exit'
         : 'is undefined on some exit (unknown entry value or unprojected call clobber)';
+  const inert: { floating_inert?: true } = floatingStates.every(
+    (item) => item.kind === 'unchanged' || item.kind === 'undefined',
+  )
+    ? { floating_inert: true }
+    : {};
   const integerName = input.integer.register.root,
     floatingName = input.floating.register.root;
   let choice: 'float' | 'integer' | undefined,
@@ -943,12 +998,14 @@ export function selectSourcePrimaryResult(
           void_like: 'incidental_result',
           ...floating,
         }
-      : { kind: 'integer', ...floating };
+      : { kind: 'integer', ...floating, ...inert, incidental_paths: incidentalPaths };
   } else
     return {
       kind: 'none',
       written,
       reason: `neither ${integerName} nor typed ${floatingName} is defined by this function on every exit`,
+      ...inert,
+      incidental_paths: incidentalPaths,
     };
   return choice === 'float'
     ? {
@@ -957,5 +1014,9 @@ export function selectSourcePrimaryResult(
         type: floatingType!,
         rejected: evidence,
       }
-    : { kind: 'integer', reason: `${floatingName} also qualifies; ${evidence}` };
+    : {
+        kind: 'integer',
+        reason: `${floatingName} also qualifies; ${evidence}`,
+        incidental_paths: incidentalPaths,
+      };
 }

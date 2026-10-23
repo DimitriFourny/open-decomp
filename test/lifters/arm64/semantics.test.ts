@@ -460,3 +460,148 @@ test('FP/GPR bit moves and precision conversions work with field-only decoder op
     floatBits(-17, 64),
   );
 });
+
+// ST1/LD1 (single structure) with one lane. word = Q, L, opcode, S, size, Rn, Rt
+// as in the A64 encoding; post-index adds bit 23 and Rm (31 = immediate).
+const singleLane = (
+  load: boolean,
+  q: number,
+  opcode: number,
+  s: number,
+  size: number,
+  rn: number,
+  rt: number,
+  post: number | null,
+): number =>
+  (0x0d000000 |
+    (q << 30) |
+    (post === null ? 0 : 0x800000 | (post << 16)) |
+    ((load ? 1 : 0) << 22) |
+    (opcode << 13) |
+    (s << 12) |
+    (size << 10) |
+    (rn << 5) |
+    rt) >>>
+  0;
+// Element size to its lane count and the (opcode, S, size, Q) fields of a lane index.
+const laneFields = (esize: number, index: number) =>
+  esize === 8
+    ? { opcode: 0, s: (index >> 2) & 1, size: index & 3, q: index >> 3 }
+    : esize === 16
+      ? { opcode: 2, s: (index >> 1) & 1, size: (index & 1) << 1, q: index >> 2 }
+      : esize === 32
+        ? { opcode: 4, s: index & 1, size: 0, q: index >> 1 }
+        : { opcode: 4, s: 0, size: 1, q: index };
+const laneCases = [8, 16, 32, 64].flatMap((esize) =>
+  [0, 1, 128 / esize - 1].map((index) => ({ esize, index })),
+);
+const vectorPattern = 0x0f1e2d3c4b5a6978_8796a5b4c3d2e1f0n;
+const patternByte = (n: number): bigint => BigInt(0xa0 + n);
+type LaneForm = { name: string; post: number | null; rn: number; step: (esize: number) => bigint };
+const laneForms: readonly LaneForm[] = [
+  { name: 'no writeback', post: null, rn: 3, step: () => 0n },
+  { name: 'immediate post-index', post: 31, rn: 3, step: (esize) => BigInt(esize / 8) },
+  { name: 'register post-index', post: 2, rn: 3, step: () => 0x28n },
+  { name: 'SP base, immediate post-index', post: 31, rn: 31, step: (esize) => BigInt(esize / 8) },
+  { name: 'SP base, register post-index', post: 2, rn: 31, step: () => 0x28n },
+  { name: 'SP base, no writeback', post: null, rn: 31, step: () => 0n },
+];
+
+test('ST1 single lane stores exactly the little-endian lane and applies the post-index writeback', () => {
+  for (const { name, post, rn, step } of laneForms)
+    for (const { esize, index } of laneCases) {
+      const { opcode, s, size, q } = laneFields(esize, index);
+      const word = singleLane(false, q, opcode, s, size, rn, 5, post);
+      const graph = fromWords([word, ret]);
+      const payload = graph.instructions[0]!.payload!;
+      if (payload.architecture !== 'arm64') assert.fail('Expected ARM64');
+      assert.match(payload.canonical_encoding, /^ST1_asisdlsop?_/, name);
+      const lifted = lift(graph);
+      assert.equal(lifted.coverage.state, 'complete', `${name} ${esize}[${index}]`);
+      verifyIR(lifted.ir);
+      const memory = new OracleMemory([{ base: data, bytes: new Uint8Array(128), writable: true }]);
+      for (let n = 0; n < 128; n++) memory.write(data + BigInt(n), 8, patternByte(n % 64));
+      const address = data + 0x10n,
+        registers = new Map<string, bigint>([
+          [rn === 31 ? 'arm64:sp' : 'arm64:x3', address],
+          ['arm64:v5', vectorPattern],
+        ]);
+      if (post !== null && post !== 31) registers.set('arm64:x2', 0x28n);
+      const observed = evaluate(lifted.ir, registers, { memory: memory.snapshot() });
+      assert.equal(observed.status, 'returned', `${name} ${esize}[${index}]`);
+      const lane = (vectorPattern >> BigInt(index * esize)) & ((1n << BigInt(esize)) - 1n);
+      const after = new OracleMemory(observed.memory);
+      for (let n = 0; n < 128; n++) {
+        const at = BigInt(n) - 0x10n,
+          inLane = at >= 0n && at < BigInt(esize / 8);
+        const expected = inLane ? (lane >> (at * 8n)) & 0xffn : patternByte(n % 64);
+        assert.equal(after.read(data + BigInt(n), 8), expected, `${name} ${esize}[${index}] @${n}`);
+      }
+      assert.equal(
+        registerBits(observed, rn === 31 ? 'arm64:sp' : 'arm64:x3'),
+        address + step(esize),
+        `${name} ${esize}[${index}] base`,
+      );
+      assert.equal(
+        registerBits(observed, 'arm64:v5', 128),
+        vectorPattern,
+        'the vector is unchanged',
+      );
+    }
+});
+
+test('LD1 single lane replaces only that lane of V[t] and applies the post-index writeback', () => {
+  for (const { name, post, rn, step } of laneForms)
+    for (const { esize, index } of laneCases) {
+      const { opcode, s, size, q } = laneFields(esize, index);
+      const word = singleLane(true, q, opcode, s, size, rn, 6, post);
+      const graph = fromWords([word, ret]);
+      const payload = graph.instructions[0]!.payload!;
+      if (payload.architecture !== 'arm64') assert.fail('Expected ARM64');
+      assert.match(payload.canonical_encoding, /^LD1_asisdlsop?_/, name);
+      const lifted = lift(graph);
+      assert.equal(lifted.coverage.state, 'complete', `${name} ${esize}[${index}]`);
+      verifyIR(lifted.ir);
+      const memory = new OracleMemory([{ base: data, bytes: new Uint8Array(64), writable: true }]);
+      for (let n = 0; n < 64; n++) memory.write(data + BigInt(n), 8, patternByte(n));
+      const address = data + 0x10n,
+        registers = new Map<string, bigint>([
+          [rn === 31 ? 'arm64:sp' : 'arm64:x3', address],
+          ['arm64:v6', vectorPattern],
+        ]);
+      if (post !== null && post !== 31) registers.set('arm64:x2', 0x28n);
+      const observed = evaluate(lifted.ir, registers, { memory: memory.snapshot() });
+      assert.equal(observed.status, 'returned', `${name} ${esize}[${index}]`);
+      let loaded = 0n;
+      for (let n = esize / 8 - 1; n >= 0; n--) loaded = (loaded << 8n) | patternByte(0x10 + n);
+      const lane = ((1n << BigInt(esize)) - 1n) << BigInt(index * esize);
+      assert.equal(
+        registerBits(observed, 'arm64:v6', 128),
+        (vectorPattern & ~lane) | (loaded << BigInt(index * esize)),
+        `${name} ${esize}[${index}]`,
+      );
+      assert.equal(
+        registerBits(observed, rn === 31 ? 'arm64:sp' : 'arm64:x3'),
+        address + step(esize),
+        `${name} ${esize}[${index}] base`,
+      );
+      assert.deepEqual(observed.memory, memory.snapshot(), 'a load never writes memory');
+    }
+});
+
+test('single-lane SIMD memory forms are lifted from canonical fields, other structure forms stay unknown', () => {
+  // ld1 {v0.4s}, [x0]; st1 {v0.16b, v1.16b}, [x0], #32; ld1r {v0.4s}, [x0]; st2 {v0.s, v1.s}[1], [x0]
+  for (const word of [0x4c407800, 0x4c9faa00, 0x4d40c800, 0x4d208000]) {
+    const graph = fromWords([word, ret]);
+    const payload = graph.instructions[0]!.payload!;
+    if (payload.architecture !== 'arm64') assert.fail('Expected ARM64');
+    const lifted = lift(graph);
+    assert.equal(lifted.coverage.state, 'partial', payload.canonical_encoding);
+    assert.ok(
+      lifted.ir.blocks.some((block) =>
+        block.instructions.some((node) => node.kind === 'unknown_effect'),
+      ),
+      payload.canonical_encoding,
+    );
+  }
+});

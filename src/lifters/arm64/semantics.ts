@@ -55,25 +55,74 @@ export function stateRegister(name: 'nzcv' | 'fpsr' | 'fpcr'): RegisterDescripto
     write_rule: 'replace_root',
   };
 }
+const vectorRoots: readonly RegisterDescriptor[] = Array.from(
+  { length: 32 },
+  (_, n): RegisterDescriptor => ({
+    id: `arm64:v${n}`,
+    root: `arm64:v${n}`,
+    bank: 'vector',
+    offset_bits: 0,
+    width_bits: 128,
+    root_width_bits: 128,
+    role: 'general',
+    write_rule: 'replace_root',
+  }),
+);
 export const unknownClobbers: CallClobbers = {
   registers: [
     ...Array.from({ length: 31 }, (_, n) => gp(n)),
     gp(31, 64, true),
-    ...Array.from({ length: 32 }, (_, n): RegisterDescriptor => ({
-      id: `arm64:v${n}`,
-      root: `arm64:v${n}`,
-      bank: 'vector',
-      offset_bits: 0,
-      width_bits: 128,
-      root_width_bits: 128,
-      role: 'general',
-      write_rule: 'replace_root',
-    })),
+    ...vectorRoots,
     stateRegister('fpcr'),
   ],
   flags: [stateRegister('nzcv'), stateRegister('fpsr')],
   memory: 'unknown_read_write',
 };
+/**
+ * ISA bound of an unlifted A64 "Data Processing - Scalar Floating-Point and
+ * Advanced SIMD" or Cryptographic encoding, derived from its decoded class
+ * (`asimd*`, `asisd*`, `float*`, `crypto*`; `asisdls*` are the SIMD loads and
+ * stores): it accesses no memory, never names SP (register 31 is ZR), reads
+ * FPCR without writing it, and writes only V registers, GP Rd in the
+ * to-general forms, NZCV (FCMP/FCCMP) and FPSR. Forms that read a
+ * general-purpose register (INS/DUP from general, the to-FP conversions and
+ * moves) stay unbounded: the IR records no data dependence from an effect's
+ * inputs to its outputs, so a frame address read from Rn could not be
+ * followed. Bounded effects therefore read only V, FPCR, NZCV and FPSR.
+ */
+export function boundedUnknownClobbers(payload: Arm64Payload): CallClobbers | undefined {
+  const parts = payload.canonical_encoding.split('_'),
+    name = parts[0]!;
+  const simd = parts
+    .slice(1)
+    .some(
+      (part) =>
+        (part.startsWith('asimd') ||
+          part.startsWith('asisd') ||
+          part.startsWith('float') ||
+          part.startsWith('crypto')) &&
+        !part.startsWith('asisdls'),
+    );
+  if (!simd) return undefined;
+  const conversion = parts.includes('float2int') || parts.includes('float2fix'),
+    opcode = payload.fields.opcode;
+  // float2int/float2fix opcodes 010, 011 (SCVTF/UCVTF) and 111 (FMOV from
+  // general) read Rn as a general-purpose register.
+  if (conversion && (opcode === undefined || opcode === 2n || opcode === 3n || opcode === 7n))
+    return undefined;
+  if (
+    payload.canonical_encoding === 'INS_asimdins_IR_r' ||
+    payload.canonical_encoding === 'DUP_asimdins_DR_r'
+  )
+    return undefined;
+  const registers: RegisterDescriptor[] = [...vectorRoots];
+  if (conversion || ((name === 'UMOV' || name === 'SMOV') && parts.includes('asimdins'))) {
+    const rd = payload.fields.Rd;
+    if (rd === undefined || rd < 0n || rd > 31n) return undefined;
+    if (rd !== 31n) registers.push(gp(Number(rd)));
+  }
+  return { registers, flags: [stateRegister('nzcv'), stateRegister('fpsr')], memory: 'none' };
+}
 const mask = (bits: number): bigint => (1n << BigInt(bits)) - 1n;
 const rotate = (v: bigint, r: number, bits: number): bigint =>
   ((v >> BigInt(r)) | (v << BigInt(bits - r))) & mask(bits);
@@ -485,7 +534,7 @@ export class ArmSemantics {
       );
       return true;
     }
-    if (this.memory()) return true;
+    if (this.memory() || this.laneMemory()) return true;
     return this.simd();
   }
 
@@ -507,6 +556,60 @@ export class ArmSemantics {
     this.report(
       'Pointer authentication is abstracted to logical pointers: PAC bits, key/modifier checks, failure poisoning and authentication traps are not modeled.',
     );
+  }
+
+  /**
+   * ST1/LD1 single structure, one lane (`asisdlso`, `asisdlsop`). The decoder
+   * supplies these operands as opaque text, so the canonical fields define
+   * everything: element size and lane index from opcode/size/S/Q, the base
+   * (SP for Rn=31), and for the post-indexed form the writeback amount, the
+   * element size in bytes for Rm=31 or X[Rm]. ST1 stores the little-endian lane
+   * of V[Rt]; LD1 replaces only that lane. Multi-register forms (`asisdlse`,
+   * `asisdlsep`) and the replicating LD1R are not matched.
+   */
+  laneMemory(): boolean {
+    const { b, p, name } = this;
+    const match = /^(ST1|LD1)_asisdlso(p?)_[BHSD]X?1_/.exec(p.canonical_encoding);
+    if (!match || name !== match[1]) return false;
+    const post = match[2] === 'p',
+      load = name === 'LD1';
+    if (this.field('R') !== 0) throw new Unsupported('Unrecognized single-lane SIMD form');
+    const opcode = this.field('opcode'),
+      size = this.field('size'),
+      s = this.field('S'),
+      q = this.field('Q');
+    let esize: number, index: number;
+    if (opcode === 0) {
+      esize = 8;
+      index = (q << 3) | (s << 2) | size;
+    } else if (opcode === 2 && (size & 1) === 0) {
+      esize = 16;
+      index = (q << 2) | (s << 1) | (size >> 1);
+    } else if (opcode === 4 && size === 0) {
+      esize = 32;
+      index = (q << 1) | s;
+    } else if (opcode === 4 && size === 1 && s === 0) {
+      esize = 64;
+      index = q;
+    } else throw new Unsupported('Reserved single-lane SIMD element size');
+    const vector = this.vectorRegister(this.field('Rt'), 128),
+      baseRegister = gp(this.field('Rn'), 64, true),
+      base = b.readRegister(baseRegister);
+    // Read X[Rm] before any write; Rm=31 selects the immediate increment.
+    let step: Value | null = null;
+    if (post) {
+      const rm = this.field('Rm');
+      step = rm === 31 ? this.constant(64, esize / 8) : b.readRegister(gp(rm, 64));
+    }
+    if (load) {
+      const element = b.load(integer(esize), base);
+      b.writeRegister(
+        vector,
+        b.insert(b.readRegister(vector, integer(128)), element, index * esize),
+      );
+    } else b.store(base, b.extract(b.readRegister(vector, integer(128)), index * esize, esize));
+    if (step) b.writeRegister(baseRegister, b.int('add', base, step));
+    return true;
   }
 
   memory(): boolean {
@@ -747,6 +850,24 @@ export class ArmSemantics {
           vector(integer(lane), width / lane),
           Array.from({ length: width / lane }, () => source),
         ),
+      );
+      return true;
+    }
+    if (p.canonical_encoding === 'INS_asimdins_IR_r') {
+      // Insert the low element-size bits of a general register into one lane;
+      // every other bit of the 128-bit register is kept. The element size is
+      // the position of the lowest set bit of imm5, the lane index the bits
+      // above it.
+      const imm5 = this.field('imm5');
+      const size = imm5 & 15 ? 31 - Math.clz32(imm5 & -imm5) : -1;
+      if (size < 0 || size > 3) throw new Unsupported('Reserved SIMD INS arrangement');
+      const index = imm5 >> (size + 1),
+        lane = 8 << size;
+      const destination = this.vectorRegister(this.field('Rd'), 128);
+      const source = this.resize(b.readRegister(gp(this.field('Rn'), lane === 64 ? 64 : 32)), lane);
+      b.writeRegister(
+        destination,
+        b.insert(b.readRegister(destination, integer(128)), source, index * lane),
       );
       return true;
     }

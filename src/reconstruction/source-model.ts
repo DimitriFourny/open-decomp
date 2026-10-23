@@ -104,6 +104,10 @@ export interface InferredCallee {
   readonly context_assumptions?: NativeContext;
   /** Preconditions of these observations; absent means no inferred FP condition. */
   readonly requirements?: readonly 'fp_environment'[];
+  /** The callee may return with a changed FP control state: it writes it on a
+   * path to a return or tail exit (an explicit write, an opaque effect, a writer
+   * import or a writer callee). Its caller keeps its environment guards. */
+  readonly fp_environment_writer?: true;
   readonly evidence_ids: readonly string[];
 }
 export interface SourceAddress {
@@ -111,6 +115,24 @@ export interface SourceAddress {
   readonly name?: string;
   /** Evidence-backed C spelling of a native symbol; asserted names stay verbatim. */
   readonly source_name?: string;
+  /** No symbol or data record covers the address: the nearest preceding object
+   * symbol of the same section starts `offset` bytes before it, and no other
+   * symbol or data record starts in between. Naming only (`sqlite3Config+0x80`):
+   * the symbol's extent stays unknown and no type or layout is claimed. */
+  readonly symbol_relative?: {
+    readonly symbol_id: string;
+    /** Native name of the preceding symbol. */
+    readonly name: string;
+    /** C spelling of `name`; asserted names stay verbatim. */
+    readonly source_name?: string;
+    readonly offset: bigint;
+    /** The preceding symbol's records; they evidence only a printed relative name. */
+    readonly evidence_ids: readonly string[];
+  };
+  /** The loader binds this pointer slot to an imported symbol (C spelling), but the
+   * slot lies in writable program data: that is its value at load time only, since
+   * program code may rewrite it. A read stays a read of the slot. */
+  readonly initial_import?: string;
   /** Exact immutable image bytes, free of relocation slots and possible local writes. */
   readonly constant_bytes?: readonly number[];
   /** Only immutable, terminated strings with exact image/address provenance. */
@@ -146,10 +168,13 @@ export interface SourceAddress {
     readonly kind: 'bytes' | 'jump_table' | 'literal_pool' | 'unknown';
     readonly evidence_ids: readonly string[];
   };
-  /** The address is the loader-bound slot of an imported symbol (Mach-O bind/GOT,
-   * ELF GLOB_DAT, PE IAT). The dynamic linker alone writes it: an exact
-   * pointer-width read yields the imported symbol's address, so one more
-   * dereference reaches the imported object. Type and extent stay unknown. */
+  /** The address is the loader-bound slot of an imported symbol in storage only the
+   * loader writes: a Mach-O non-lazy pointer section (`__got`, `__auth_got`) or a
+   * segment read-only after fixups (`__DATA_CONST`, `SG_READ_ONLY`), an ELF
+   * `PT_GNU_RELRO` range, the PE IAT, or a mapping without write permission. The
+   * dynamic linker alone writes it: an exact pointer-width read yields the imported
+   * symbol's address, so one more dereference reaches the imported object. Type
+   * and extent stay unknown. A bind in writable program data is `initial_import`. */
   readonly import?: {
     readonly id: string;
     /** Native linkage name of the symbol as the loader recorded it. */
@@ -204,6 +229,20 @@ export interface SourceEvidence {
    * Charged to `context`; undefined when the scan abstains or finds no caller
    * that reads a result register. Never evidence of non-consumption. */
   readonly caller_result_demands?: (context: OperationContext) => CallerResultDemand | undefined;
+  /** Source view: closed-world caller consensus (premise `caller_consensus`): the
+   * function is not exported, no fixup targets its entry, no instruction
+   * materializes it, every direct transfer to it is enumerated, and after each one
+   * the integer result register (and the FP one when `floating`) is overwritten
+   * before any read, or reaches only the returns of callers with the same
+   * consensus. Computed only when the planner asks; `candidate` (the planner's
+   * test whether the result may be incidental on every exit path) runs after the
+   * free checks (an exported entry abstains first) and before any caller is
+   * swept; charged to `context`; undefined when any step abstains. */
+  readonly function_result_use?: (
+    context: OperationContext,
+    floating: boolean,
+    candidate: () => boolean,
+  ) => FunctionResultUse | undefined;
   /** Actual proven written result storage, not an inferred author aggregate. */
   readonly function_returns?: {
     readonly registers: readonly RegisterDescriptor[];
@@ -216,6 +255,12 @@ export interface SourceEvidence {
 export interface CallerResultDemand {
   readonly registers: readonly RegisterDescriptor[];
   /** The call instructions whose callers read `registers`. */
+  readonly sites: readonly Address[];
+}
+/** Every direct transfer to the function in the closed image ignores its result. */
+export interface FunctionResultUse {
+  readonly consensus: 'ignored';
+  /** The function's direct call and tail sites. */
   readonly sites: readonly Address[];
 }
 /** Objective-C message form of a call whose selector is statically resolved.
@@ -427,12 +472,16 @@ export interface SourcePresentation {
    * `incidental_result`: the integer result register is established on no exit
    * path and the FP carrier is unchanged or undefined on every exit;
    * `indirect_result`: the function returns through its incoming indirect
-   * result location. Computed primary exit slices are then ABI scratch, kept
-   * in exit metadata. */
-  readonly void_like_result?: 'incidental_result' | 'indirect_result';
+   * result location; `caller_consensus`: no caller in the closed image observes
+   * a result register (`function_result_use`). Computed primary exit slices are
+   * then ABI scratch, kept in exit metadata. */
+  readonly void_like_result?: 'incidental_result' | 'indirect_result' | 'caller_consensus';
   readonly field_subjects?: ReadonlyMap<string, readonly string[]>;
   /** Localized preconditions and residual sites; never a blanket CFG assumption. */
   readonly requirements?: readonly Requirement[];
+  /** Calls whose callee summary is an FP environment writer
+   * (`InferredCallee.fp_environment_writer`): their caller keeps its guards. */
+  readonly fp_environment_writers?: ReadonlySet<string>;
   readonly locals: ReadonlyMap<string, SourceLocal>;
   readonly stack: SourceStackStorage | null;
   /** Source view (S4): the incoming object, when its struct formal is presented. */

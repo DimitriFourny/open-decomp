@@ -1,6 +1,8 @@
 import type { OperationContext } from '../core/index.js';
 import type { StackFact, StackRecoveryResult } from '../analysis/stack/index.js';
 import { bitWidth, type Value } from '../ir/index.js';
+import type { BlockRegion } from '../presentation/index.js';
+import { identityOperand } from './expressions.js';
 
 export interface StackArgumentPart {
   readonly value: Value;
@@ -30,6 +32,65 @@ export interface StackArgumentJoins {
   /** The bits of a value defined as a constant (rematerialized constants are
    * distinct SSA values with equal bits). */
   readonly constant: (value: Value) => bigint | undefined;
+}
+
+/** The block-join facts of a source body's regions: each statement's block,
+ * every block's incoming edges with their parameter copies, and the concat,
+ * identity-move and constant definitions of its assignments. The entry block
+ * has no join. */
+export function createStackArgumentJoins(
+  blocks: ReadonlyMap<string, BlockRegion>,
+  entry: string,
+): StackArgumentJoins {
+  const statementBlocks = new Map<string, string>(),
+    concats = new Map<string, readonly Value[]>(),
+    aliases = new Map<string, Value>(),
+    constants = new Map<string, bigint>(),
+    incomingEdges = new Map<
+      string,
+      { exit: string; copies: readonly { destination: Value; source: Value }[] }[]
+    >();
+  for (const block of blocks.values()) {
+    for (const node of block.statements) {
+      statementBlocks.set(node.id, block.id);
+      if (node.kind !== 'assign') continue;
+      if (node.expression.kind === 'constant') constants.set(node.result.id, node.expression.bits);
+      if (node.expression.kind === 'concat') concats.set(node.result.id, node.expression.values);
+      const alias = identityOperand(node.result.type, node.expression);
+      if (alias) aliases.set(node.result.id, alias);
+    }
+    const control = block.control;
+    const outgoing =
+      control.kind === 'jump'
+        ? [control.transfer]
+        : control.kind === 'if'
+          ? [control.when_true.transfer, control.when_false.transfer]
+          : control.kind === 'switch'
+            ? [...control.cases.map((item) => item.arm.transfer), control.otherwise.transfer]
+            : [];
+    for (const transfer of outgoing) {
+      const edges = incomingEdges.get(transfer.target) ?? [];
+      edges.push({ exit: control.id, copies: transfer.copies });
+      incomingEdges.set(transfer.target, edges);
+    }
+  }
+  return {
+    block(boundary) {
+      const block = blocks.get(statementBlocks.get(boundary) ?? '');
+      if (!block || block.id === entry) return undefined;
+      const index = block.statements.findIndex((node) => node.id === boundary);
+      return {
+        statements: block.statements.slice(0, index + 1).map((node) => ({
+          id: node.id,
+          pure: node.kind !== 'store' && node.kind !== 'call' && node.kind !== 'unknown_effect',
+        })),
+        incoming: incomingEdges.get(block.id) ?? [],
+      };
+    },
+    concat: (value) => concats.get(value.id),
+    alias: (value) => aliases.get(value.id),
+    constant: (value) => constants.get(value.id),
+  };
 }
 
 /** Recover existing stored SSA values, never add an observable memory load or

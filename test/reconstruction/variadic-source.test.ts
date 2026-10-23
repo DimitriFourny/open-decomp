@@ -610,3 +610,184 @@ for (const { abi, ir: build } of variadicCases) {
     }
   });
 }
+
+/** Darwin arm64 callers of a published variadic `uint64_t sum(uint32_t count,
+ * ...)` (a stub at 0x2000) that store one anonymous argument to the outgoing
+ * slot at SP+0 of a 16-byte area:
+ * - `tail`: the call, the epilogue restoring SP, then a tail branch to 0x3000;
+ * - `later_call`: a second, unknown callee (0x4000) at the same SP after it;
+ * - `joined`: the slot written on two branches (`a + 1` or `b ^ 5`, values no
+ *   register carries to the join) before the call in the join block;
+ * - `carried`: as `joined`, with each branch also moving its value to x8,
+ *   which the join returns (an existing block parameter carries it);
+ * - `one_edge`: as `joined`, but only the `flag != 0` branch writes the slot. */
+function darwinVariadicCaller(variant: 'tail' | 'later_call' | 'joined' | 'carried' | 'one_edge') {
+  const abi = darwinArm64Abi;
+  const [x0, x1, x2, x3] = [0, 1, 2, 3].map((index) => location(abi, index)) as [
+    RegisterDescriptor,
+    RegisterDescriptor,
+    RegisterDescriptor,
+    RegisterDescriptor,
+  ];
+  const x8 = abi.unknown_call_clobbers.registers.find(
+    (register) => register.root === 'arm64:x8' && register.width_bits === 64,
+  )!;
+  const direct = (value: bigint) => ({
+    kind: 'direct' as const,
+    address: { image_id: image, space: 'va' as const, value },
+  });
+  const clobbers = {
+    registers: [x0],
+    flags: [],
+    memory: 'unknown_read_write' as const,
+  };
+  const b = builder(`darwin-variadic-caller-${variant}`),
+    entry = b.block('entry');
+  const sp = entry.readRegister(abi.stack_pointer),
+    a = entry.readRegister(x1),
+    other = entry.readRegister(x2),
+    flag = entry.readRegister(x3);
+  entry.readRegister(x0);
+  const area = entry.int('sub', sp, entry.constant(u64, 16n));
+  entry.writeRegister(abi.stack_pointer, area);
+  let site = entry;
+  if (variant === 'tail' || variant === 'later_call') entry.store(area, a);
+  else {
+    const left = b.block('left'),
+      right = b.block('right'),
+      join = b.block('join');
+    entry.branch(
+      entry.compare('ne', flag, entry.constant(u64, 0n)),
+      entry.edge(left),
+      entry.edge(right),
+    );
+    const first = left.int('add', a, left.constant(u64, 1n)),
+      second = right.int('xor', other, right.constant(u64, 5n));
+    left.store(area, first);
+    if (variant !== 'one_edge') right.store(area, second);
+    if (variant === 'carried') {
+      left.writeRegister(x8, first);
+      right.writeRegister(x8, second);
+    }
+    left.jump(join);
+    right.jump(join);
+    site = join;
+  }
+  const carried = variant === 'carried' ? site.readRegister(x8) : null;
+  site.call(direct(0x2000n), [], [], clobbers);
+  if (variant === 'later_call') site.call(direct(0x4000n), [], [], clobbers);
+  site.writeRegister(abi.stack_pointer, sp);
+  if (variant === 'tail')
+    site.terminate({
+      kind: 'indirect',
+      target: site.constant(u64, 0x3000n),
+      tail_call: true,
+      reason: 'trusted fixture tail',
+    });
+  else if (carried) {
+    site.writeRegister(x0, carried);
+    site.return([carried]);
+  } else site.return([]);
+  const ir = constructSSA(b.finish(entry, carried ? [u64] : [])).value as SSAForm;
+  const call = ir.blocks
+    .flatMap((block) => block.instructions)
+    .find(
+      (node) =>
+        node.kind === 'call' &&
+        node.target.kind === 'direct' &&
+        node.target.address.value === 0x2000n,
+    )!;
+  const types = recoverTypes(ir, abi, createOperationContext(), {
+    image_id: image,
+    slice_id: slice,
+    revision: 0,
+  });
+  const named = { ...x0, width_bits: 32 };
+  const callee = {
+    call_id: call.id,
+    parameters: [named],
+    parameter_types: [integer(32)],
+    returns: [x0],
+    return_types: [u64],
+    parameter_state: 'ambiguous' as const,
+    argument_list_complete: false,
+    variadic: { named_integer: 1, named_vector: 0, named_stack_bytes: 0n, named: [x0] },
+    evidence_ids: [],
+  };
+  return { ir, extra: { types, source: { abi, callees: [callee], addresses: [] } } };
+}
+
+const callerInputs = { count: 3n, a: 0x123456789abcdef0n, b: 0xfedcba9876543210n };
+
+for (const variant of ['tail', 'later_call', 'joined', 'carried', 'one_edge'] as const)
+  test(`darwin-arm64 ${variant}: outgoing variadic slot stores ${variant === 'later_call' || variant === 'one_edge' ? 'stay statements' : 'become the trailing argument'} and execute like the oracle`, () => {
+    const fixture = darwinVariadicCaller(variant);
+    const bound = variant !== 'later_call' && variant !== 'one_edge',
+      joined = variant === 'joined' || variant === 'carried';
+    for (const language of ['c-like', 'python-like'] as const) {
+      const { emission } = emit(fixture.ir, fixture.extra, language);
+      const rules = new Set(emission.local_validation?.map((record) => record.rule));
+      assert.equal(rules.has('variadic_stack_arguments'), bound, emission.text);
+      assert.equal(rules.has('variadic_stack_join'), joined, emission.text);
+      // The formals the text keeps, in ABI register order.
+      const inputs =
+        variant === 'tail' || variant === 'later_call'
+          ? (['count', 'a'] as const)
+          : variant === 'one_edge'
+            ? (['count', 'a', 'flag'] as const)
+            : (['count', 'a', 'b', 'flag'] as const);
+      const formals = emittedFormals(emission);
+      assert.equal(formals.length, inputs.length, emission.text);
+      // Both paths of a branching caller (flag != 0 writes a + 1, else b ^ 5).
+      for (const flag of variant === 'tail' || variant === 'later_call' ? [1n] : [1n, 0n]) {
+        const { count, a, b } = callerInputs;
+        const observed = execute(
+          emission,
+          new Map(
+            formals.map((formal, index) => [
+              formal.statement_id,
+              { count, a, b, flag }[inputs[index]!],
+            ]),
+          ),
+          new Map(),
+          0n,
+          new Map(),
+          new Map(),
+          new Map([
+            ['sub_2000', (args: readonly bigint[]) => args[0]! + 1n],
+            ['sub_4000', () => 0n],
+          ]),
+          acknowledgeRequirements(emission),
+        );
+        const written =
+          variant === 'tail' || variant === 'later_call'
+            ? a
+            : flag !== 0n
+              ? BigInt.asUintN(64, a + 1n)
+              : variant === 'one_edge'
+                ? null
+                : b ^ 5n;
+        assert.deepEqual(
+          (observed.source_calls ?? []).filter((call) => call.name === 'sub_2000'),
+          [{ name: 'sub_2000', arguments: bound ? [count, written!] : [count] }],
+          `${language} flag=${flag}\n${emission.text}`,
+        );
+        // A consumed store prints nothing; an unconsumed one stays a statement.
+        assert.equal(
+          observed.events.includes('store'),
+          !bound && written !== null,
+          `${language} flag=${flag}\n${emission.text}`,
+        );
+        if (variant === 'tail') assert.equal(observed.exit, 'tail_call');
+        if (variant === 'carried') assert.deepEqual(observed.values, [written]);
+      }
+    }
+    // The checked view keeps the physical stores and call interface.
+    const checked = emit(fixture.ir, fixture.extra, 'c-like', 'checked').emission;
+    assert.ok(
+      !checked.local_validation?.some(
+        (record) =>
+          record.rule === 'variadic_stack_arguments' || record.rule === 'variadic_stack_join',
+      ),
+    );
+  });

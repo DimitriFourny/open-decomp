@@ -305,7 +305,7 @@ Files that several items touch:
 
 ### V2: Closed-world caller consensus makes a function `void`
 
-- [ ] **Problem.** 19 void-source functions print a value or `unknown_result`. The body alone cannot tell `f(); }` from `return f();`. Mechanisms:
+- [x] **Problem.** 19 void-source functions print a value or `unknown_result`. The body alone cannot tell `f(); }` from `return f();`. Mechanisms: _(done: `callerResultConsensus` + `caller_consensus` record/premise; OD lane `od-rm4-v2` prints the 13 acceptance functions and `sqlite3WhereExplainBloomFilter` as `void` with `return;`/`f(...);`, no other text changes, checked view identical on 7 compared functions; the 4 optional ones abstain (windows end at unknown effects / indirect exits); cost: an incidental-result gate plus an outward refutation sweep charge only what the decision needs: proofs pay the full sweep (~+345k on the 14 changed functions), refuted static functions up to the refuting site (`jsonAppendRaw` +218k, 34 functions > +500), `isDate` +1.8k, `sqlite3Fts3Incrmerge` +29.7k, brotli `main` +22)_
   - a tail call into an in-image callee whose interface never carries `returns_void`: `codeOffset`, `sqlite3DropTrigger`, `pcache1RemoveFromHash`, `sqlite3RowidConstraint`, `analyzeDatabase`, …;
   - a final call establishing the result: `verifyDbFile` (`sqlite3_log`), `fts5StructureWrite` (`sqlite3_free`, which OD prints as `void` on its own), `sqlite3AddDefaultValue`, …;
   - a kept stored value: `fts3EvalAllocateReaders`.
@@ -370,7 +370,7 @@ Files that several items touch:
 
 ### K1: Darwin variadic stack arguments across tail calls and joined slots
 
-- [ ] **Problem.** 35 Darwin variadic sites with a literal format, plus at least 8 with a variable format, print their anonymous arguments as frame stores: `frame.local_70 = (uintptr_t)address_3; sqlite3ErrorMsg(address, "no such trigger: %S");`. Those slots keep 17 frame structs alive. The callee's S8 footprint is present even when the CLI says "cut by budget", so budget is not the blocker (measured at 4× and 10×).
+- [x] **Problem.** 35 Darwin variadic sites with a literal format, plus at least 8 with a variable format, print their anonymous arguments as frame stores: `frame.local_70 = (uintptr_t)address_3; sqlite3ErrorMsg(address, "no such trigger: %S");`. Those slots keep 17 frame structs alive. The callee's S8 footprint is present even when the CLI says "cut by budget", so budget is not the blocker (measured at 4× and 10×).
   - **Root cause** (instrumented `planVariadicStackArguments`, `src/reconstruction/source-variadic.ts:30-293`):
     - (R1a) every indirect tail exit counts as a boundary that reads the slot (`:175-181`, `:253-262`), although at a tail call SP is back at the entry SP;
     - (R1c) a slot written on several branches has no single owner (`:220-237`);
@@ -388,6 +388,7 @@ Files that several items touch:
     - Part 1 measured: `sqlite3DropTrigger` prints `sqlite3ErrorMsg(address, "no such trigger: %S", address_3);` and loses its frame struct. `sqlite3RowidConstraint` prints `sqlite3MPrintf(address_2, "%s.%s", …)` without a frame. `parserDoubleLinkSelect` loses its frame. `sqlite3CreateForeignKey` binds 2/2 sites.
     - Part 2: `verifyDbFile` (needs K7 as well), `selectInnerLoop`, `generateSortTail`.
     - Every other text is byte-identical. Checked view unchanged.
+  - **Done (K1, reconstruction 88):** tail boundaries with SP at or above a slot no longer observe it; a slot written on every incoming edge binds through the existing join value or a source-only join parameter (`variadic_stack_join`). OD lane: exactly `sqlite3DropTrigger`, `sqlite3RowidConstraint`, `parserDoubleLinkSelect` (frames gone) and `sqlite3CreateForeignKey` (2/2 sites) change; checked view identical. Part 2 fires on no full-tier text yet: `generateSortTail` (`sqlite3VdbeExplain`, two branches) is blocked by R1d (the next ambiguous `sqlite3VdbeAddOp3` sees the slot); `verifyDbFile` and `selectInnerLoop` abort on an escaped frame address (K7). With that abort lifted, `verifyDbFile` binds its 4-edge join (`sqlite3_log(28, value5, value4)`), while `selectInnerLoop`'s slot at both `sqlite3VdbeComment` calls is an unowned unknown fact in the escaped/aliased snapshot, so K7 must also keep store facts below its floor.
 
 ### K2: Consume outgoing stores that a bound stack argument already shows
 
@@ -453,7 +454,7 @@ Files that several items touch:
 
 ### K5: Writable import slots are program storage; interior addresses are named after their symbol
 
-- [ ] **Problem:**
+- [x] **Done** (`wt/rm4-k5`; lane `od-rm4-k5` at the branch point vs `od-main-bf6f43f`: exactly 21 texts changed, all SQLite: `verifyDbFile` and `unixSync` load the `aSyscall` slot and call through it (`value0 = (opaque_1*)aSyscall_0x80;`, declaration `/* VA 0x100169580, aSyscall+0x80, initially fstat */`; no `fstat`/`stat`/`fcntl` import fold), and 20 functions rename all 212 `data_1001…` names to `sqlite3Config_0x…`, `pcache1_g_0x…`, `sqlite3BuiltinFunctions_0x…`, `aSyscall_0x…`, `memdb_vfs_0x…`, `mem0_0x10`, `sqlite3azCompileOpt_0x…` (212 → 0); brotli texts byte-identical; states unchanged. Checked view: `data_address` identity becomes `"_sqlite3Config+0x80"`, and the three former binding slots lose their `0x8` extent (`"unknown"`). Work: `isDate` +73, `sqlite3Fts3Incrmerge` +1,288 (the per-function `symbol_relative_name` record). reconstruction 88, C emitter 99, Python-like 96.) **Problem:**
   - **Soundness bug.** Three calls through SQLite's writable `aSyscall[i].pCurrent` print as calls to `fstat`, `stat` and `fcntl` (`verifyDbFile`: `value0 = (uintptr_t)fstat; ((uint64_t (*)(…))value0)(…)`; `unixSync`). SQLite's `unixSetSystemCall` rewrites those slots.
   - **Naming.** 212 `data_1001…` names are interior addresses of named Mach-O symbols: `_sqlite3Config` 156, `_sqlite3BuiltinFunctions` 22, `_pcache1_g` 22, … They include the 49 mutex-method calls the grader misread in 4 claims ("invokes a cleanup trigger through data_100168d70").
   - **Root cause:**
@@ -534,7 +535,7 @@ Files that several items touch:
 
 ### F2: ABI premise: calls preserve the FP control state, except known environment writers
 
-- [ ] **Problem.**
+- [x] **Problem.** _Done (lane od-rm4-f2 vs od-main-07f4b12: only `isDate` text changes, its 8 `call clobbers fpcr` placeholders become entry-state `FPCR environment` reads with all 27 guards kept (A1 owns its unsupported FMADD/FCVTZS effects); `"arm64:fpcr:0:32"` 5 → 8, all in `isDate` unknown-effect lists; checked view drops every call-clobber FPCR value (`rtreeInsertCell` 3, `sqlite3_result_double` 1, `cume_distValueFunc` 1, `isDate` 8) with guard counts unchanged; work: 148 functions down, total −383k, `rtreeInsertCell` +64k (one extra recursive-closure observation now that a callee summary is `observed`), `sqlite3GetVdbe` +27k, `sqlite3Fts3Incrmerge` +1.5k, brotli `main` +0.4k, `isDate` −10k)._
   - Darwin arm64 clobbers FPCR at every call (`src/abi/darwin-arm64/index.ts:310-337`), which creates an epoch per call, phi webs and placeholders. `"arm64:fpcr:0:32"` appears in 64 printed boundary lists.
   - SysV and Win64 already preserve the MXCSR control bits (`sysv-amd64/index.ts:293-302`, `windows-x64/index.ts:64-73`), but they make no exception for `fesetround`/`_controlfp`. A call to one of them is ignored on every target.
   - **Change:**
@@ -564,7 +565,7 @@ Files that several items touch:
 
 ### F3: The source view drops the FP-environment note; the premise is recorded
 
-- [ ] **Problem.** 55 functions print `/* assumes nearest-even rounding and masked FP traps (requirement_…) */` (4,730 comment bytes). 12 of them have no FP operation at all, only a callee that requires it (`sqlite3_finalize`, `fts3DestroyMethod`, …). The note causes 3–4 wrong claims ("source has no such comment") and appears in 14 noise reasons. The FP requirement propagates through callee summaries (`source-requirements.ts:338-340`, `source-facts.ts:623-628, 1437-1441`), so fuller summaries spread the note further: +40 texts at 10× budget.
+- [x] **Problem.** 55 functions print `/* assumes nearest-even rounding and masked FP traps (requirement_…) */` (4,730 comment bytes). 12 of them have no FP operation at all, only a callee that requires it (`sqlite3_finalize`, `fts3DestroyMethod`, …). The note causes 3–4 wrong claims ("source has no such comment") and appears in 14 noise reasons. The FP requirement propagates through callee summaries (`source-requirements.ts:338-340`, `source-facts.ts:623-628, 1437-1441`), so fuller summaries spread the note further: +40 texts at 10× budget.
   - **Change** (`renderer.ts:8823-8843`, source view):
     - Print no note. Record `validation.requireAbi('fp_default_environment', [function id], …)` whenever an `fp_environment` requirement exists.
     - Map omitted-guard provenance (`mapSites`, `:8797-8811`) to the signature span.
@@ -579,6 +580,7 @@ Files that several items touch:
     - checked view byte-identical.
   - **Acceptance:** the 55 texts lose exactly the trailing signature comment. No other change.
   - **Expected effect:** Claude tokens geomean about −0.03 [estimate]; wrong claims −3 to −4; noise on about 13 functions. Lexical tokens are unchanged.
+  - **Evidence (rm4-f3):** OD lane `od-rm4-f3` vs a lane of `main` 307644d (`od-rm4-f3-base`): exactly the 57 texts carrying the note at that base changed (55 at `od-rm3-final`), each only by the trailing signature comment; coverage and failures identical; checked view byte-identical on 4 functions in both dialects. The premise's provenance is the listed FP-environment site citing the fewest instructions (the function origin only as fallback): work Δ ≤ +157 everywhere (`isDate` +157, brotli `main` +37, `sqlite3Fts3Incrmerge` +39).
 
 ### F4: Native FP where NaN-freedom is provable; value-preserving conversion spelling
 
@@ -618,7 +620,7 @@ Files that several items touch:
 
 ### F5: NaN payloads are unobserved
 
-- [ ] After F1 and F4, 11 helpers remain:
+- [x] After F1 and F4, 11 helpers remain:
   - 9× `fp_mul` in the `matrix_aggregate` cells, stored to caller memory (source `input.weight *= scale`);
   - one `fp_add` (ELF `-O0` `matrix_variadic`);
   - one `fp_div` (`cume_distValueFunc`).
@@ -628,12 +630,13 @@ Files that several items touch:
   - **Tests:** `test/emitters/c/source-fp-native.test.ts`: a possibly-NaN product stored to caller memory and one passed to a call print as operators. Oracles compare NaN results modulo payload and every other result bit-exact, in both dialects.
   - **Acceptance** (measured): all 11 become operators; the `matrix_aggregate` cells print `address->field_0x10_f = arg2 * value0` (or the member's name). Checked view unchanged.
   - **Depends on:** F1, F4.
+  - _Done: stores and call arguments/inputs (same-width bitcasts of floats included) are not payload roots; `fp_nan_payload_unobserved` `abi_conformance` requirement anchored at the arithmetic that relies on it. OD lane vs `od-main-ad6a967`: exactly the 11 acceptance texts change (9 `fp_mul` incl. the 3 stripped `sub` cells, `matrix_variadic` `fp_add`, `cume_distValueFunc` `fp_div`), `fp_*(` helpers in lane texts 32 → 21, checked view byte-identical, coverage unchanged._
 
 ## A: ARM64 lifting and frames
 
 ### A1: Unlifted SIMD&FP data-processing encodings get a bounded effect
 
-- [ ] **Problem.** `isDate`, `unicodeNext` and `sqlite3VdbeDisplayComment` print their callee-saved saves as stores (`frame.local_a0 = unknown_value("bits64_t", "non-argument entry register");`, 46 lines). They also lose every FP presentation and frame promotion. They are the three costliest SIMD users in the corpus: `isDate` is 18,789 tokens vs Ghidra's 6,521.
+- [x] **Problem.** `isDate`, `unicodeNext` and `sqlite3VdbeDisplayComment` print their callee-saved saves as stores (`frame.local_a0 = unknown_value("bits64_t", "non-argument entry register");`, 46 lines). They also lose every FP presentation and frame promotion. They are the three costliest SIMD users in the corpus: `isDate` is 18,789 tokens vs Ghidra's 6,521. _Done (`wt/rm4-a1`, lane `od-rm4-a1` vs `od-main-307644d`): only the 3 acceptance texts change; `isDate` 11,108 → 7,924 lexical tokens (gotos 96 → 56, `requirement_predicate` 27 → 0, `fp_*` calls 21 → 0, save lines 20 → 0), checked 273,167 → 238,427 B; `sqlite3VdbeDisplayComment` 2,141 → 1,580, save lines 12 → 0, no `unknown_value`; `unicodeNext` 2,886 → 2,850 (memory-free SIMD effects, `INS_asimdins_IR_r` now lifted; its ST1 store is A2). GP-reading forms stay unbounded (docs/ARM64.md)._
   - **Root cause:**
     - The unlifted encodings `FMADD_D_floatdp3`, `FCVTZS_asisdmisc_R`, `FCCMP_D_floatccmp`, `INS_asimdins_*`, `USHL_asimdsame_only`, `XTN_asimdmisc_N` and `UZP1_asimdperm_only` fall back to `unknownClobbers` (`src/lifters/arm64/semantics.ts:58-76`, `index.ts:339-347`). That clobber set covers x0–x30, **SP**, v0–v31, **FPCR** and all memory.
     - `source-stack.ts:1098-1101` treats any `unknown_effect` as a frame escape, so the save elision never runs: there is no `frame_save` record in these functions.
@@ -662,7 +665,7 @@ Files that several items touch:
 
 ### A2: Lift A64 single-lane SIMD loads and stores (`ST1`/`LD1`, `asisdlso`/`asisdlsop`)
 
-- [ ] **Problem.** After A1, `unicodeNext` keeps its 14 save lines and an exposed frame, because `ST1_asisdlsop_S1_i1s` (`st1 {v.s}[i], [xn], #4`) is a real store that A1 must not bound.
+- [x] **Problem.** _Done (`wt/rm4-a2`, lane `od-rm4-a2` vs `od-main-fdba101`): only `unicodeNext` changed (13,188 → 10,300 bytes, 19 → 4 matches of `non-argument entry`/`__unknown_effect`/`frame_save`: the 14 `non-argument entry register` stores and the ST1 `__unknown_effect` are gone, 29 `frame_save` records, work 4,108,387 → 4,129,452; the 4 remaining `__unknown_effect` are the memory-free bounded USHL/INS/XTN/UZP1); its checked view changes (43,843 → 38,332 bytes); no other text, work or coverage change; the decoder shows these operands as opaque text, so the lift reads the canonical fields._ After A1, `unicodeNext` keeps its 14 save lines and an exposed frame, because `ST1_asisdlsop_S1_i1s` (`st1 {v.s}[i], [xn], #4`) is a real store that A1 must not bound.
   - **Change:** in `ArmSemantics.execute()`, lift the single-lane forms from the structured operands, never from operand text:
     - the memory operand gives base, writeback (`post`/`none`), `access_bits` and register offset;
     - the vector operand gives the lane;
@@ -731,7 +734,7 @@ Files that several items touch:
 
 ### E2: A formal is a scalar-element pointer only when its accesses are array-shaped
 
-- [ ] **Problem.** Struct pointers print as `uint64_t*` with constant subscripts: `stmtClose(uint64_t* address) … address[2]`, brotli `InitDecoder` `address[41]`, `PrintFileProcessingProgress` `address[59]`. This causes 6 wrong claims in 4 functions ("takes a uint64_t array pointer"). 20 formals use only non-zero constant subscripts.
+- [x] **Problem.** _Done (E2): OD lane `od-rm4-e2` vs `od-main-bf6f43f`: 29 texts changed (+480 regex-lexer tokens: typedef/struct lines); `stmtClose` prints `address->field_0x10`, `InitDecoder` `address->field_0x148`, `PrintFileProcessingProgress` fields; real arrays unchanged; 5 texts print `*p->field_0xN`._ Struct pointers print as `uint64_t*` with constant subscripts: `stmtClose(uint64_t* address) … address[2]`, brotli `InitDecoder` `address[41]`, `PrintFileProcessingProgress` `address[59]`. This causes 6 wrong claims in 4 functions ("takes a uint64_t array pointer"). 20 formals use only non-zero constant subscripts.
   - **Root cause:** `formal_pointer` (`src/reconstruction/source-signature.ts:744-783`) checks only element width and kind. `scalarArray`'s contiguity gate (`src/emitters/source-structs.ts:132-182`) is not applied to formals.
   - **Change:**
     - Record per-root constant displacements (`:617-626`). Grant `formal_pointer` only when the formal is indexed or stepped, or its constant offsets are contiguous from 0. Otherwise keep the analysis structure (or a byte pointer).
@@ -812,7 +815,7 @@ Files that several items touch:
 
 ### E6: Move proven non-faulting reloads across loads
 
-- [ ] **Problem.** `-O0` `matrix_alias` (Mach-O, ELF, PE) prints `value0 = *address; *address_1 = *address_1 ^ value0; value1 = *address; return value1 + *address_1;`. Both judges call these "redundant temporaries". There are about 12 such sites in the corpus.
+- [x] (Done: `nonfaulting_load_order` + `nonfaulting_reload`; `matrix_alias` -O0 Mach-O/ELF/PE print `*address_1 = *address_1 ^ *address; return *address + *address_1;`, plus `vdbeMemAddTerminator` and `fts5FlushSecureDelete`: 5 texts changed, checked view identical; executed tests in both dialects.) **Problem.** `-O0` `matrix_alias` (Mach-O, ELF, PE) prints `value0 = *address; *address_1 = *address_1 ^ value0; value1 = *address; return value1 + *address_1;`. Both judges call these "redundant temporaries". There are about 12 such sites in the corpus.
   - **Root cause:** `source-inlining.ts:449-468` refuses to move a load across any intervening independent load (the fault-order premise, `:90-101`), even when the moved load's exact address was just accessed.
   - **Change:**
     - A load whose exact address range was accessed on every path from a dominating access, with no call, unknown effect or volatile access in between, may move across non-volatile loads (never across stores or calls).
@@ -924,7 +927,7 @@ Files that several items touch:
 
 ### L2: Restate do-while tests over the copy source and loop-invariant bounds
 
-- [ ] **Problem.** 16 do-while candidates fail because `rebase` fails (`source-control.ts:1533`):
+- [x] **Problem.** 16 do-while candidates fail because `rebase` fails (`source-control.ts:1533`): _Done (`wt/rm4-l2`): lane `od-rm4-l2` vs `od-main-307644d`: 8 texts change, exactly `adler32_z` and `matrix_callback` `-O2` on ELF and PE (symbols and llvm stripped), now `} while ((uint32_t)value44 != 0x15b0);` and `} while (index != arg2);`; `while (true)` 212 → 204, `do {` 191 → 199, `break;` 393 → 385, gotos and `for` unchanged; states unchanged; checked view identical; Mach-O `adler32_z` already printed its do-while there, Mach-O `matrix_callback` keeps `while (true)` (one `ccmp` conjunction test)._
   - `(uint32_t)value45 + 16 == 0x15b0` after `value45 = value45 + 16` (`adler32_z` `-O2` ×4 cells);
   - `(uint64_t)arg2 - 1 == index` after `index = 1 + index` (`matrix_callback` `-O2` ×4).
   - **Root cause:** `restateTest` (`renderer.ts:8031-8186`) requires a constant bound (`:8056-8059`) and a non-inline leaf (`:8074-8080`).

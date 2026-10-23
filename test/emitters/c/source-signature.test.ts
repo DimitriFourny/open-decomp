@@ -277,7 +277,12 @@ for (const language of ['c-like', 'python-like'] as const) {
         { kind: 'float', bits: 64 },
         block.int('add', pointer, block.constant(i64, 8n)),
       );
-      const bits = block.cast('bitcast', i64, loaded);
+      // Offsets 0 and 8 are contiguous elements; a lone +8 would be a record field.
+      const bits = block.int(
+        'add',
+        block.cast('bitcast', i64, loaded),
+        block.cast('bitcast', i64, block.load({ kind: 'float', bits: 64 }, pointer)),
+      );
       block.return([mixed ? block.int('add', bits, block.load(integer(64), pointer)) : bits]);
       const output = emit(
         constructSSA(b.finish(block, [i64])).value as SSAForm,
@@ -377,6 +382,81 @@ for (const language of ['c-like', 'python-like'] as const) {
       );
       assert.deepEqual(observed.values, [expected]);
       assert.deepEqual(observed.memory, memory);
+    }
+  });
+  test(`${language} a scalar element pointer needs an array-shaped lineage: lone or gapped constant offsets stay a record`, () => {
+    const cases: readonly {
+      name: string;
+      offsets: readonly bigint[];
+      indexed: boolean;
+      pointer: boolean;
+    }[] = [
+      { name: 'lone offset', offsets: [0x10n], indexed: false, pointer: false },
+      { name: 'gap after zero', offsets: [0n, 0x10n], indexed: false, pointer: false },
+      { name: 'contiguous from zero', offsets: [0n, 8n, 16n], indexed: false, pointer: true },
+      { name: 'single element', offsets: [0n], indexed: false, pointer: true },
+      { name: 'indexed by i*8', offsets: [0x10n], indexed: true, pointer: true },
+    ];
+    for (const item of cases) {
+      const b = builder(`signature-array-shaped-${item.name}`),
+        block = b.block('entry');
+      const pointer = block.readRegister(rdi);
+      let sum = item.indexed
+        ? block.load(
+            i64,
+            block.int(
+              'add',
+              pointer,
+              block.int('mul', block.readRegister(rsi), block.constant(i64, 8n)),
+            ),
+          )
+        : undefined;
+      for (const offset of item.offsets) {
+        const value = block.load(
+          i64,
+          offset === 0n ? pointer : block.int('add', pointer, block.constant(i64, offset)),
+        );
+        sum = sum ? block.int('add', sum, value) : value;
+      }
+      block.return([sum!]);
+      const output = emit(
+        constructSSA(b.finish(block, [i64])).value as SSAForm,
+        { source },
+        language,
+      ).emission;
+      const granted = output.local_validation?.some((record) => record.rule === 'formal_pointer');
+      assert.equal(granted, item.pointer, item.name);
+      assert.match(
+        output.text,
+        language === 'c-like'
+          ? item.pointer
+            ? /\(const uint64_t\* \w+/
+            : /\(uint64_t\* \w+|\(\w*struct\w*\* \w+|\(uint64_t \w+/
+          : item.pointer
+            ? /\(\w+: pointer\[uint64_t\]/
+            : /\(\w+: uint64_t/,
+        item.name,
+      );
+      if (!item.pointer) assert.doesNotMatch(output.text, /\(const uint64_t\*/, item.name);
+      const formals = emittedFormals(output);
+      const memory = new Map<bigint, number>();
+      for (let index = 0; index < 0x40; index++) memory.set(0x2000n + BigInt(index), 3 * index + 1);
+      const word = (address: bigint): bigint => {
+        let value = 0n;
+        for (let byte = 7n; byte >= 0n; byte--)
+          value = (value << 8n) | BigInt(memory.get(address + byte)!);
+        return value;
+      };
+      const index = 2n;
+      const inputs = new Map<string, bigint>([
+        ...formals[0]!.semantic_ids.map((id) => [id, 0x2000n] as const),
+        ...(item.indexed ? formals[1]!.semantic_ids.map((id) => [id, index] as const) : []),
+      ]);
+      const observed = execute(output, inputs, memory);
+      let expected = item.indexed ? word(0x2000n + index * 8n) : 0n;
+      for (const offset of item.offsets) expected += word(0x2000n + offset);
+      assert.deepEqual(observed.values, [BigInt.asUintN(64, expected)], item.name);
+      assert.deepEqual(observed.memory, memory, item.name);
     }
   });
   test(`${language} unsigned low slices narrow formals; a whole-value call argument refuses`, () => {
