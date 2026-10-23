@@ -48,6 +48,10 @@ export type SourcePrimaryResult =
       readonly reason?: string;
       readonly incidental_floating?: string;
       readonly floating_inert?: true;
+      /** Whether the integer result register may be incidental on every return exit
+       * path (`incidentalPaths`): only then can every caller ignore a result of this
+       * function's own, so only then is caller consensus worth its image sweep. */
+      readonly incidental_paths?: () => boolean;
     }
   | {
       readonly kind: 'explicit' | 'none';
@@ -649,6 +653,32 @@ export function selectSourcePrimaryResult(
     storedData = values;
     return storedData;
   };
+  // Whether the integer result register may be incidental on every return exit path:
+  // each path holds its unchanged entry value, a call output, or a value the function
+  // also stores or observes otherwise (an address, call argument or branch operand).
+  // A path that computes a value consumed only by exits (a literal, arithmetic, a load
+  // or another argument copied into the register) returns it deliberately. A literal
+  // path root decides first, before any slice walk; the whole-body passes over stored
+  // and observed values run last.
+  const incidentalPaths = (): boolean => {
+    const root = input.integer.register.root;
+    const paths = exits.flatMap((block) => {
+      const cell = exitValue(block, input.integer);
+      return cell ? exitPaths(cell, block.id) : [];
+    });
+    if (paths.some((path) => expressions.get(path.value.id)?.kind === 'constant')) return false;
+    const pending: (readonly Value[])[] = [];
+    for (const path of paths) {
+      const walked = walk(path.value, root);
+      if (walked.kind !== 'written' || walked.self.length) continue;
+      if (walked.leaves.some((value) => callOutputs.has(value.id))) continue;
+      if (!walked.leaves.length) return false;
+      pending.push([...walked.leaves, ...walked.constants]);
+    }
+    return pending.every((values) =>
+      values.some((value) => storedValues().has(value.id) || observedElsewhere(value)),
+    );
+  };
   // Reason the FP result register is an incidental vector copy or fill
   // temporary, or undefined. Callers must not demand it; on every exit, each
   // slice leaf of every FP-root cell is the datum of a >=128-bit store, a
@@ -960,7 +990,7 @@ export function selectSourcePrimaryResult(
           void_like: 'incidental_result',
           ...floating,
         }
-      : { kind: 'integer', ...floating, ...inert };
+      : { kind: 'integer', ...floating, ...inert, incidental_paths: incidentalPaths };
   } else
     return {
       kind: 'none',
@@ -975,5 +1005,9 @@ export function selectSourcePrimaryResult(
         type: floatingType!,
         rejected: evidence,
       }
-    : { kind: 'integer', reason: `${floatingName} also qualifies; ${evidence}` };
+    : {
+        kind: 'integer',
+        reason: `${floatingName} also qualifies; ${evidence}`,
+        incidental_paths: incidentalPaths,
+      };
 }

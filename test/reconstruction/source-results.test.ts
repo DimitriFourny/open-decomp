@@ -1523,3 +1523,67 @@ for (const variant of ['ignored', 'recursive', 'table', 'exported'] as const)
       }
     }
   });
+
+/** Caller consensus is asked only where the result may be incidental on every return
+ * exit path. `int f(int *p) { *p = 5; return 7; }` and `return p[1] + 1;` compute their
+ * value for the exit alone: the planner never sweeps callers for them (a consensus
+ * answer would be ignored) and the integer result stays. */
+for (const variant of ['literal', 'computed'] as const)
+  test(`caller consensus is not asked for a ${variant} result`, () => {
+    const abi = darwinArm64Abi;
+    const x0 = register(
+      abi.classifyCall({
+        returns: word,
+        parameters: [word],
+        variadic: false,
+        fixed_parameter_count: 1,
+      }).returns[0],
+    );
+    const b = builder(`consensus-gate-${variant}`),
+      block = b.block('entry');
+    const p = block.readRegister(x0);
+    block.store(p, block.constant(u64, 5n));
+    block.writeRegister(
+      x0,
+      variant === 'literal'
+        ? block.constant(u64, 7n)
+        : block.int(
+            'add',
+            block.load(u64, block.int('add', p, block.constant(u64, 8n))),
+            block.constant(u64, 1n),
+          ),
+    );
+    block.return([]);
+    const ir = constructSSA(b.finish(block, [])).value as SSAForm;
+    const asked: boolean[] = [];
+    const source: SourceEvidence = {
+      abi,
+      callees: [],
+      addresses: [],
+      function_result_use: (_context, floating) => {
+        asked.push(floating);
+        return { consensus: 'ignored', sites: [{ image_id: image, space: 'va', value: 0x3000n }] };
+      },
+    };
+    const program = reconstruct(
+      { function: structureControlFlow(ir, createOperationContext()).value!, source },
+      createOperationContext(),
+      'source',
+    );
+    assert.deepEqual(asked, []);
+    assert.equal(program.source?.void_like_result, undefined);
+    for (const projection of program.returns.values())
+      assert.equal(projection.results[0]?.type.kind, 'integer');
+    for (const language of ['c-like', 'python-like'] as const) {
+      const { emission } = emit(ir, { source }, language);
+      const memory = new Map<bigint, number>();
+      for (let byte = 0n; byte < 16n; byte++) memory.set(0x4000n + byte, byte === 8n ? 41 : 0);
+      const observed = execute(
+        emission,
+        new Map([[emittedFormals(emission)[0]!.statement_id, 0x4000n]]),
+        memory,
+      );
+      assert.equal(observed.memory.get(0x4000n), 5);
+      assert.deepEqual(observed.values, [variant === 'literal' ? 7n : 42n]);
+    }
+  });

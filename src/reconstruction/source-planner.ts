@@ -1274,8 +1274,13 @@ export function planSource(
   }
   // Closed-world caller consensus (premise D1): no caller in the image observes a
   // result register, so the function returns nothing on any path, tails included.
-  // Asked only where the function would otherwise present a result: a selection
-  // that is not void-like, or tail transfers only (no return exit to select from).
+  // Asked only where the result may be incidental and the function would otherwise
+  // present one: tail transfers only (no return exit to select from), an integer
+  // selection whose every return exit path may hold an incidental value (the entry
+  // value, a call output, a value also stored or used otherwise; `incidental_paths`),
+  // or no selected register while a tail or the native interface forwards a result.
+  // A path computing its value only for the exit returns it deliberately: callers
+  // are not swept for it (the gate only skips an attempt; it proves nothing).
   const tailIds = [...blocks.values()].flatMap((block) =>
     block.control.kind === 'indirect' && block.control.tail_call ? [block.control.id] : [],
   );
@@ -1292,11 +1297,11 @@ export function planSource(
     !callerDemand?.length &&
     tailIds.every((id) => tails.has(id)) &&
     (tailsOnly ||
-      (primaryResult !== null &&
-        (primaryResult.kind !== 'none' ||
-          (!primaryResult.void_like &&
-            ([...tails.values()].some((tail) => !tail.result_void) ||
-              !!evidence.function_returns?.registers.length)))))
+      (primaryResult?.kind === 'none' &&
+        !primaryResult.void_like &&
+        ([...tails.values()].some((tail) => !tail.result_void) ||
+          !!evidence.function_returns?.registers.length)) ||
+      (primaryResult?.kind === 'integer' && primaryResult.incidental_paths?.() === true))
   ) {
     // The FP carrier holds no result of this function when it is unchanged or
     // undefined (unknown entry value, unprojected call clobber) on every return exit,

@@ -1,5 +1,5 @@
 import {
-  buildOnce,
+  buildDeferred,
   useBuilt,
   type AbiProfile,
   type Address,
@@ -149,18 +149,56 @@ export function callerSiteIndex(
   referencesComplete: boolean,
   context: OperationContext,
 ): CallerSiteIndex {
+  return useBuilt(
+    context,
+    callerSiteIndexDeferred(image, functions, references, referencesComplete, context),
+  );
+}
+
+/** The index without its payment (`buildDeferred`): the caller pays it through
+ * `useBuilt`, or charges `callerSiteScanWork` for the part of the sweep a decision
+ * needed. */
+export function callerSiteIndexDeferred(
+  image: LoadedImage,
+  functions: readonly FunctionRecord[],
+  references: readonly ReferenceRecord[],
+  referencesComplete: boolean,
+  context: OperationContext,
+): CallerSiteIndex {
   const cached = indexes.get(image);
   if (
     cached?.functions === functions &&
     cached.references === references &&
     cached.references_complete === referencesComplete
   )
-    return useBuilt(context, cached);
-  const built = buildOnce(context, (quiet) =>
+    return cached;
+  const built = buildDeferred(context, (quiet) =>
     buildCallerSiteIndex(image, functions, references, referencesComplete, quiet),
   );
   indexes.set(image, built);
   return built;
+}
+
+/** The instruction words a cyclic sweep starting at `from` covers up to and including
+ * the word at `to` (wrapping past the last instruction section): one per word, as the
+ * index build charges them. ARM64 only; elsewhere the whole build cost of `index`'s
+ * sweep (its discovered references). A pure function of the image and the two
+ * addresses. */
+export function callerSiteScanWork(index: CallerSiteIndex, from: bigint, to: bigint): number {
+  if (index.image.target.architecture !== 'arm64') return index.references.length;
+  let total = 0,
+    start = 0,
+    end = 0;
+  for (const section of instructionSections(index.image)) {
+    const base = section.virtual_range.start.value,
+      size = section.virtual_range.size;
+    const below = (address: bigint): number =>
+      total + Number((address <= base ? 0n : address >= base + size ? size : address - base) / 4n);
+    start = from >= base ? below(from) : start;
+    end = to >= base ? below(to + 4n) : end;
+    total += Number(size / 4n);
+  }
+  return end > start ? end - start : total - start + end;
 }
 
 /** Subtract sorted `holes` from sorted `ranges`. */

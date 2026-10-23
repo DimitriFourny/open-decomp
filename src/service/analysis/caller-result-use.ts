@@ -1,7 +1,15 @@
-import type { Address, FunctionRecord, LoadedImage, OperationContext } from '../../core/index.js';
+import {
+  useBuilt,
+  type Address,
+  type FunctionRecord,
+  type LoadedImage,
+  type OperationContext,
+} from '../../core/index.js';
 import {
   callerSiteIndex,
+  callerSiteIndexDeferred,
   callerSiteIndexWork,
+  callerSiteScanWork,
   callerSites,
   classifyResultUse,
   resultRoots,
@@ -197,8 +205,16 @@ export function callerResultDemands(
  *     `MAX_CONSENSUS_DEPTH`. A semantic read, an unknown window, a result forwarded
  *     into another tail transfer (its callee may read it as an argument), more than
  *     `MAX_CONSENSUS_SITES` sites of one function or `MAX_CONSENSUS_TOTAL_SITES` in
- *     all abstain. The index and windows are charged to the request inside a quarter
- *     of its remaining work; an exhausted share abstains. */
+ *     all abstain.
+ * A refutation pass runs first: F's sites, and recursively those of the callers its
+ * result is forwarded to, each in the order of a cyclic sweep starting at that
+ * function's own entry (the callers of a static function mostly follow it). The first
+ * site that fails (d) on its own (or a supplied signature or import stub on the way)
+ * abstains, charging only the words each visited function's sweep covered up to its
+ * last examined site (`callerSiteScanWork`; at most the whole index). Otherwise the
+ * export, symbol and fixup tables are charged, then the whole index. Either charge
+ * depends only on the image and F. The windows are charged inside a quarter of the
+ * request's remaining work; an exhausted share abstains. */
 export function callerResultConsensus(
   input: SourceFactsInput,
   context: OperationContext,
@@ -220,39 +236,7 @@ export function callerResultConsensus(
     !relocatable(image, context)
   )
     return undefined;
-  // Entries a loader record makes reachable from outside the enumerated sites: exports,
-  // global and weak symbols, fixup targets, image entry points and unwind handlers.
-  // Objective-C relative method lists and Swift metadata hold code addresses as
-  // relative offsets without fixups: such images abstain.
-  context.checkpoint(
-    image.exports.length +
-      image.symbols.length +
-      image.relocations.length +
-      image.entry_points.length +
-      image.hints.length +
-      image.sections.length,
-  );
-  if (
-    image.sections.some(
-      (section) => section.name === '__objc_methlist' || section.name.startsWith('__swift5'),
-    )
-  )
-    return undefined;
-  const named = new Set<bigint>();
-  for (const item of image.exports) if (item.address?.space === 'va') named.add(item.address.value);
-  for (const symbol of image.symbols)
-    if (symbol.binding !== 'local' && symbol.address?.space === 'va')
-      named.add(symbol.address.value);
-  for (const relocation of image.relocations)
-    if (relocation.target?.space === 'va') named.add(relocation.target.value);
-  for (const entry of image.entry_points) if (entry.space === 'va') named.add(entry.value);
-  for (const hint of image.hints)
-    if (hint.kind === 'unwind' && hint.handler?.space === 'va') named.add(hint.handler.value);
-  // The function itself first: an excluded entry abstains before the image sweep.
-  context.checkpoint(input.functions.length);
-  const own = input.functions.find((item) => item.id === input.ir.id);
-  if (own?.entry.space !== 'va' || named.has(own.entry.value)) return undefined;
-  const index = callerSiteIndex(
+  const index = callerSiteIndexDeferred(
     image,
     input.functions,
     input.references,
@@ -260,13 +244,112 @@ export function callerResultConsensus(
     context,
   );
   const fn = index.functions_by_id.get(input.ir.id);
-  if (!fn) return undefined;
+  if (fn?.entry.space !== 'va') return undefined;
   const local = shareContext(context, share - indexWork);
   const decoder =
     image.target.architecture === 'arm64'
       ? new Arm64Decoder()
       : new X86Decoder({ formatting: false });
+  // Each site's window is classified once.
+  const uses = new Map<bigint, ResultUse>();
+  const classify = (site: CallerSite): ResultUse => {
+    let use = uses.get(site.address.value);
+    if (!use) {
+      use = classifyResultUse(
+        {
+          index,
+          decoder,
+          lifter: input.components.lifter,
+          abi: input.components.abi,
+          roots: tracked,
+        },
+        site,
+        local,
+      );
+      uses.set(site.address.value, use);
+    }
+    return use;
+  };
+  // Whether one site fails (d) whatever its caller's own consensus.
+  const fails = (site: CallerSite): boolean => {
+    if (!site.caller) return true;
+    const use = classify(site);
+    return (
+      use.kind === 'semantic' ||
+      use.kind === 'unknown' ||
+      (use.kind === 'forwarded' &&
+        ((site.kind === 'call' && use.tails.length > 0) ||
+          // The site's caller is its containing function: discovery owns the site,
+          // or every loader function start is an entry, so the nearest entry below
+          // the site starts its function.
+          !(
+            site.attribution === 'ranges' ||
+            (site.attribution === 'next_entry' && index.starts_complete)
+          )))
+    );
+  };
   try {
+    const entry = fn.entry.value;
+    const swept = new Map<string, number>(),
+      refuting = new Set<string>();
+    let examined = 0;
+    const refuted = (callee: FunctionRecord, depth: number): boolean => {
+      if (refuting.has(callee.id) || depth > MAX_CONSENSUS_DEPTH) return false;
+      if (callee.entry.space !== 'va' || callee.signature !== null || callee.kind === 'import_stub')
+        return true;
+      refuting.add(callee.id);
+      const start = callee.entry.value;
+      const own = callerSites(index, callee.entry, local).sites;
+      const sweep = own.filter((site) => site.address.value >= start);
+      sweep.push(...own.filter((site) => site.address.value < start));
+      for (const [at, site] of sweep.entries()) {
+        swept.set(callee.id, callerSiteScanWork(index, start, site.address.value));
+        if (at === MAX_CONSENSUS_SITES || ++examined > MAX_CONSENSUS_TOTAL_SITES || fails(site))
+          return true;
+        if (classify(site).kind === 'forwarded' && refuted(site.caller!, depth + 1)) return true;
+      }
+      return false;
+    };
+    if (refuted(fn, 0)) {
+      context.checkpoint(
+        Math.min(
+          indexWork,
+          [...swept.values()].reduce((sum, words) => sum + words, 0),
+        ),
+      );
+      return undefined;
+    }
+    // Entries a loader record makes reachable from outside the enumerated sites:
+    // exports, global and weak symbols, fixup targets, image entry points and unwind
+    // handlers. Objective-C relative method lists and Swift metadata hold code
+    // addresses as relative offsets without fixups: such images abstain.
+    context.checkpoint(
+      image.exports.length +
+        image.symbols.length +
+        image.relocations.length +
+        image.entry_points.length +
+        image.hints.length +
+        image.sections.length,
+    );
+    if (
+      image.sections.some(
+        (section) => section.name === '__objc_methlist' || section.name.startsWith('__swift5'),
+      )
+    )
+      return undefined;
+    const named = new Set<bigint>();
+    for (const item of image.exports)
+      if (item.address?.space === 'va') named.add(item.address.value);
+    for (const symbol of image.symbols)
+      if (symbol.binding !== 'local' && symbol.address?.space === 'va')
+        named.add(symbol.address.value);
+    for (const relocation of image.relocations)
+      if (relocation.target?.space === 'va') named.add(relocation.target.value);
+    for (const item of image.entry_points) if (item.space === 'va') named.add(item.value);
+    for (const hint of image.hints)
+      if (hint.kind === 'unwind' && hint.handler?.space === 'va') named.add(hint.handler.value);
+    if (named.has(entry)) return undefined;
+    useBuilt(context, index);
     const sites: Address[] = [];
     const visiting = new Set<string>();
     let total = 0;
@@ -294,33 +377,9 @@ export function callerResultConsensus(
       )
         return false;
       for (const site of found.sites) {
-        if (!site.caller) return false;
         if (depth === 0) sites.push(site.address);
-        const use = classifyResultUse(
-          {
-            index,
-            decoder,
-            lifter: input.components.lifter,
-            abi: input.components.abi,
-            roots: tracked,
-          },
-          site,
-          local,
-        );
-        if (use.kind === 'dead') continue;
-        if (
-          use.kind !== 'forwarded' ||
-          (site.kind === 'call' && use.tails.length) ||
-          // The site's caller is its containing function: discovery owns the site,
-          // or every loader function start is an entry, so the nearest entry below
-          // the site starts its function.
-          !(
-            site.attribution === 'ranges' ||
-            (site.attribution === 'next_entry' && index.starts_complete)
-          ) ||
-          !ignored(site.caller, depth + 1)
-        )
-          return false;
+        if (fails(site)) return false;
+        if (classify(site).kind === 'forwarded' && !ignored(site.caller!, depth + 1)) return false;
       }
       return true;
     };
