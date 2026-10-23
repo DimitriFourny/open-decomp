@@ -57,6 +57,7 @@ import type { NativeDependency } from './native-worklist.js';
 import {
   nativeLibraryContracts,
   nativeUnitLoader,
+  optionalWorkPool,
   preparedUnitCache,
   type SourceFactsInput,
 } from './source-facts.js';
@@ -988,11 +989,13 @@ export function recoverImageTypes(
   const { context } = input.scope;
   if (local.state !== 'complete' || types.state !== 'complete') return { types, diagnostics: [] };
   // Optional merging never takes the work rendering needs: it keeps at least a
-  // quarter of what remains and as much as the selected function used so far.
+  // quarter of what remains and as much as the selected function used so far,
+  // and never the selected body's tail reserve (`optionalWorkPool`).
   const remaining = context.remainingWork?.() ?? context.budget.work;
-  const limit = Math.max(
-    0,
-    remaining - Math.max(Math.ceil(remaining / 4), context.budget.work - remaining),
+  const limit = optionalWorkPool(
+    input.ir,
+    remaining,
+    Math.max(0, remaining - Math.max(Math.ceil(remaining / 4), context.budget.work - remaining)),
   );
   let used = 0;
   const bounded: OperationContext = {

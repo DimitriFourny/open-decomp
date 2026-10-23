@@ -10,8 +10,10 @@ const FEATURE = 'source mappings, inference and requirement metadata';
 
 /** Make a stored decompilation state the metadata its emission omitted. Text and every
  * other semantic coverage layer are untouched. A result that was complete becomes
- * partial with reason `output_limit`; an already partial result keeps its semantic reason.
- * Idempotent: the provenance coverage always reflects the emission's current `omitted`. */
+ * partial with reason `budget` when the request's work went to the text render first
+ * (an omission with reason `budget`), else `output_limit`; an already partial result
+ * keeps its semantic reason. Idempotent: the provenance coverage always reflects the
+ * emission's current `omitted`. */
 export function withMetadataOmissions(result: StoredDecompilation): StoredDecompilation {
   const emission = result.data.emission;
   const omitted = mergeOmissions(emission.omitted);
@@ -37,7 +39,7 @@ export function withMetadataOmissions(result: StoredDecompilation): StoredDecomp
     : {
         ...withCoverage,
         state: 'partial',
-        reason: 'output_limit',
+        reason: omitted.some((item) => item.reason === 'budget') ? 'budget' : 'output_limit',
         continuation: null,
       };
 }
