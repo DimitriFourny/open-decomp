@@ -567,8 +567,81 @@ export function projectSourceSignature(
     }
     return roots;
   };
+  // Constant displacement of an address from each formal it descends from, and
+  // whether that lineage is array-shaped: an index term was added, or a cycle
+  // of copies steps the address (it reaches itself at another displacement).
+  const addressLineage = (
+    value: Value,
+  ): { readonly offsets: ReadonlyMap<string, Set<bigint>>; readonly shaped: boolean } => {
+    const offsets = new Map<string, Set<bigint>>(),
+      done = new Set<string>(),
+      onPath = new Map<string, bigint>(),
+      pending: { value: Value; offset: bigint; exit: boolean }[] = [
+        { value, offset: 0n, exit: false },
+      ];
+    let shaped = false;
+    const push = (operand: Value, offset: bigint): void => {
+      pending.push({ value: operand, offset, exit: false });
+    };
+    const constantStep = (operand: Value, offset: bigint, sign: bigint): bigint =>
+      offset + sign * BigInt.asIntN(bitWidth(operand.type), constant(operand)!);
+    while (pending.length) {
+      const { value: current, offset, exit } = pending.pop()!;
+      if (exit) {
+        onPath.delete(current.id);
+        continue;
+      }
+      context.checkpoint(1);
+      const active = onPath.get(current.id);
+      if (active !== undefined) {
+        if (active !== offset) shaped = true;
+        continue;
+      }
+      const key = `${current.id}:${offset}`;
+      if (done.has(key)) continue;
+      done.add(key);
+      if (program.parameters.some((parameter) => parameter.id === current.id)) {
+        const row = offsets.get(current.id) ?? new Set<bigint>();
+        row.add(offset);
+        offsets.set(current.id, row);
+        continue;
+      }
+      onPath.set(current.id, offset);
+      pending.push({ value: current, offset, exit: true });
+      const expression = expressions.get(current.id);
+      if (expression?.kind === 'integer' && ['add', 'sub'].includes(expression.op)) {
+        if (constant(expression.right) !== undefined) {
+          push(
+            expression.left,
+            constantStep(expression.right, offset, expression.op === 'sub' ? -1n : 1n),
+          );
+          continue;
+        }
+        if (expression.op === 'add' && constant(expression.left) !== undefined) {
+          push(expression.right, constantStep(expression.left, offset, 1n));
+          continue;
+        }
+        if (indexTerm(expression.right) && !indexTerm(expression.left)) {
+          shaped = true;
+          push(expression.left, offset);
+          continue;
+        }
+        if (expression.op === 'add' && indexTerm(expression.left) && !indexTerm(expression.right)) {
+          shaped = true;
+          push(expression.right, offset);
+          continue;
+        }
+      }
+      for (const parent of [...transport(current), ...(spilled.get(current.id) ?? [])])
+        push(parent, offset);
+    }
+    return { offsets, shaped };
+  };
   // Element kinds reached through each formal's pointer lineage, with their sites.
-  const accesses = new Map<string, { elements: Set<string>; sites: string[] }>();
+  const accesses = new Map<
+    string,
+    { elements: Set<string>; sites: string[]; offsets: Set<bigint>; shaped: boolean }
+  >();
   const written = new Set<string>(),
     escaped = new Set<string>(),
     // Values a preserved register carried into an open-arity call; no native
@@ -619,10 +692,18 @@ export function projectSourceSignature(
       const kind = floatAccesses.has(node.id) ? 'float' : value.type.kind;
       const element =
         kind === 'integer' || kind === 'float' ? `${kind}:${bitWidth(value.type)}` : 'other';
-      for (const root of parameterRoots(node.address)) {
-        const row = accesses.get(root) ?? { elements: new Set<string>(), sites: [] };
+      const lineage = addressLineage(node.address);
+      for (const [root, displacements] of lineage.offsets) {
+        const row = accesses.get(root) ?? {
+          elements: new Set<string>(),
+          sites: [],
+          offsets: new Set<bigint>(),
+          shaped: false,
+        };
         row.elements.add(element);
         row.sites.push(node.id);
+        for (const offset of displacements) row.offsets.add(offset);
+        row.shaped ||= lineage.shaped;
         accesses.set(root, row);
       }
     }
@@ -752,12 +833,23 @@ export function projectSourceSignature(
         (kind === 'float' && [32, 64].includes(pointee))) &&
       bitWidth(parameter.type) === input.source.abi.layout.pointer_bits
     ) {
+      // Constant displacements alone are fields of a record, not elements of
+      // an array, unless they fill consecutive elements from zero.
+      const step = BigInt(pointee / 8),
+        displacements = [...access!.offsets].sort((left, right) =>
+          left < right ? -1 : left > right ? 1 : 0,
+        );
+      if (
+        !access!.shaped &&
+        !displacements.every((offset, index) => offset === BigInt(index) * step)
+      )
+        continue;
       const readOnly = !mayWrite && !written.has(parameter.id);
       if (
         validation.presentation(
           'formal_pointer',
           parameter.id,
-          `whole-value pointer lineage (copies, promoted slots, constant byte steps, index terms) reaches only ${pointee}-bit ${kind} accesses; ${readOnly ? 'read-only formal: no writes through it or escape to a potentially writing call, and no unknown effects' : 'write-capable formal: write, call escape or unknown effects prevent const qualification'}`,
+          `whole-value pointer lineage (copies, promoted slots, constant byte steps, index terms) reaches only ${pointee}-bit ${kind} accesses in an array-shaped lineage (${access!.shaped ? 'indexed or stepped' : 'constant displacements contiguous from zero'}); ${readOnly ? 'read-only formal: no writes through it or escape to a potentially writing call, and no unknown effects' : 'write-capable formal: write, call escape or unknown effects prevent const qualification'}`,
           [...origins, ...access!.sites.slice(0, 16)],
         )
       ) {

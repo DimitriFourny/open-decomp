@@ -187,7 +187,7 @@ Cached decompilation payloads additionally validate `emission.language === ident
 
 ### Analysis cache and persisted callee summaries
 
-Store schema 6 adds `native_summaries(scope, function_id, revision, seq, allowance, work, bytes, digest, payload)` (migration 5→6 creates it; schemas 1–5 still migrate transactionally; an older application cannot open a schema-6 project). Prepared native callee units (`source-facts.ts`, `PreparedUnitEntry`) are the largest cold cost of a decompilation, and the in-process `WeakMap` that reuses them is lost with every CLI process. The persisted tier sits behind it and obeys exactly the same contract: a unit is stored only when `reusablePreparation` holds (not `limited`, no reason, complete call analysis; summary format 4 stores `limited: false`), together with the work it charged, the smallest allowance under which preparing it provably returns it, and the ordered dependency reads (`TracedRead`) it made. A reuse still requires `allowance ≥ stored allowance`, the instruction/block/node capacities and `fits(work, reads)`, then charges the same work and replays the same reads in the same order as preparing would, so a result and later budgets never depend on what an earlier process prepared. The fresh preparation path is untouched; a stored unit is only an input to the existing reuse check.
+Store schema 6 adds `native_summaries(scope, function_id, revision, seq, allowance, work, bytes, digest, payload)` (migration 5→6 creates it; schemas 1–5 still migrate transactionally; an older application cannot open a schema-6 project). Prepared native callee units (`source-facts.ts`, `PreparedUnitEntry`) are the largest cold cost of a decompilation, and the in-process `WeakMap` that reuses them is lost with every CLI process. The persisted tier sits behind it and obeys exactly the same contract: a unit is stored only when `retainablePreparation` holds (not budget-truncated, not `limited`, complete call analysis; reasons that are not limits, e.g. an unresolved indirect call, are allowed; summary format 5), together with the work it charged, the smallest allowance under which preparing it provably returns it, and the ordered dependency reads (`TracedRead`) it made. A reuse still requires `allowance ≥ stored allowance`, the instruction/block/node capacities and `fits(work, reads)`, then charges the same work and replays the same reads in the same order as preparing would, so a result and later budgets never depend on what an earlier process prepared. The fresh preparation path is untouched; a stored unit is only an input to the existing reuse check.
 
 - **Identity.** `scope` is the digest of the format, the project **revision**, image SHA-256, selected slice, target, pipeline component versions, lifter, ABI and the supplied native type records; the row key is `(scope, function_id)`. The revision is part of the key because prepared evidence embeds it (evidence IDs and `revision` fields), so a unit prepared at another revision is not the unit preparing would return now; an annotation or any other revision change therefore invalidates every stored unit, and the next write drops the superseded rows. A row is authentic only for exactly its identity: `digest` is SHA-256 over scope, function, revision and the compressed payload, so a swapped, moved or damaged row is a miss (and replaced when the function is prepared again), never served.
 - **Validation.** Before use the payload envelope is schema-checked, its identity fields must equal the request's, dependency targets must resolve in the current function list, and `verifyTracedReads` re-reads every stored dependency read from the project at the current revision (selector well formed, key = digest of the selector, fingerprint equal to the store's value now). Any mismatch is a miss and the unit is prepared normally. Verification never charges the request (only preparing's charges are replayed) and memoizes verified reads per store/revision, so units sharing proof/type/function closures verify each read once. Callee units whose dependencies changed (or whose trace cannot be replayed) fall back to preparing, exactly as in process.
@@ -394,8 +394,9 @@ enumerated-outcome fold (integer relations; IEEE less/equal/greater/unordered),
 e.g. `!(x < 0 || x > 0) && !isunordered(x, 0)` is `x == 0`, using only leaves
 the merged tests already read. Header notes: the ABI scratch comment is printed
 only when a scratch register name occurs in the text (`abi_scratch_note`), and
-the FP-environment assumption trails the signature with an unambiguous
-requirement ID prefix (`requirement_note`); full records stay in metadata.
+the source view prints no FP-environment note (`requirement_note`): the
+assumption is the recorded `fp_default_environment` ABI requirement, and full
+records stay in metadata.
 
 `else_if` prints an `else` arm that is exactly one `if` statement (no statement,
 definition, label, note or edge copy before or after it; the arm's own `else`
@@ -538,12 +539,23 @@ copies right after the loop when that edge is the only one from inside the loop
 to its continuation; outer-loop exit flags are tested before them, and a
 do/while's repeat copies (moved before its test) must not be read by them
 (`loop_exit_copies`). The bottom test is found through nested lexical
-sequences. `loop_test_restatement` also restates an unsigned range test
+sequences. A C do/while test that reads a variable its repeat copy writes prints
+restated over that copy's result (`loop_test_restatement`). After `x = x + c`
+(through casts and constant steps no narrower than `x`), an equality
+`L ==/!= B` whose `L` is `x` or its low `w` bits plus a constant `k` becomes
+`x ==/!= B + c - k` (mod 2^w, roadmap 4 L2), the low bits printed as
+`(uint32_t)x`. `B` is a constant (a zero-extended `L` tests its narrower
+value when `B` fits it), or an expression without inline loads or calls over
+variables the repeat copies do not write; `B + d` folds into `B = y ± m`, so
+`(uint64_t)n - 1 == i` after `i = 1 + i` prints `while (i != n)` and a test on
+the copy's own source (`(uint32_t)x + 16 == K` after `x = x + 16`) prints
+`(uint32_t)x != K`. An unsigned range test
 `x < 2^c` (or `x <= 2^c - 1`, or a negation) after a repeat copy `x = x >> c`
-(logical or arithmetic, `0 < c < width`) as `x ==/!= 0`. Restatements are exact
+(logical or arithmetic, `0 < c < width`) becomes `x ==/!= 0`; other ordered
+compares are not restated. Restatements are exact
 derivations over the IR; while the shared allowance remains, the bit-vector
-checker re-proves them and may veto. Python-like keeps `while True` for bottom
-tests.
+checker re-proves them over the copy's source value and may veto. Python-like
+keeps `while True` for bottom tests.
 
 Return-tail copies remain owned by the edge that enters them. When all incoming
 edges use copies and a tail's original home is removed, its copied continuation
@@ -570,7 +582,7 @@ A type inference record carries every `association_ids` member whose assertion d
 
 Parameter roles distinguish observed source inputs, physical-register inputs and explicit entry-storage environment inputs; an entry-SP formal is not evidence of authored arity. Interpretation widths describe reconstructed IR, not necessarily a decoder operand or source declaration. Call constants expose exact unsigned bit patterns with explicit widths, without inventing signedness. Partial fields retain unknown bounds and observed callback targets; local checks retain their bounded scope and counterexamples. Metadata uses the same operation/output budget and cancellation as rendering, and omits evidence IDs when evidence was not requested. Five focused regressions and 12 public both-dialect observations cover these boundaries; they do not establish whole-function equivalence.
 
-Optional `emission.requirements` localize assumptions, unresolved values/effects/calls/control and conflicts at original subjects and instruction-backed output spans. One function-level `fp_environment` explanation names every affected guard/operation and its original state epoch. Source-only `fp_environment_guard` presentation selects the supported edge of an exact lifter guard when its state is the entry value, unchanged or carried through phis and bitcasts, there are no explicit environment writes, and the unsupported arm is exclusively owned. Transport acceptance is coinductive (a greatest fixpoint over the phi/bitcast web, so loop cycles qualify): a member is accepted when each input is the entry epoch or an accepted member; one input of any other kind rejects the guards of the whole function. Each guard record lists the accepted transports its epoch passes through. This is conditional on the recorded requirement at **each** epoch. Omitted guard/failure provenance maps to the top requirement comment; checked guards and ordered effects remain intact. Computed, loaded, known unsupported, or opaque-written control state retains explicit guards. An opaque effect that is the last statement of a block ending in an unresolved exit changes no recorded epoch (no modeled operation follows it) and does not retain them (`fp_terminal_effect`); an opaque effect elsewhere, such as an unsupported encoding inside the function, still does.
+Optional `emission.requirements` localize assumptions, unresolved values/effects/calls/control and conflicts at original subjects and instruction-backed output spans. One function-level `fp_environment` explanation names every affected guard/operation and its original state epoch. Source-only `fp_environment_guard` presentation selects the supported edge of an exact lifter guard when its state is the entry value, unchanged or carried through phis and bitcasts, there are no explicit environment writes, and the unsupported arm is exclusively owned. Transport acceptance is coinductive (a greatest fixpoint over the phi/bitcast web, so loop cycles qualify): a member is accepted when each input is the entry epoch or an accepted member; one input of any other kind rejects the guards of the whole function. Each guard record lists the accepted transports its epoch passes through. This is conditional on the recorded requirement at **each** epoch. Omitted guard/failure provenance maps to the signature in the source view and to the top requirement comment in the checked view; checked guards and ordered effects remain intact. Computed, loaded, known unsupported, or opaque-written control state retains explicit guards. An opaque effect that is the last statement of a block ending in an unresolved exit changes no recorded epoch (no modeled operation follows it) and does not retain them (`fp_terminal_effect`); an opaque effect elsewhere, such as an unsupported encoding inside the function, still does.
 
 Calls preserve the FP control state on every ABI profile: FPCR is not an ordinary Darwin call clobber (AAPCS64 6.1.2: its control fields change only through support functions), and SysV/Win64 already preserve MXCSR[6:16] and the x87 control word. The exceptions are known environment writers. Before SSA construction, a call whose target is a `fesetround`, `fesetenv`, `feupdateenv`, `feholdexcept`, `fesetexceptflag`, `feenableexcept`, `fedisableexcept`, `_controlfp`, `_control87`, `_controlfp_s`, `__control87_2`, `_set_controlfp`, `_fpreset`, `fpsetround` or `fpsetmask` import (callable stub, import-slot reference or constant target) also clobbers the profile's `environment_writer_clobbers` (FPCR; MXCSR[6:16] and the x87 control word). Its output is no epoch, so the fixpoint keeps the guards. A local callee whose summary shows a changed exit state (`fp_environment_writer`: a writer-import call or tail on a path to an exit, an explicit write that reaches an exit binding, or a writer callee; an opaque effect is no such evidence) keeps every guard of its caller. Omitting a guard records `requireAbi('fp_environment_preserved', [every call of the function])`: unknown, indirect and ordinary callees preserve the control state.
 
@@ -817,7 +829,13 @@ Darwin variadic stack arguments stored in different predecessors of one shared
 call resolve when, on every incoming edge, the owning store wrote the same SSA
 value (it dominates the join) or a value — through identity moves, concat
 components, or an equal rematerialized constant — that the edge copies into one
-block parameter of the join.
+block parameter of the join. Outgoing variadic slots (`variadic_stack_arguments`)
+use the same proof; when no SSA value carries the stored values to the join, each
+predecessor's store (in that predecessor block, unobserved by any other boundary
+or load, the call block writing nothing before the call) instead feeds a
+source-only block parameter assigned on every edge (`variadic_stack_join`), and
+the stores print as those assignments. A tail call (SP back at the entry SP)
+does not observe an outgoing slot below its SP.
 Discovery-established tails to uniquely resolved imported callable entries may
 use complete nonvariadic register-only library contracts. Their interfaces
 propagate through the same bounded native dependency worklist as source-only
@@ -1409,9 +1427,16 @@ Original helper names and contracts stay in metadata.
 Only the helper definitions, `#include` and `#define` lines that the finished
 function text references (directly or through another helper) precede it, in a
 fixed order; the text is scanned outside comments and string literals after
-rendering, so unused or speculative expressions never add one. The FP environment
-requirement appears as one comment line citing its id; its full explanation is in
-the `requirements` metadata, and checked rendering keeps the full text.
+rendering, so unused or speculative expressions never add one. The source view
+prints no comment for the FP environment requirement: emitted C without
+`#pragma STDC FENV_ACCESS ON` presumes the default modes (C11 7.6.1p2, a language
+premise of the same class as `frame_object`), recorded as one
+`fp_default_environment` `abi_conformance` requirement beside the unchanged
+`fp_environment` requirement. Its provenance is the listed FP-environment site
+whose origin cites the fewest instructions (not the function origin, which would
+repeat every instruction of the function; the function anchors it only when
+that site prints nowhere). Omitted guard sites map to the signature. Its full explanation is in the `requirements`
+metadata, and checked rendering keeps the full `/* Requirement … */` line.
 `c_bitcast` uses same-width `memcpy` helpers for integer/IEEE32/IEEE64
 reinterpretation under an explicit native-representation ABI requirement.
 `c_integer_storage` uses ordinary C scalar storage for nonstandard-width integer
@@ -1427,11 +1452,20 @@ slots (every stored value reaches each reload), constant byte steps and index
 terms (a constant-scaled or extended addend) to the retained accesses through a
 formal. One consistent 8/16/32/64-bit integer or 32/64-bit IEEE element kind
 yields `uintN_t*` / `float*` / `double*`; byte accesses use `uint8_t*`, never
-invented character types. Mixed widths or kinds remain explicit.
+invented character types. Mixed widths or kinds remain explicit. The lineage must
+also be array-shaped: an index term is added, a copy cycle steps the pointer, or
+the constant displacements of its accesses are exactly 0, w, 2w, ... for element
+width w. Constant offsets alone (`p + 0x10`, or `p`, `p + 0x10` with a gap) are
+fields of a record: the formal then keeps the analysis structure (or integer)
+and prints `p->field_0x10`; the `formal_pointer` record says which shape held.
 It adds C `const` only without writes through that formal, escape to a potentially
 writing call, or unknown effects; unrelated stores and known read-only calls do
 not remove the qualifier. Python annotations use `pointer[T]`; the presentation
 record retains the read-only/write-capable formal observation in both dialects.
+A declared pointer member whose pointee is an unsigned scalar of exactly the
+accessed width (or an IEEE element) is dereferenced as its lvalue,
+`*p->field_0x48`, under `typed_dereference`, instead of casting its address bits
+back to a pointer.
 C `typed_index` prints `p[i]` / `p[k]` / `p[i + k]` / `p[i - k]` for an access
 through a declared scalar pointer (integer or IEEE element) of exactly the
 accessed width and kind. The address is flattened through nested inline
@@ -1612,6 +1646,47 @@ makes a function void. `sqlite3GetToken`, `getConstraintToken`,
 `sqlite3BtreeOpen`, `sessionRetryConstraints` and `sqlite3PagerSavepoint` print
 integer results this way, and `rtreeInsertCell` types its `rowidWrite` /
 `parentWrite` tails.
+
+Closed-world caller consensus (`caller_consensus`; source view only; premise D1
+recorded with `requireAbi('caller_consensus', …)`). Where an undeclared function
+without an indirect result would still present a result that may be incidental,
+the planner asks once per request for `SourceEvidence.function_result_use`: tail
+transfers only; no selected register while a tail or the native interface
+forwards a result; or an integer selection whose every return exit path holds the
+unchanged entry value, a call output, or a value the function also stores or uses
+as an address, call argument or branch operand (`incidental_paths`). A path that
+computes its value only for the exit (a literal, arithmetic, a load, another
+argument) returns it deliberately, and FP or explicit selections are not asked:
+that gate only skips an attempt. It is proven for the
+function and, recursively, for every caller its result reaches: no export, global
+or weak symbol, image entry point or unwind handler names the entry; no
+relocation, rebase, bind or chained fixup targets it, in an image without
+Objective-C relative method lists or Swift metadata (relative code offsets), whose loader reported no warning other than undecoded
+semantics and whose absolute pointers all carry fixups (Mach-O PIE or dylib, ELF
+`ET_DYN`, PE dynamic base); no instruction materializes or reaches the entry other
+than through a listed BL/B (ARM64: an ADR to it, an ADRP of its page whose
+followed register is added to its page offset or escapes the scan, a conditional
+branch from another function, a fallthrough from a preceding non-terminator;
+x86-64: any non-call reference); the direct site set is complete (ARM64 sweep;
+x86-64 only with a complete reference index), not empty (a function no listed
+site reaches is reached only from outside, or never), and every site has a caller
+(`next_entry` attribution only when every loader function start is an entry);
+after each call site the integer result register (and the FP one unless the
+FP carrier is unchanged or undefined on every exit and every tail callee's
+observed interface writes no FP result) is overwritten before any read, or
+reaches only the caller's own return, whose caller then needs the same consensus;
+a tail site needs it of the tail caller. Callers under proof are assumed
+coinductively (recursion), at most 6 levels deep; a semantic read, an unknown
+window, a result left live into another tail transfer, more than 64 sites of one
+function or 128 in all abstain, and so does a spent share (a quarter of the
+remaining work, like `caller_result_use`). The sites are refuted first in the
+order of a cyclic sweep from each function's own entry; a site that fails on its
+own abstains for the swept words up to it, before the loader tables and the whole
+image sweep are charged. The function then returns nothing
+on every path (`void_like_result: 'caller_consensus'`), every tail transfer gets
+`result_void` and prints `h(...); return;`, the result registers move to
+`exit_scratch` with their exact values, and the `caller_consensus` presentation
+record names the direct sites. The checked view is unchanged.
 
 A context-specialized callee summary (constant/alias call-site assumptions)
 keeps the callee's result root. The context unit carries the baseline body's

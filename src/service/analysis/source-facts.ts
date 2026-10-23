@@ -55,11 +55,12 @@ import type { DebugRecovery } from '../../metadata/debug/index.js';
 import type { LibraryContracts } from '../../metadata/library-contracts/index.js';
 import type {
   CallerResultDemand,
+  FunctionResultUse,
   InferredCallee,
   SourceAddress,
   SourceEvidence,
 } from '../../reconstruction/source-model.js';
-import { callerResultDemands } from './caller-result-use.js';
+import { callerResultConsensus, callerResultDemands } from './caller-result-use.js';
 import {
   createNativeUnitPersistence,
   preparedSize,
@@ -1110,7 +1111,7 @@ function sourceAddresses(
  * same order under every allowance of at least min(A, 4W + 3) (each limit then
  * exceeds all work charged after it was set) and under every capacity it fits.
  *
- * Only such units are retained (`reusablePreparation`), with `allowance` =
+ * Only such units are retained (`retainablePreparation`), with `allowance` =
  * min(A, 4W + 3). A reuse happens only when the load's allowance is at least that and
  * the replayed charge (W on the load's context, then the recorded reads with their
  * capture charges) fits every enclosing allowance; it returns the recorded unit. So a
@@ -1119,9 +1120,10 @@ function sourceAddresses(
  *
  * Prefix reuse. A unit that is not retained keeps its preparation prefix
  * (`prepareNativePrefix`) in the same LRU, as a `PreparedPrefixEntry`: the lift
- * segment (graph, lift, entry prefix) and, when SSA completed within its limit, the
- * SSA segment, each with the work it charged and the reads it made. The lift segment
- * sets no limit from the allowance; the SSA segment is the same IR, work and reads under
+ * segment (lift, entry prefix) and, when SSA completed within its limit, the SSA
+ * segment, each with the work it charged and the reads it made. The graph is loaded
+ * afresh every time (`loadNativeGraph`). The lift segment sets no limit from the
+ * allowance; the SSA segment is the same IR, work and reads under
  * every SSA limit of at least its work W. A load replays a segment only when running it
  * here could not have failed or differed: its capacity fits, its charge fits every
  * enclosing allowance (`fits`), and for SSA the limit preparing would set now
@@ -1166,11 +1168,17 @@ const preparedUnits = new WeakMap<LoadedImage, PreparedUnitCache>();
 /** Retained prepared size (instructions + IR nodes + evidence + traced reads) per
  * image. Measured on SQLite at roughly 1 KiB of heap per unit, so ~256 MiB. */
 const MAX_PREPARED_UNIT_SIZE = 1 << 18;
-const reusablePreparation = (unit: PreparedNativeUnit): boolean =>
-  !unit.budget_truncated &&
-  !unit.limited &&
-  !unit.reasons.length &&
-  unit.analysis?.state === 'complete';
+/** Retention (in process and persisted): the preparation hit no limit, so its result is
+ * independent of the allowance. Its `reasons` may be anything that is not a limit (for
+ * example "unresolved control flow" from an indirect call): they are facts of the body,
+ * recorded in the unit and replayed with it. */
+const retainablePreparation = (unit: PreparedNativeUnit): boolean =>
+  !unit.budget_truncated && !unit.limited && unit.analysis?.state === 'complete';
+/** What a request may cite as result-use evidence (`admit`): a retainable unit that also
+ * carries no reason. Narrower than retention, so evidence never depends on which
+ * reason-carrying units were retained. */
+const citablePreparation = (unit: PreparedNativeUnit): boolean =>
+  retainablePreparation(unit) && !unit.reasons.length;
 
 function nativeSelectedNodes(ir: SSAForm): number {
   return ir.blocks.reduce(
@@ -1399,7 +1407,7 @@ export function nativeUnitLoader(
     const { value: unit, trace } = scope.dependencies
       ? scope.dependencies.traced(run)
       : { value: run(), trace: undefined };
-    if (allowance !== undefined && reusablePreparation(unit)) {
+    if (allowance !== undefined && retainablePreparation(unit)) {
       const old = cache.entries.get(fn.id);
       const prior = old && 'unit' in old ? old : undefined;
       if (prior) {
@@ -2053,7 +2061,7 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
       load(fn, boundedContext) {
         let unit = loadUnit(fn, boundedContext);
         if (scope.dependencies) unit = { ...unit, dependency_readset: scope.dependencies.finish() };
-        if (reusablePreparation(unit)) admit(fn.id, unit);
+        if (citablePreparation(unit)) admit(fn.id, unit);
         return unit;
       },
       argument_reaching: (unit, boundedContext) =>
@@ -2361,6 +2369,19 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
   let callerDemand: CallerResultDemand | null | undefined;
   const callerDemands = (scanContext: OperationContext): CallerResultDemand | undefined =>
     (callerDemand ??= callerResultDemands(input, preparedUnits, scanContext) ?? null) ?? undefined;
+  const resultUse = new Map<boolean, FunctionResultUse | null>();
+  const functionResultUse = (
+    scanContext: OperationContext,
+    floating: boolean,
+    candidate: () => boolean,
+  ): FunctionResultUse | undefined => {
+    let found = resultUse.get(floating);
+    if (found === undefined) {
+      found = callerResultConsensus(input, scanContext, floating, candidate) ?? null;
+      resultUse.set(floating, found);
+    }
+    return found ?? undefined;
+  };
   const ruleCalls = variadicRuleCalls(input.ir, input.types.calls, input.library, context);
   const objc = objcSourceFacts({
     ir: input.ir,
@@ -2394,6 +2415,7 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
     memory_transfers,
     function_return_demands: [...functionReturnDemands.values()],
     caller_result_demands: callerDemands,
+    function_result_use: functionResultUse,
     ...(function_returns === undefined ? {} : { function_returns }),
     ...(likely_arity === undefined ? {} : { likely_arity }),
     ...(likely_types === undefined ? {} : { likely_types }),

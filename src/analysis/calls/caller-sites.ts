@@ -1,5 +1,5 @@
 import {
-  buildOnce,
+  buildDeferred,
   useBuilt,
   type AbiProfile,
   type Address,
@@ -85,6 +85,16 @@ export interface CallerSiteIndex {
   readonly segments: readonly Segment[];
   /** Sorted disjoint VA ranges of instruction bytes: instruction sections minus data. */
   readonly code: readonly ByteRange[];
+  /** Function entries that some instruction may reach or materialize other than through
+   * a listed direct transfer, with the reason. ARM64: a conditional branch (B.cond,
+   * CBZ/CBNZ, TBZ/TBNZ) to the entry, an ADR of it, or an ADRP of its page while some
+   * 64-bit ADD immediate adds its page offset (or the offset is 0); x86-64: a reference
+   * to it that is neither a call nor a tail call. */
+  readonly escaped: ReadonlyMap<bigint, string>;
+  /** Every loader function-start hint is a function entry here (and one exists), so a
+   * site outside discovered ranges belongs to the nearest entry below it
+   * (`next_entry` attribution is exact). */
+  readonly starts_complete: boolean;
 }
 
 const indexes = new WeakMap<LoadedImage, CallerSiteIndex>();
@@ -139,18 +149,55 @@ export function callerSiteIndex(
   referencesComplete: boolean,
   context: OperationContext,
 ): CallerSiteIndex {
+  return useBuilt(
+    context,
+    callerSiteIndexDeferred(image, functions, references, referencesComplete, context),
+  );
+}
+
+/** The index without its payment (`buildDeferred`): the caller pays it through
+ * `useBuilt`, or charges `callerSiteScanWork` for the part of the sweep a decision
+ * needed. */
+export function callerSiteIndexDeferred(
+  image: LoadedImage,
+  functions: readonly FunctionRecord[],
+  references: readonly ReferenceRecord[],
+  referencesComplete: boolean,
+  context: OperationContext,
+): CallerSiteIndex {
   const cached = indexes.get(image);
   if (
     cached?.functions === functions &&
     cached.references === references &&
     cached.references_complete === referencesComplete
   )
-    return useBuilt(context, cached);
-  const built = buildOnce(context, (quiet) =>
+    return cached;
+  const built = buildDeferred(context, (quiet) =>
     buildCallerSiteIndex(image, functions, references, referencesComplete, quiet),
   );
   indexes.set(image, built);
   return built;
+}
+
+/** The instruction words a sweep outward from `from` (both directions at once) covers
+ * up to and including the word at `to`: every instruction-section word closer to
+ * `from` than `to`'s far end, one per word as the index build charges them. ARM64 only;
+ * elsewhere the whole build cost of `index`'s sweep (its discovered references). A
+ * pure function of the image and the two addresses. */
+export function callerSiteScanWork(index: CallerSiteIndex, from: bigint, to: bigint): number {
+  if (index.image.target.architecture !== 'arm64') return index.references.length;
+  const reach = to >= from ? to + 4n - from : from - to,
+    low = from - reach,
+    high = from + reach;
+  let words = 0;
+  for (const section of instructionSections(index.image)) {
+    const base = section.virtual_range.start.value,
+      end = base + section.virtual_range.size;
+    const start = low > base ? low : base,
+      stop = high < end ? high : end;
+    if (stop > start) words += Number((stop - start) / 4n);
+  }
+  return words;
 }
 
 /** Subtract sorted `holes` from sorted `ranges`. */
@@ -166,6 +213,72 @@ function subtract(ranges: readonly ByteRange[], holes: readonly ByteRange[]): By
     if (start < range.end) result.push({ start, end: range.end });
   }
   return result;
+}
+
+/** Most instructions `pageOffsets` follows after an ADRP. */
+const PAGE_SCAN = 32;
+
+/** The page offsets an ADRP into `register` is added to before its page value dies: a
+ * linear scan of the following words (`from` up to `end`, byte offsets into `view`)
+ * tracking the registers that hold the page. A 64-bit ADD immediate of a tracked
+ * register lists its offset (the sum is a fully known address: further arithmetic on
+ * it stays inside the object it designates, C pointer provenance); register moves copy
+ * the page; unsigned-offset loads and stores may use it as a base; loads and MOVZ/MOVN
+ * overwrite it. Any other instruction naming a tracked register in an operand field,
+ * a branch, a store of the page, the scan bound or the end of the bytes with the page
+ * still tracked leaves its use unknown (undefined). */
+function pageOffsets(
+  view: DataView,
+  from: number,
+  end: number,
+  register: number,
+): number[] | undefined {
+  const offsets: number[] = [];
+  if (register === 31) return offsets;
+  const tracked = new Set<number>([register]);
+  for (let at = from, count = 0; tracked.size; at += 4, count++) {
+    if (count === PAGE_SCAN || at + 4 > end) return undefined;
+    const word = view.getUint32(at, true),
+      rd = word & 31,
+      rn = (word >>> 5) & 31;
+    if ((word & 0xffc00000) >>> 0 === 0x91000000) {
+      // ADD Xd, Xn, #imm12
+      if (tracked.has(rn)) offsets.push((word >>> 10) & 0xfff);
+      tracked.delete(rd);
+      continue;
+    }
+    if ((word & 0xffe0ffe0) >>> 0 === 0xaa0003e0) {
+      // MOV Xd, Xm (ORR Xd, XZR, Xm)
+      if (tracked.has((word >>> 16) & 31)) tracked.add(rd);
+      else tracked.delete(rd);
+      continue;
+    }
+    if ((word & 0x3b000000) >>> 0 === 0x39000000) {
+      // Load/store, unsigned immediate offset: a tracked base is a memory access. SIMD&FP
+      // transfers and PRFM name no general register in Rt.
+      if (word & 0x04000000 || (word >>> 30 === 3 && ((word >>> 22) & 3) === 2)) continue;
+      if ((word >>> 22) & 3) tracked.delete(rd);
+      else if (tracked.has(rd)) return undefined;
+      continue;
+    }
+    if ((word & 0x1f800000) >>> 0 === 0x12800000 && ((word >>> 29) & 3) !== 3) {
+      // MOVN / MOVZ
+      tracked.delete(rd);
+      continue;
+    }
+    const branch =
+      (word & 0x7c000000) >>> 0 === 0x14000000 ||
+      (word & 0x7e000000) >>> 0 === 0x34000000 ||
+      (word & 0x7e000000) >>> 0 === 0x36000000 ||
+      (word & 0xff000010) >>> 0 === 0x54000000 ||
+      word >>> 25 === 0x6b;
+    if (
+      branch ||
+      [rd, rn, (word >>> 10) & 31, (word >>> 16) & 31].some((field) => tracked.has(field))
+    )
+      return undefined;
+  }
+  return offsets;
 }
 
 function buildCallerSiteIndex(
@@ -237,9 +350,21 @@ function buildCallerSiteIndex(
     if (list) list.push(site);
     else sitesByTarget.set(target, [site]);
   };
+  const hinted = image.hints.filter((hint) => hint.kind === 'function');
+  const startsComplete =
+    hinted.length > 0 &&
+    hinted.every((hint) => hint.address.space === 'va' && entries.has(hint.address.value));
+  const escaped = new Map<bigint, string>();
   let complete: boolean;
   if (image.target.architecture === 'arm64') {
-    // Linear 4-byte sweep: BL (100101) and B (000101) with a 26-bit word offset.
+    // Linear 4-byte sweep: BL (100101) and B (000101) with a 26-bit word offset. The same
+    // words also record every other way an instruction reaches or materializes an entry.
+    const materialized = new Set<bigint>(),
+      unpaired = new Set<bigint>(),
+      offsets = new Set<number>(),
+      falls = new Set<bigint>(),
+      conditional: { readonly address: bigint; readonly target: bigint }[] = [];
+    const entryPages = new Set(entryOrder.map((entry) => entry & ~0xfffn));
     for (const section of sections) {
       const base = section.virtual_range.start.value,
         size = section.virtual_range.size;
@@ -253,28 +378,88 @@ function buildCallerSiteIndex(
         for (let offset = first; offset + 4 <= last; offset += 4) {
           const word = view.getUint32(offset, true),
             opcode = word >>> 26;
-          if (opcode !== 0x25 && opcode !== 0x05) continue;
+          const address = base + BigInt(offset);
+          // Only an unconditional transfer, a trap or a call that never returns here
+          // (its return address would be another function's entry) ends the code
+          // before an entry; anything else may fall through into it.
+          if (
+            entries.has(address + 4n) &&
+            opcode !== 0x25 &&
+            opcode !== 0x05 &&
+            !(word >>> 25 === 0x6b && ((word >>> 21) & 0xf) !== 1 && ((word >>> 21) & 0xf) !== 9) &&
+            (word & 0xff80001f) >>> 0 !== 0xd4000000 &&
+            word >>> 16 !== 0
+          )
+            falls.add(address + 4n);
+          if (opcode !== 0x25 && opcode !== 0x05) {
+            if ((word & 0x1f000000) === 0x10000000) {
+              // ADR / ADRP: a 21-bit immediate, immhi:immlo.
+              let imm = (((word >>> 5) & 0x7ffff) << 2) | ((word >>> 29) & 3);
+              if (imm & 0x100000) imm -= 0x200000;
+              if (!(word & 0x80000000)) materialized.add(address + BigInt(imm));
+              else {
+                const page = (address & ~0xfffn) + (BigInt(imm) << 12n);
+                if (entryPages.has(page)) {
+                  const added = pageOffsets(view, offset + 4, last, word & 0x1f);
+                  if (added) for (const low of added) materialized.add(page + BigInt(low));
+                  else unpaired.add(page);
+                }
+              }
+            } else if ((word & 0xffc00000) >>> 0 === 0x91000000) offsets.add((word >>> 10) & 0xfff);
+            else if (
+              (word & 0xff000010) === 0x54000000 ||
+              (word & 0x7e000000) === 0x34000000 ||
+              (word & 0x7e000000) === 0x36000000
+            ) {
+              // B.cond, CBZ/CBNZ: imm19; TBZ/TBNZ: imm14 (word offsets).
+              const test = (word & 0x7e000000) === 0x36000000;
+              let imm = test ? (word >>> 5) & 0x3fff : (word >>> 5) & 0x7ffff;
+              if (imm & (test ? 0x2000 : 0x40000)) imm -= test ? 0x4000 : 0x80000;
+              const target = address + BigInt(imm * 4);
+              if (entries.has(target)) conditional.push({ address, target });
+            }
+            continue;
+          }
           let imm = word & 0x3ffffff;
           if (imm & 0x2000000) imm -= 0x4000000;
-          const address = base + BigInt(offset);
           const target = address + BigInt(imm * 4);
           if (entries.has(target))
             add(target, { address, tail: opcode === 0x05, from_function: null });
         }
       }
     }
+    for (const entry of entryOrder) {
+      const low = Number(entry & 0xfffn);
+      if (falls.has(entry)) escaped.set(entry, 'the preceding instruction may fall through');
+      else if (materialized.has(entry)) escaped.set(entry, 'an ADR or ADRP+ADD materializes it');
+      else if (unpaired.has(entry & ~0xfffn) && (low === 0 || offsets.has(low)))
+        escaped.set(
+          entry,
+          'an unfollowed ADRP of the entry page may pair with an ADD of its offset',
+        );
+    }
+    for (const { address, target } of conditional) {
+      // A loop back to a function's own entry stays inside it; only exact extents
+      // (complete function starts) prove that.
+      const next = entryOrder[entryBelow(entryOrder, target) + 1];
+      if (!startsComplete || address < target || (next !== undefined && address >= next))
+        escaped.set(target, 'a conditional branch from another function reaches the entry');
+    }
     complete = true;
   } else {
     context.checkpoint(references.length);
     for (const reference of references) {
       if (
-        (reference.kind !== 'call' && reference.kind !== 'tail_call') ||
         reference.status === 'unresolved' ||
         reference.to?.space !== 'va' ||
         reference.from.space !== 'va' ||
         !entries.has(reference.to.value)
       )
         continue;
+      if (reference.kind !== 'call' && reference.kind !== 'tail_call') {
+        escaped.set(reference.to.value, `a ${reference.kind} reference reaches the entry`);
+        continue;
+      }
       add(reference.to.value, {
         address: reference.from.value,
         tail: reference.kind === 'tail_call',
@@ -298,6 +483,8 @@ function buildCallerSiteIndex(
     functions_by_entry: functionsByEntry,
     segments,
     code,
+    escaped,
+    starts_complete: startsComplete,
   };
 }
 
@@ -314,14 +501,14 @@ function segmentAt(index: CallerSiteIndex, address: bigint): Segment | undefined
   return undefined;
 }
 
-/** Index of the last entry at or below `address` in the sorted entry order, or -1. */
-function entryBelow(index: CallerSiteIndex, address: bigint): number {
+/** Index of the last entry at or below `address` in a sorted entry order, or -1. */
+function entryBelow(order: readonly bigint[], address: bigint): number {
   let low = 0,
-    high = index.entry_order.length - 1,
+    high = order.length - 1,
     found = -1;
   while (low <= high) {
     const middle = (low + high) >> 1;
-    if (index.entry_order[middle]! <= address) {
+    if (order[middle]! <= address) {
       found = middle;
       low = middle + 1;
     } else high = middle - 1;
@@ -349,7 +536,7 @@ export function callerSites(
       caller = segment.owner;
       attribution = caller && 'ranges';
     } else {
-      const below = entryBelow(index, site.address);
+      const below = entryBelow(index.entry_order, site.address);
       const owners = below < 0 ? [] : index.functions_by_entry.get(index.entry_order[below]!)!;
       if (owners.length === 1) {
         caller = owners[0]!;
@@ -358,7 +545,7 @@ export function callerSites(
     }
     let extent: bigint | null = null;
     if (caller?.entry.space === 'va') {
-      const next = index.entry_order[entryBelow(index, caller.entry.value) + 1];
+      const next = index.entry_order[entryBelow(index.entry_order, caller.entry.value) + 1];
       if (next !== undefined) extent = next - caller.entry.value;
     }
     sites.push({
@@ -395,6 +582,10 @@ export interface ResultUseInput {
   /** The caller's already prepared body, consulted before any window: a classification
    * of the call node lifted from `instruction` (the decoded site), or undefined. */
   readonly prepared?: (site: CallerSite, instruction: string) => ResultUse | undefined;
+  /** The result roots to track; default both ABI primary result roots
+   * (`resultRoots`). A caller that knows one root carries no result of the callee
+   * passes only the other. */
+  readonly roots?: readonly RegisterDescriptor[];
 }
 
 /** The ABI primary integer and FP result registers (whole roots stay tracked). */
@@ -544,7 +735,7 @@ function classifyWindow(
   };
   const ir = input.lifter.lift(graph, input.abi, context).ir;
   const byId = new Map<string, BasicBlock>(ir.blocks.map((block) => [block.id, block]));
-  const roots = resultRoots(input.abi);
+  const roots = input.roots ?? resultRoots(input.abi);
   const slice = (register: RegisterDescriptor): bigint =>
     ((1n << BigInt(register.width_bits)) - 1n) << BigInt(register.offset_bits);
   const tails: Address[] = [];

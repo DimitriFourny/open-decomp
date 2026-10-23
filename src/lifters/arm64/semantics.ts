@@ -534,7 +534,7 @@ export class ArmSemantics {
       );
       return true;
     }
-    if (this.memory()) return true;
+    if (this.memory() || this.laneMemory()) return true;
     return this.simd();
   }
 
@@ -556,6 +556,60 @@ export class ArmSemantics {
     this.report(
       'Pointer authentication is abstracted to logical pointers: PAC bits, key/modifier checks, failure poisoning and authentication traps are not modeled.',
     );
+  }
+
+  /**
+   * ST1/LD1 single structure, one lane (`asisdlso`, `asisdlsop`). The decoder
+   * supplies these operands as opaque text, so the canonical fields define
+   * everything: element size and lane index from opcode/size/S/Q, the base
+   * (SP for Rn=31), and for the post-indexed form the writeback amount, the
+   * element size in bytes for Rm=31 or X[Rm]. ST1 stores the little-endian lane
+   * of V[Rt]; LD1 replaces only that lane. Multi-register forms (`asisdlse`,
+   * `asisdlsep`) and the replicating LD1R are not matched.
+   */
+  laneMemory(): boolean {
+    const { b, p, name } = this;
+    const match = /^(ST1|LD1)_asisdlso(p?)_[BHSD]X?1_/.exec(p.canonical_encoding);
+    if (!match || name !== match[1]) return false;
+    const post = match[2] === 'p',
+      load = name === 'LD1';
+    if (this.field('R') !== 0) throw new Unsupported('Unrecognized single-lane SIMD form');
+    const opcode = this.field('opcode'),
+      size = this.field('size'),
+      s = this.field('S'),
+      q = this.field('Q');
+    let esize: number, index: number;
+    if (opcode === 0) {
+      esize = 8;
+      index = (q << 3) | (s << 2) | size;
+    } else if (opcode === 2 && (size & 1) === 0) {
+      esize = 16;
+      index = (q << 2) | (s << 1) | (size >> 1);
+    } else if (opcode === 4 && size === 0) {
+      esize = 32;
+      index = (q << 1) | s;
+    } else if (opcode === 4 && size === 1 && s === 0) {
+      esize = 64;
+      index = q;
+    } else throw new Unsupported('Reserved single-lane SIMD element size');
+    const vector = this.vectorRegister(this.field('Rt'), 128),
+      baseRegister = gp(this.field('Rn'), 64, true),
+      base = b.readRegister(baseRegister);
+    // Read X[Rm] before any write; Rm=31 selects the immediate increment.
+    let step: Value | null = null;
+    if (post) {
+      const rm = this.field('Rm');
+      step = rm === 31 ? this.constant(64, esize / 8) : b.readRegister(gp(rm, 64));
+    }
+    if (load) {
+      const element = b.load(integer(esize), base);
+      b.writeRegister(
+        vector,
+        b.insert(b.readRegister(vector, integer(128)), element, index * esize),
+      );
+    } else b.store(base, b.extract(b.readRegister(vector, integer(128)), index * esize, esize));
+    if (step) b.writeRegister(baseRegister, b.int('add', base, step));
+    return true;
   }
 
   memory(): boolean {

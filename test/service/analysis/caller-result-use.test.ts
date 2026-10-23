@@ -12,7 +12,9 @@ import { CLANG, nativeOracleSkip } from '../../support/host-tools.js';
 // the -g0 binary. `post_call` leaves a call result in the result register while a store
 // follows, so its body alone makes it void-like (`incidental_result`); only the positive
 // result use of its direct caller `use_post` keeps the value. `post_ignored` has the same body
-// but its caller never reads the register, and `bump` is a real void function.
+// but its caller never reads the register, and `bump` is a real void function. The `tail_*`
+// functions end in a tail call to the int `h`: closed-world caller consensus makes the closed
+// ones `void`; a stored address or an export keeps the forwarded result.
 test(
   'caller result-use evidence keeps a void-like result that a direct caller reads',
   { skip: nativeOracleSkip(), timeout: 180_000 },
@@ -32,7 +34,6 @@ test(
         '-O1',
         '-g0',
         '-fno-builtin',
-        '-fno-optimize-sibling-calls',
         resolve('test/service/analysis/caller-result-use-source.c'),
         '-o',
         binary,
@@ -91,6 +92,32 @@ test(
           ignored.emission.text,
         );
         assert.equal(callerUse(ignored).length, 0, name);
+      }
+
+      const consensus = (data: Awaited<ReturnType<typeof run>>) =>
+        (data.emission.inferences ?? []).filter(
+          (item) => item.details.kind === 'rewrite' && item.details.rule === 'caller_consensus',
+        );
+      for (const name of ['_tail_ignored', '_tail_recursive']) {
+        const closed = await run(name, emitter);
+        assert.match(
+          closed.emission.text,
+          emitter === 'c-like' ? /^void \w+\(/m : /\) -> void:$/m,
+          closed.emission.text,
+        );
+        // The tail call to `h` is a call statement followed by a plain return.
+        assert.match(closed.emission.text, /^\s+h\(/m, closed.emission.text);
+        assert.doesNotMatch(closed.emission.text, /return h\(|unknown_result/);
+        assert.equal(consensus(closed).length, 1, name);
+      }
+      for (const name of ['_tail_table', '_tail_exported', '_h']) {
+        const open = await run(name, emitter);
+        assert.doesNotMatch(
+          open.emission.text,
+          emitter === 'c-like' ? /^void \w+\(/m : /\) -> void:$/m,
+          open.emission.text,
+        );
+        assert.equal(consensus(open).length, 0, name);
       }
     }
   },
