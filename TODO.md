@@ -665,7 +665,7 @@ Files that several items touch:
 
 ### A2: Lift A64 single-lane SIMD loads and stores (`ST1`/`LD1`, `asisdlso`/`asisdlsop`)
 
-- [ ] **Problem.** After A1, `unicodeNext` keeps its 14 save lines and an exposed frame, because `ST1_asisdlsop_S1_i1s` (`st1 {v.s}[i], [xn], #4`) is a real store that A1 must not bound.
+- [x] **Problem.** _Done (`wt/rm4-a2`, lane `od-rm4-a2` vs `od-main-fdba101`): only `unicodeNext` changed (13,188 → 10,300 bytes, 19 → 4 matches of `non-argument entry`/`__unknown_effect`/`frame_save`: the 14 `non-argument entry register` stores and the ST1 `__unknown_effect` are gone, 29 `frame_save` records, work 4,108,387 → 4,129,452; the 4 remaining `__unknown_effect` are the memory-free bounded USHL/INS/XTN/UZP1); its checked view changes (43,843 → 38,332 bytes); no other text, work or coverage change; the decoder shows these operands as opaque text, so the lift reads the canonical fields._ After A1, `unicodeNext` keeps its 14 save lines and an exposed frame, because `ST1_asisdlsop_S1_i1s` (`st1 {v.s}[i], [xn], #4`) is a real store that A1 must not bound.
   - **Change:** in `ArmSemantics.execute()`, lift the single-lane forms from the structured operands, never from operand text:
     - the memory operand gives base, writeback (`post`/`none`), `access_bits` and register offset;
     - the vector operand gives the lane;
@@ -1004,7 +1004,7 @@ Files that several items touch:
 
 ### T3: Retain prepared units whose reasons do not depend on the budget
 
-- [ ] **Problem.** Units whose only reason is "unresolved control flow" are never kept (any indirect call in the body sets it), so hub callees are prepared again in every request: `sqlite3Initialize` 30–46 times, `sqlite3Malloc` 30, `sqlite3_free` 50, `sqlite3Realloc` 13, … In total 580 repeat preparations.
+- [x] **Problem.** Units whose only reason is "unresolved control flow" are never kept (any indirect call in the body sets it), so hub callees are prepared again in every request: `sqlite3Initialize` 30–46 times, `sqlite3Malloc` 30, `sqlite3_free` 50, `sqlite3Realloc` 13, … In total 580 repeat preparations.
   - **Root cause:** `reusablePreparation` (`source-facts.ts:1125-1126`) requires `!unit.reasons.length`, and so does the persisted schema (`native-summaries.ts:88`). The documented contract (`:1101-1110`) needs only "hit no limit".
   - **Change:**
     - Split the predicate:
@@ -1018,6 +1018,7 @@ Files that several items touch:
     - The store schema test.
   - **Acceptance:** texts byte-identical (prototype: 0 of 129 changed); work identical after T2.
   - **Expected effect:** SQLite −6 to −7 s on top of T1 (measured).
+  - **Done (T3):** SQLite lane (114 functions, one process): repeat preparations 695 → 152 (preparations 1201 → 658, same binary with the old predicate behind a scratch switch); lane texts and per-function work identical to `od-main-bf6f43f` (0 of 114 sqlite texts or work counts differ); in the same-binary pair wall time 188 s → 147 s (load average 28 → 16, so noisy), user CPU 26 m → 16.7 m. Summary format 5.
   - **Depends on:** T2.
 
 ### T4: Do not load effects-only native dependencies
