@@ -77,7 +77,7 @@ for (const language of ['c-like', 'python-like'] as const) {
       assert.match(output.text, /\(\w+ \(\*\)\(uint64_t, uint64_t\)\)/, output.text);
     else assert.match(output.text, /function_pointer\(\w+, "\w+ \(\*\)\(uint64_t, uint64_t\)"\)/);
     assert.doesNotMatch(output.text, /\.\.\./, output.text);
-    assert.match(output.text, /open arity \(calls show proven args only\): indirect call/);
+    assert.match(output.text, /open arity \(proven args only\): indirect call/);
     assert.ok(
       output.local_validation?.some(
         (record) => record.kind === 'presentation' && record.rule === 'function_pointer_call',
