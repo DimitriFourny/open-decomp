@@ -43,10 +43,8 @@ const MAX_PERSISTED_UNIT_SIZE = 8192;
 
 /** The second tier of the prepared-unit cache: the project's persisted summaries. */
 export interface NativeUnitPersistence {
-  /** A stored unit equal to what preparing `fn` here would return, or undefined. Checking it
-   * charges nothing but observes the cancellation and deadline of `context`, the loading
-   * request's (never the request that created this tier, whose deadline may have passed). */
-  load(fn: FunctionRecord, context: OperationContext): PreparedUnitEntry | undefined;
+  /** A stored unit equal to what preparing `fn` here would return, or undefined. */
+  load(fn: FunctionRecord): PreparedUnitEntry | undefined;
   /** Queue `entry` for the request's next batched write. */
   save(fn: FunctionRecord, entry: PreparedUnitEntry): void;
 }
@@ -123,12 +121,10 @@ export function createNativeUnitPersistence(
     checkpoint: () => context.checkpoint(0),
   });
 
-  const load = (fn: FunctionRecord, context: OperationContext): PreparedUnitEntry | undefined => {
+  const load = (fn: FunctionRecord): PreparedUnitEntry | undefined => {
     if (missing.has(fn.id)) return undefined;
     const row = store.readNativeSummary(key, fn.id);
-    const entry = row
-      ? rebuild(row.value, row.revision, row.allowance, row.work, fn, quiet(context))
-      : undefined;
+    const entry = row ? rebuild(row.value, row.revision, row.allowance, row.work, fn) : undefined;
     if (!entry) missing.add(fn.id);
     return entry;
   };
@@ -139,7 +135,6 @@ export function createNativeUnitPersistence(
     allowance: number,
     work: number,
     fn: FunctionRecord,
-    context: OperationContext,
   ): PreparedUnitEntry | undefined => {
     if (
       rowRevision !== revision ||
@@ -167,6 +162,7 @@ export function createNativeUnitPersistence(
       const { target_id: _id, ...rest } = dependency;
       dependencies.push({ ...rest, target });
     }
+    const context = quiet(scope.context);
     if (!verifyTracedReads(store, revision, stored.trace, context)) return undefined;
     const trace = stored.trace as readonly TracedRead[];
     const prepared: PreparedNativeUnit = {
