@@ -8,7 +8,7 @@ import type {
 } from '../presentation/index.js';
 import type { Reconstruction } from './model.js';
 import { registerOutputs, stackEntry, variadicArea } from './source-model.js';
-import { validateEmittedUses } from './validate-uses.js';
+import { boundParameters, validateEmittedUses } from './validate-uses.js';
 import {
   crossSilently,
   jumpBlocks,
@@ -107,6 +107,9 @@ export function validateReconstruction(program: Reconstruction, context: Operati
       if (!statements.has(statement)) invalid(block, 'a reachable source statement lost its owner');
     }
     for (const parameter of block.parameters) definitions.add(parameter.id);
+    for (const parameter of boundParameters(program, block)) definitions.add(parameter.id);
+    for (const definition of program.source?.definitions?.get(id) ?? [])
+      definitions.add(definition.result.id);
     for (const node of block.statements) {
       context.checkpoint(1);
       if (
@@ -180,21 +183,22 @@ export function validateReconstruction(program: Reconstruction, context: Operati
     for (const definition of program.source?.definitions?.get(block.control.id) ?? [])
       definitions.add(definition.result.id);
     for (const transfer of transfers(program, id)) {
-      const target = program.blocks.get(transfer.target)!;
+      const target = program.blocks.get(transfer.target)!,
+        parameters = boundParameters(program, target);
       const destinations = new Set<string>();
       for (const copy of program.transfers.get(transfer) ?? []) {
         context.checkpoint(1);
         if (
           destinations.has(copy.destination.id) ||
           program.inline.has(copy.destination.id) ||
-          !target.parameters.some((parameter) => parameter.id === copy.destination.id) ||
+          !parameters.some((parameter) => parameter.id === copy.destination.id) ||
           bitWidth(copy.destination.type) !== bitWidth(copy.source.type)
         )
           invalid(block.control, 'a parallel edge copy has an invalid destination or width');
         destinations.add(copy.destination.id);
         checkValue(copy.source);
       }
-      for (const parameter of target.parameters) {
+      for (const parameter of parameters) {
         context.checkpoint(1);
         if (!program.live.has(parameter.id) || program.inline.has(parameter.id)) continue;
         const original = transfer.copies.find((copy) => copy.destination.id === parameter.id);

@@ -130,6 +130,9 @@ import {
   VariableLiveness,
   edgeCopies,
   partitionVariables,
+  loopCopyRotations,
+  rotateLoopCopies,
+  type LoopCopyRotation,
   type VariableMember,
   controlArms,
   formArm,
@@ -378,6 +381,9 @@ export class Renderer {
   /** The reader printing held calls, until its first code line is checked. */
   private openReader: { readonly start: number; readonly held: InlineCallSite[] } | null = null;
   private liveness: VariableLiveness | null = null;
+  /** Rotated loop headers (loop_copy_rotation): phi id -> its rotation (the
+   * pseudo value every edge into the header writes instead of the phi). */
+  private readonly rotatedPhis = new Map<string, Map<string, LoopCopyRotation>>();
   /** Do-while tests restated over the values written by their repeat copies. */
   private readonly rebased = new Map<string, Extract<Expression, { kind: 'compare' }>>();
   private readonly synthetic = new Map<string, Expression>();
@@ -522,7 +528,7 @@ export class Renderer {
     const variadic = this.program.source?.variadic;
     return this.sourceView && variadic?.kind === 'va_list' ? variadic : undefined;
   }
-  private readonly sourceRoleNames: ReadonlyMap<string, string | null>;
+  private sourceRoleNames: ReadonlyMap<string, string | null>;
   /** Loop header phis: each is its own loop-carried variable (see planSourceNames). */
   private readonly sourceCarried: ReadonlySet<string>;
   /** Initial value -> the loop header phi it enters (see planSourceNames). */
@@ -5853,19 +5859,18 @@ export class Renderer {
               status: 'unverified',
               reason: 'original edge copy bound exceeded',
             };
+          // An edge into a rotated header writes the phi's pseudo value; the
+          // header's first statement copies it into the phi (loop_copy_rotation).
+          const rotated = this.rotatedPhis.get(transfer.target);
           return validateParallelMoves(
             transfer.effect.destination.id,
             transfer.copies.flatMap((copy) => {
               this.localValidation.allowance.charge();
+              const destination = rotated?.get(copy.destination.id)?.pseudo ?? copy.destination;
               return this.program.live.has(copy.destination.id) &&
                 !this.inline.has(copy.destination.id) &&
                 !this.forwardedCopies.get(transfer)?.has(copy.destination.id)
-                ? [
-                    {
-                      ...copy,
-                      destination: this.variables.get(copy.destination.id) ?? copy.destination,
-                    },
-                  ]
+                ? [{ ...copy, destination: this.variables.get(destination.id) ?? destination }]
                 : [];
             }),
             moves,
@@ -7983,6 +7988,85 @@ export class Renderer {
     this.body = this.fpPresentation.rewrite(result.value.body);
   }
 
+  /** Source view, C-like (L4): rotate the loop-carried copies that alone keep a
+   * bottom test from printing as do-while (loopCopyRotations): `this.program`
+   * becomes rotateLoopCopies' rewrite, each pseudo value takes its phi's
+   * spelling, and the rotations are returned for the partition. Optional work,
+   * at most 1/8 of the remaining budget like the partition's; the checked view
+   * and Python-like (no do-while) never rotate. */
+  private loopCopyRotations(liveness: VariableLiveness): readonly LoopCopyRotation[] {
+    if (this.language !== 'c-like' || !liveness.complete) return [];
+    const program = this.program,
+      floating = program.source?.float_values;
+    const rotations = loopCopyRotations(
+      this.body,
+      program,
+      liveness,
+      (control) => !this.requirementPredicates.has(control.id),
+      (phi, source) =>
+        !floating?.has(phi.id) &&
+        !floating?.has(source.id) &&
+        !this.fpPresentation.unobserved.has(phi.id) &&
+        !this.fpPresentation.unobserved.has(source.id),
+      // A header with at most one printed statement (silent, or one a comma
+      // test may hold) testing for the loop's continuation may already print
+      // the loop as `while`.
+      (header, follow) =>
+        header.control.kind === 'if' &&
+        [header.control.when_true, header.control.when_false].some(
+          (arm) => !arm.body && arm.transfer.target === follow,
+        ) &&
+        header.statements.filter(
+          (node) =>
+            program.retained.has(node.id) &&
+            !('result' in node && this.inlined.has(node.result.id)) &&
+            !this.noMove(node),
+        ).length <= 1,
+      this.context,
+    );
+    // The rotated liveness copies every block's entry set once.
+    const work =
+      program.blocks.size * ((liveness.values.length + rotations.length + 31) >>> 5) +
+      program.values.size;
+    if (
+      !rotations.length ||
+      work > Math.floor((this.context.remainingWork?.() ?? 0) / 8) ||
+      !this.localValidation.presentation(
+        'loop_copy_rotation',
+        this.input.function.id,
+        "a loop whose lexically last test is its sole repeat edge, where repeat copies x = y of a value y defined in the loop (not live into the header) are live on exit or read by the exit copies, binds a fresh variable p at its header instead of each such phi x: every incoming edge writes p (the entry value, or y on the repeat edge) and the header's first statement is x = p. Every iteration therefore starts with x holding exactly the phi's value; p is dead after that statement and y is defined later, so they do not interfere and may share one variable, leaving the repeat edge copy-free for the do-while. Only copy placement changes; no value, effect or test moves",
+        rotations.map(({ definition }) => definition.id),
+      )
+    )
+      return [];
+    // Each pseudo value is presented like the repeat source it is meant to
+    // share a variable with (spelling, storage and role), so the header-start
+    // copy prints exactly as the repeat edge copy it replaces.
+    const roles = new Map(this.sourceRoleNames);
+    this.context.checkpoint(roles.size);
+    for (const rotation of rotations) {
+      const { header, phi, source, pseudo } = rotation;
+      const phis = this.rotatedPhis.get(header) ?? new Map<string, LoopCopyRotation>();
+      phis.set(phi.id, rotation);
+      this.rotatedPhis.set(header, phis);
+      const type =
+        this.sourceValueTypes.get(source.id) ??
+        program.source?.value_types?.get(source.id)?.type_id;
+      if (type !== undefined) this.sourceValueTypes.set(pseudo.id, type);
+      const spelling = this.localSpellings.get(source.id);
+      if (spelling !== undefined) this.localSpellings.set(pseudo.id, spelling);
+      const integer = this.localIntegers.get(source.id);
+      if (integer !== undefined) this.localIntegers.set(pseudo.id, integer);
+      const set = this.localIntegerSets.get(source.id);
+      if (set !== undefined) this.localIntegerSets.set(pseudo.id, set);
+      const role = roles.get(source.id);
+      if (role !== undefined) roles.set(pseudo.id, role);
+    }
+    this.sourceRoleNames = roles;
+    this.program = rotateLoopCopies(program, rotations, this.context);
+    return rotations;
+  }
+
   /** Source view: coalesce phi copies, then lay out return tails and loop
    * syntax. Each step checks its side conditions on this reconstruction and
    * records one presentation rewrite; the checked view never calls this. */
@@ -8139,7 +8223,7 @@ export class Renderer {
         this.inlinedCallSites.set(site.anchor, nodes);
       }
     this.chooseLocalTypes();
-    const liveness = new VariableLiveness(
+    const unrotated = new VariableLiveness(
       program,
       this.context,
       4096,
@@ -8147,6 +8231,9 @@ export class Renderer {
       indices,
       new Set(this.inlinedCalls.keys()),
     );
+    const rotations = this.loopCopyRotations(unrotated);
+    const liveness = rotations.length ? unrotated.rotated(this.program, rotations) : unrotated;
+    program = this.program;
     this.liveness = liveness;
     const formals = new Set(program.parameters.map((value) => value.id));
     // Widening copies may share unsigned storage. Interference is checked
@@ -8234,7 +8321,7 @@ export class Renderer {
     const aliases: { destination: Value; source: Value }[] = [];
     // Definitions printed through an exact conversion into the variable's type:
     // edge copies (block parameters), pure assignments and plain source loads.
-    const flexible = new Set<string>();
+    const flexible = new Set<string>(rotations.map(({ pseudo }) => pseudo.id));
     for (const block of program.blocks.values()) {
       this.context.checkpoint(1);
       for (const parameter of block.parameters) flexible.add(parameter.id);
@@ -8320,7 +8407,12 @@ export class Renderer {
       }
       chainDefinitions(block.control.id);
     }
-    const edges: { destination: Value; source: Value }[] = [...assignments];
+    // A rotated phi's pseudo value joins its repeat source first: they never
+    // interfere, and an earlier entry-value merge must not keep them apart.
+    const edges: { destination: Value; source: Value }[] = [
+      ...rotations.map(({ pseudo, source }) => ({ destination: pseudo, source })),
+      ...assignments,
+    ];
     for (const copies of program.transfers.values()) edges.push(...copies);
     // Values each machine register holds at a block boundary, in value order.
     const registers = new Map<string, Set<Value>>();
@@ -9466,9 +9558,25 @@ export class Renderer {
         expression = definition.expression;
       this.emitNotes(anchor, depth);
       const start = this.writer.offset;
+      // A rotated phi's header-start copy prints like the edge copy it
+      // replaces: from the repeat source's variable when the pseudo value
+      // shares it (the same storage, so the same text).
+      const rotation = this.rotatedPhis.get(anchor)?.get(value.id);
+      const shared =
+        rotation &&
+        this.variables.get(rotation.pseudo.id)?.id === this.variables.get(rotation.source.id)?.id;
       this.writer.statement(
         depth,
-        `${this.local(value)} = ${this.assigned(value, this.expression(expression, value.type))}`,
+        `${this.local(value)} = ${
+          rotation
+            ? this.copied(
+                value,
+                shared && this.variables.has(rotation.pseudo.id)
+                  ? rotation.source
+                  : rotation.pseudo,
+              )
+            : this.assigned(value, this.expression(expression, value.type))
+        }`,
       );
       this.mapped(this.dataOrigin(anchor), start, [value.id]);
     }
