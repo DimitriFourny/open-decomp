@@ -665,7 +665,7 @@ Files that several items touch:
 
 ### A2: Lift A64 single-lane SIMD loads and stores (`ST1`/`LD1`, `asisdlso`/`asisdlsop`)
 
-- [ ] **Problem.** After A1, `unicodeNext` keeps its 14 save lines and an exposed frame, because `ST1_asisdlsop_S1_i1s` (`st1 {v.s}[i], [xn], #4`) is a real store that A1 must not bound.
+- [x] **Problem.** _Done (`wt/rm4-a2`, lane `od-rm4-a2` vs `od-main-fdba101`): only `unicodeNext` changed (13,188 → 10,300 bytes, 19 → 4 matches of `non-argument entry`/`__unknown_effect`/`frame_save`: the 14 `non-argument entry register` stores and the ST1 `__unknown_effect` are gone, 29 `frame_save` records, work 4,108,387 → 4,129,452; the 4 remaining `__unknown_effect` are the memory-free bounded USHL/INS/XTN/UZP1); its checked view changes (43,843 → 38,332 bytes); no other text, work or coverage change; the decoder shows these operands as opaque text, so the lift reads the canonical fields._ After A1, `unicodeNext` keeps its 14 save lines and an exposed frame, because `ST1_asisdlsop_S1_i1s` (`st1 {v.s}[i], [xn], #4`) is a real store that A1 must not bound.
   - **Change:** in `ArmSemantics.execute()`, lift the single-lane forms from the structured operands, never from operand text:
     - the memory operand gives base, writeback (`post`/`none`), `access_bits` and register offset;
     - the vector operand gives the lane;
