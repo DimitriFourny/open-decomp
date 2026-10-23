@@ -4,7 +4,7 @@ Analyze native binaries and decompile individual functions without source code o
 
 ## Why
 
-Open Decomp started as an experiment: how far can a decompiler go when it is written entirely in TypeScript and runs on a plain JavaScript runtime, with no JVM, no native plugins and no Python? Further than expected. The result is about 120,000 lines of TypeScript covering loaders, lifting, SSA, type and struct recovery, control-flow structuring and C/Python-like emitters. Instruction decoding uses the vendored a64js (ARM64) and iced-x86 (WebAssembly) packages; demanglers ship as WebAssembly too.
+Open Decomp started as an experiment: how far can a decompiler go when it is written entirely in TypeScript and runs on a plain JavaScript runtime, with no JVM, no native plugins and no Python? Further than expected. The result is about 120,000 lines of TypeScript covering loaders, lifting, SSA, type and struct recovery, control-flow structuring and C/Python-like emitters. Two pieces come from outside: instructions are decoded by a64js for ARM64 (JavaScript, vendored) and iced-x86 for x86-64 (Rust compiled to WebAssembly), and the C++, Rust and Swift demanglers are WebAssembly builds as well.
 
 - **Small.** A 9 MB package, about 50 MB installed with every dependency. Anything that runs Node 24 runs it.
 - **On demand.** Functions are analyzed when you ask for them, not after a whole-program pass, and results are cached in a SQLite project next to the binary.

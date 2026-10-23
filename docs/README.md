@@ -238,16 +238,16 @@ Use hexadecimal `offset`, length at most 524,288 bytes, and the returned next UR
 
 ## Limits and semantic coverage
 
-| Request bound         |   Default |     Maximum |
-| --------------------- | --------: | ----------: |
-| Page items            |       100 |       1,000 |
-| Memory-read bytes     |     4,096 |   1,048,576 |
-| Instructions          |    10,000 |   1,000,000 |
-| Blocks                |    10,000 |     100,000 |
-| IR nodes              |   100,000 |  10,000,000 |
-| Cumulative work units | 1,000,000 | 100,000,000 |
-| Deadline milliseconds |    30,000 |     300,000 |
-| Output bytes          | 1,048,576 |  16,777,216 |
+| Request bound         |    Default |     Maximum |
+| --------------------- | ---------: | ----------: |
+| Page items            |        100 |       1,000 |
+| Memory-read bytes     |      4,096 |   1,048,576 |
+| Instructions          |     10,000 |   1,000,000 |
+| Blocks                |     10,000 |     100,000 |
+| IR nodes              |    100,000 |  10,000,000 |
+| Cumulative work units | 10,000,000 | 100,000,000 |
+| Deadline milliseconds |     30,000 |     300,000 |
+| Output bytes          |  1,048,576 |  16,777,216 |
 
 Minimum output budget is 1,024 bytes. Defaults use conservative unknown calls, bounded indirect-target recovery, evidence included, C-like output and two-space indentation. Raising a budget is not proof of completeness and does not silently extend already-published partial function ranges. Full analysis artifacts are limited to 16 MiB. Image storage separately bounds individual records at 16 MiB, aggregate encoded metadata at 64 MiB and facts at one million; these are serialized-data bounds, **not process-memory ceilings**.
 
