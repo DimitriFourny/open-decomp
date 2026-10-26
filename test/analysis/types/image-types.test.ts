@@ -88,11 +88,14 @@ test('views of one pointer flowing to two callees merge into one named layout', 
   assert.equal(first.label, imageTypeLabels([first.name]).get(first.name));
   assert.equal(first.state, 'complete');
   assert.deepEqual(first.functions, ['caller', 'first', 'second']);
+  // The stable binding key: the callees' own roles, not the caller's uses of them.
+  assert.deepEqual(first.anchors, ['argument:first:0', 'argument:second:0']);
   // Input order never changes the identity or the name.
   const reversed = solve([...shared].reverse());
   assert.equal(classOf(reversed, 'second|a0').id, first.id);
   assert.equal(classOf(reversed, 'second|a0').name, first.name);
   assert.equal(classOf(reversed, 'second|a0').label, first.label);
+  assert.deepEqual(classOf(reversed, 'second|a0').anchors, first.anchors);
 });
 
 test('class labels are digests of the class name, unique within a solution', () => {

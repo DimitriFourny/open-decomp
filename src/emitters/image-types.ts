@@ -8,22 +8,35 @@ function scalar(field: ImageTypeField): string | null {
   return field.width_bits === 128 ? '__uint128_t' : null;
 }
 
+/** A user declaration's effect on one class in the dump. */
+export interface ImageTypeUserView {
+  /** Bound: the declared structure's C spelling (`struct Rec`) and the declarations
+   * defining it, dependencies first (each type declared once per dump). */
+  readonly bound?: {
+    readonly spelling: string;
+    readonly declarations: readonly { readonly type_id: string; readonly declaration: string }[];
+  };
+  /** What binds the class, or why it stays unbound. */
+  readonly note: string;
+}
+
 /** C declarations for merged image types: observed members only, explicit byte
  * gaps, no size; a member proven to hold another declared type's pointer is
  * declared as that pointer. A floating and an integer access of the same bytes
  * are the two members of one anonymous union. Members otherwise overlapping an
  * earlier member, or of a width without a C scalar, stay inside the surrounding
- * gap. */
+ * gap. A class bound to a user-declared structure (`user`) is that declaration. */
 export function renderImageTypeDeclarations(
   classes: readonly ImageTypeClass[],
   functionName: (id: string) => string,
+  user: ReadonlyMap<string, ImageTypeUserView> = new Map(),
 ): string {
   // One member at offset zero is a plain scalar pointee (`uint8_t*`), as in
   // function output; it is not declared as a structure.
   const scalars = new Map<string, string>();
   for (const item of classes) {
     const field = item.fields[0];
-    if (!field) continue;
+    if (!field || user.get(item.id)?.bound) continue;
     const type = scalar(field);
     if (
       item.fields.length === 1 &&
@@ -37,13 +50,27 @@ export function renderImageTypeDeclarations(
   const declared = classes.filter((item) => item.fields.length > 0 && !scalars.has(item.id));
   const classNames = new Map(classes.map((item) => [item.id, item.label]));
   const names = new Map<string, string>(scalars);
-  for (const item of declared) names.set(item.id, item.label);
+  for (const item of declared) names.set(item.id, user.get(item.id)?.bound?.spelling ?? item.label);
   const lines = [
     '/* Open Decomp recovered image types: observed members only; sizes and complete layouts are unknown. */',
     '#include <stdint.h>',
   ];
-  for (const item of declared) lines.push(`typedef struct ${item.label} ${item.label};`);
+  for (const item of declared)
+    if (!user.get(item.id)?.bound) lines.push(`typedef struct ${item.label} ${item.label};`);
+  const printed = new Set<string>();
   for (const item of declared) {
+    const view = user.get(item.id);
+    if (view?.bound) {
+      lines.push(
+        `/* ${item.label} is ${view.bound.spelling}: ${view.note}; first seen: ${item.name}; ${seen(item, functionName)} */`,
+      );
+      for (const { type_id, declaration } of view.bound.declarations)
+        if (!printed.has(type_id)) {
+          printed.add(type_id);
+          lines.push(declaration);
+        }
+      continue;
+    }
     const parts: string[] = [];
     let end = 0n,
       packed = false;
@@ -88,11 +115,9 @@ export function renderImageTypeDeclarations(
     }
     const notes = [
       `first seen: ${item.name}`,
-      `${item.functions.length === 1 ? 'seen in' : `merged from ${item.functions.length} functions:`} ${item.functions
-        .slice(0, 6)
-        .map(functionName)
-        .join(', ')}${item.functions.length > 6 ? ', …' : ''}`,
+      seen(item, functionName),
       ...(item.state === 'bounded' ? ['flows partly explored'] : []),
+      ...(view ? [view.note] : []),
       ...(item.conflicts.length
         ? [`conflicts with ${item.conflicts.map((id) => classNames.get(id) ?? id).join(', ')}`]
         : []),
@@ -112,4 +137,11 @@ export function renderImageTypeDeclarations(
     );
   }
   return `${lines.join('\n')}\n`;
+}
+
+function seen(item: ImageTypeClass, functionName: (id: string) => string): string {
+  return `${item.functions.length === 1 ? 'seen in' : `merged from ${item.functions.length} functions:`} ${item.functions
+    .slice(0, 6)
+    .map(functionName)
+    .join(', ')}${item.functions.length > 6 ? ', …' : ''}`;
 }
