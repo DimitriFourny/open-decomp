@@ -17,6 +17,7 @@ import {
   type MutationResult,
   type OperationContext,
   type ProjectStore,
+  type ReviewedSourceEdit,
   type RecoveredType,
   type StoreTransaction,
 } from '../../core/index.js';
@@ -42,6 +43,13 @@ export interface ActiveAnnotationView {
   /** Selected declarations and reachable type dependencies; alternatives in that scope remain separate. */
   readonly types: readonly SuppliedTypeRecord[];
 }
+
+/** Resolves the artifact a reviewed source was cleaned from: the server-side check that it is a
+ * published decompilation of this function. Throws `OperationError` (`invalid_input`) otherwise. */
+export type ReviewedSourceBase = (
+  subject: AnnotationSubject,
+  value: ReviewedSourceEdit,
+) => { readonly artifact_id: string; readonly text_sha256: string };
 
 /** Trusted synchronous composition hook; throwing rolls back annotations, evidence and the caller's durable job save. */
 export type AnnotationCommitHook = (
@@ -86,6 +94,7 @@ export class AnnotationService {
     context: OperationContext,
     catalog?: TrustedSemanticCatalog,
     onCommit?: AnnotationCommitHook,
+    sourceBase?: ReviewedSourceBase,
   ): MutationResult {
     try {
       context.checkpoint(1);
@@ -138,6 +147,15 @@ export class AnnotationService {
       }).items;
       for (const annotation of existing) previous.set(annotation.id, annotation);
       const prospective = new Map(active.map((annotation) => [annotation.id, annotation]));
+      const subjectCache = new Map<string, AnnotationSubject | null>();
+      const resolveSubject = (id: string): AnnotationSubject | null => {
+        let subject = subjectCache.get(id);
+        if (subject === undefined) {
+          subject = catalog?.subject(id) ?? resolveDurableSubject(this.store, id, current, context);
+          subjectCache.set(id, subject);
+        }
+        return subject;
+      };
       const prepared: Annotation[] = [],
         removed: string[] = [],
         evidence: Evidence[] = [];
@@ -187,10 +205,31 @@ export class AnnotationService {
           evidence.push(proof);
           evidenceIds = [proof.id];
         }
+        let value: Annotation['value'];
+        if (edit.value.kind === 'source') {
+          const subject = resolveSubject(edit.entity_id);
+          if (!subject)
+            reject(
+              'not_found',
+              'Annotation subject is absent from durable facts and the trusted semantic catalog',
+            );
+          if (subject.kind !== 'function')
+            reject('invalid_input', 'Reviewed source requires a function subject');
+          if (!sourceBase)
+            reject('invalid_input', 'Reviewed source requires a published base artifact resolver');
+          const base = sourceBase(subject, edit.value);
+          value = {
+            kind: 'source',
+            language: edit.value.language,
+            text: edit.value.text,
+            base_artifact_id: base.artifact_id,
+            base_text_sha256: base.text_sha256,
+          };
+        } else value = edit.value;
         const annotation: Annotation = {
           id: edit.id,
           entity_id: edit.entity_id,
-          value: edit.value,
+          value,
           status: edit.status,
           evidence_ids: evidenceIds,
           author: batch.author,
@@ -210,8 +249,7 @@ export class AnnotationService {
         }
       const generated = new Set(evidence.map((proof) => proof.id));
       const checkedEvidence = new Set<string>(),
-        checkedTypes = new Set<string>(),
-        subjectCache = new Map<string, AnnotationSubject | null>();
+        checkedTypes = new Set<string>();
       const validateEvidence = (references: readonly string[]): void => {
         const pending = [...references];
         while (pending.length) {
@@ -275,13 +313,7 @@ export class AnnotationService {
       for (const annotation of prepared) {
         context.checkpoint(1);
         if (annotation.status === 'retracted') continue;
-        let subject = subjectCache.get(annotation.entity_id);
-        if (subject === undefined) {
-          subject =
-            catalog?.subject(annotation.entity_id) ??
-            resolveDurableSubject(this.store, annotation.entity_id, current, context);
-          subjectCache.set(annotation.entity_id, subject);
-        }
+        const subject = resolveSubject(annotation.entity_id);
         if (!subject)
           reject(
             'not_found',
@@ -394,6 +426,8 @@ export class AnnotationService {
     };
     for (const annotation of live) {
       context.checkpoint(1);
+      // Reviewed source is a presentation record; it never reaches type recovery, naming or the emitter.
+      if (annotation.value.kind === 'source') continue;
       const included = selected === null || selected.has(annotation.entity_id);
       if (included) {
         bound(encodeAnnotation(annotation));

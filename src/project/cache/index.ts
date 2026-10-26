@@ -47,6 +47,7 @@ import {
   type AnalysisArtifactPayload,
   type AnalysisCatalogData,
   type AnalysisComputation,
+  type ReviewedSourceLookup,
   type StoredDecompilation,
 } from './model.js';
 import {
@@ -186,6 +187,7 @@ function validateComputation(
       ((result.reason === 'output_limit' && !result.data.emission.omitted?.length) ||
         result.continuation !== null)) ||
     result.data.cache !== 'computed' ||
+    result.data.reviewed_source !== undefined ||
     result.data.function_id !== identity.function_id ||
     result.project_id !== store.project_id ||
     result.revision !== revision ||
@@ -424,16 +426,26 @@ function delivery(
   /** `result` is a stored, schema-validated inline result: wrapping it in a handle needs no
    * second full parse. */
   validated = false,
+  reviewed?: ReviewedSourceLookup,
 ): ToolResult<'function_decompile'> {
   const handle = encodeArtifact(artifact);
   const wrapped = {
     ...result,
     artifacts: [handle],
-    data: { ...result.data, cache, ...(work === undefined ? {} : { work }) },
+    ...(reviewed === undefined || reviewed.diagnostics.length === 0
+      ? {}
+      : { diagnostics: [...result.diagnostics, ...reviewed.diagnostics] }),
+    data: {
+      ...result.data,
+      cache,
+      ...(work === undefined ? {} : { work }),
+      ...(reviewed === undefined ? {} : { reviewed_source: reviewed.reviewed_source }),
+    },
   };
-  const inline = validated
-    ? (wrapped as ToolResult<'function_decompile'>)
-    : functionDecompileResultSchema.parse(wrapped);
+  const inline =
+    validated && reviewed === undefined
+      ? (wrapped as ToolResult<'function_decompile'>)
+      : functionDecompileResultSchema.parse(wrapped);
   if (preference === 'artifact') {
     const requested = projectDecompilationArtifactResult(inline, 'requested');
     if (Buffer.byteLength(JSON.stringify(requested)) > limit)
@@ -455,6 +467,9 @@ export async function runCachedDecompilation(
     readonly context: OperationContext;
     readonly inline_limit: number;
     readonly delivery?: 'auto' | 'artifact';
+    /** Reviewed source of the function for the stored emission text: delivered beside the result,
+     * never stored in it and never part of the cache identity. */
+    readonly review?: (emissionText: string) => ReviewedSourceLookup;
     readonly dependencies?: AnalysisDependencyCollector;
     /** False: read and reuse no stored result and publish none (a transient artifact serves any
      * artifact delivery for this session only). */
@@ -482,6 +497,7 @@ export async function runCachedDecompilation(
       limit,
       input.delivery ?? 'auto',
       true,
+      input.review?.(payload.result.data.emission.text),
     );
     const job = activeJob(store, job_id, identity, context);
     store.saveJob({
@@ -590,6 +606,7 @@ export async function runCachedDecompilation(
     limit,
     input.delivery ?? 'auto',
     !shed,
+    input.review?.(computation.result.data.emission.text),
   );
   if (!('data' in response)) fail('invalid_input', 'Invalid prepared analysis delivery');
   activeJob(store, job_id, identity, context);

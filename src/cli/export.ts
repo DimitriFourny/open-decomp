@@ -13,6 +13,9 @@ export interface ExportOptions {
    * workers (`exportJobs`). */
   readonly jobs: number;
   readonly name?: string | undefined;
+  /** `reviewed`: a function with a saved reviewed source is written from it (default
+   * `decompiled`: the decompiler output for every function). */
+  readonly source?: 'decompiled' | 'reviewed' | undefined;
 }
 
 /** Request workers of an export: `--jobs`, default min(4, CPUs/2). */
@@ -26,6 +29,8 @@ export interface ExportSummary {
   readonly failed: number;
   readonly files: number;
   readonly bytes: number;
+  /** Function files written from a reviewed source (`source: 'reviewed'`). */
+  readonly reviewed: number;
   /** Native indexes that reported incompleteness: lists derived from them are lower bounds. */
   readonly incompleteIndexes: readonly string[];
 }
@@ -238,6 +243,7 @@ class Exporter {
   readonly #functionsDirectory: string;
   rows: Row[] = [];
   readonly #incomplete = new Set<string>();
+  #reviewed = 0;
 
   constructor(options: ExportOptions, input: string, signal: AbortSignal, format: CFormat) {
     this.#input = input;
@@ -249,6 +255,11 @@ class Exporter {
 
   get incompleteIndexes(): string[] {
     return [...this.#incomplete].sort(compare);
+  }
+
+  /** Function files written from a reviewed source. */
+  get reviewedFiles(): number {
+    return this.#reviewed;
   }
 
   #cName(name: string): string {
@@ -464,6 +475,7 @@ class Exporter {
     this.#relate(row, await this.#references(session, row.fn.id));
     const language = this.#options.language;
     const result = await session.decompileFunction(row.fn.id, {
+      ...(this.#options.source === 'reviewed' ? { source: 'reviewed' as const } : {}),
       emitter: language,
       ...(this.#options.inference === undefined ? {} : { inference: this.#options.inference }),
       // Structure declarations are written once, to types.h.
@@ -508,11 +520,19 @@ class Exporter {
           : list.join(', ');
     const status = row.state === 'complete' ? 'complete' : `${row.state} (${row.reason})`;
     const facts = `${escape(row.name)} @ ${row.va} | ${pseudocode === undefined ? 'no pseudocode: ' : ''}${status} | ${row.codeBytes ?? '?'} bytes | callers: ${escape(names(row.callers))} | callees: ${escape(names(row.callees))}`;
+    const comment = (line: string): string =>
+      language === 'python-like' ? `# ${line}` : `/* ${line.replaceAll('*/', '* /')} */`;
     let text: string;
     if (pseudocode !== undefined) {
-      const header =
-        language === 'python-like' ? `# ${facts}` : `/* ${facts.replaceAll('*/', '* /')} */`;
-      text = `${header}\n${pseudocode.endsWith('\n') ? pseudocode : `${pseudocode}\n`}`;
+      const reviewed = 'data' in result ? result.data.reviewed_source : undefined;
+      let body = pseudocode;
+      let provenance = '';
+      if (reviewed) {
+        body = reviewed.text;
+        provenance = `${comment(`reviewed source by ${escape(reviewed.author)} (${reviewed.origin}) | base artifact ${reviewed.base_artifact_id} | ${reviewed.stale ? 'stale: the decompilation changed since it was written' : 'current'}`)}\n`;
+        this.#reviewed++;
+      }
+      text = `${comment(facts)}\n${provenance}${body.endsWith('\n') ? body : `${body}\n`}`;
     } else {
       row.file = row.file.replace(/\.(c|py)$/, '.asm');
       text = `; ${facts}\n; compact native disassembly (address: instruction)\n${disassembly.lines.join('\n')}\n`;
@@ -666,6 +686,11 @@ class Exporter {
       `imports.tsv: imported symbols with library, slot, stub address and called_by. exports.tsv: exported symbols and forwarders. ` +
         `types.h: C declarations of the image-wide merged structure types (observed members only, sizes unknown)${this.#structures.size === 0 ? '; the pseudocode uses the same names' : ', then the structure declarations the function files refer to by name (the members each function accesses; a structure whose functions access different member sets keeps one definition and lists the others in #if 0 blocks)'}${types.complete ? '' : '; the merged types are partial: not every function body was analyzed within the budget'}.`,
       `Grep examples: grep -rn "sqlite3_free" functions/ ; grep -l "partial" index.tsv ; awk -F'\\t' '$4=="failed"' index.tsv`,
+      ...(this.#options.source === 'reviewed'
+        ? [
+            `--source reviewed: ${this.#reviewed} function file(s) hold the saved reviewed source instead of the decompiler output; the second header comment names its author, origin and base artifact and says whether the decompilation is still the one it was cleaned from (current) or changed since (stale). All other files hold the decompiler output.`,
+          ]
+        : []),
       this.#options.name === undefined
         ? 'Whole binary: referenced_by and called_by cover every function.'
         : 'Filtered by --name: referenced_by and called_by cover only the exported functions.',
@@ -762,6 +787,7 @@ export async function exportBinary(
       ...counts,
       files,
       bytes,
+      reviewed: exporter.reviewedFiles,
       incompleteIndexes: exporter.incompleteIndexes,
     };
   } finally {

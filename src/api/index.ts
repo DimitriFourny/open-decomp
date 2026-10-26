@@ -91,6 +91,10 @@ export interface DecompileOptions {
   /** `inline` (default) prints structure typedefs and bodies in the text. `external` leaves
    * them out and returns them in `emission.structures` (C-like). */
   readonly structures?: 'inline' | 'external';
+  /** `decompiled` (default): the decompiler output only. `reviewed`: also deliver the function's
+   * unique asserted reviewed source for `emitter` as `data.reviewed_source` (`null` when none;
+   * `stale` when the decompilation changed since it was written). Never part of the cache identity. */
+  readonly source?: 'decompiled' | 'reviewed';
   readonly budget?: ToolInput<'function_decompile'>['budget'];
   readonly signal?: AbortSignal;
   readonly onProgress?: (job: WireJob) => void;
@@ -466,6 +470,7 @@ export class BinarySession {
         revision,
         function_id: functionId,
         wait: true,
+        ...(options.source === undefined ? {} : { source: options.source }),
         ...(options.emitter === undefined &&
         options.view === undefined &&
         options.inference === undefined &&

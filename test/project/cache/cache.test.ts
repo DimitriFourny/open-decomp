@@ -268,6 +268,7 @@ test('artifact-only delivery is bounded before publication and later inline hits
     function_id: p.fn.id,
     wait: true,
     delivery: 'auto' as const,
+    source: 'decompiled' as const,
     options: p.identity.options,
     budget: p.identity.budget,
   };
@@ -986,6 +987,7 @@ test('a computed result is validated once and delivered like its stored hit', as
     function_id: p.fn.id,
     wait: true,
     delivery: 'auto' as const,
+    source: 'decompiled' as const,
     options: p.identity.options,
     budget: p.identity.budget,
   });

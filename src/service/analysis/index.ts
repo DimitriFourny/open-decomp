@@ -63,6 +63,7 @@ import {
 } from './calls.js';
 import { boundedEvidence, semanticCatalog } from './catalog.js';
 import { pipelineComponents, pipelineVersions } from './versions.js';
+import { reviewedSourceLookup } from './reviewed-source.js';
 import { boundIR, requirePass } from './passes.js';
 import { recoverSourceEvidence } from './source-facts.js';
 import { likelyPointerTypes } from './likely-types.js';
@@ -130,6 +131,20 @@ export async function executeDecompilation(
       ...scope,
       identity,
       delivery: args.delivery,
+      ...(args.source === 'reviewed'
+        ? {
+            // Reviewed source is read around the dependency ledger: it is presentation, so it
+            // may not make a reusable analysis depend on it.
+            review: (text: string) =>
+              reviewedSourceLookup(
+                dependencies.source,
+                args.revision,
+                args.function_id,
+                args.options.emitter,
+                text,
+              ),
+          }
+        : {}),
       inline_limit: Math.min(
         args.budget.output_bytes,
         scope.max_result_bytes ?? Infinity,

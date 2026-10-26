@@ -343,7 +343,8 @@ export function recoverTypes(
       if (
         annotation.status === 'retracted' ||
         annotation.value.kind === 'name' ||
-        annotation.value.kind === 'note'
+        annotation.value.kind === 'note' ||
+        annotation.value.kind === 'source'
       )
         continue;
       const proof = reason('supplied source assertion', annotation.id, annotation.evidence_ids, {

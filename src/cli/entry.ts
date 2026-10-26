@@ -12,7 +12,8 @@ const HELP = `Usage: open-decomp <command>
   decompile BINARY (--function NAME|--id ID|--address SPACE:0x...)
                    [--language c-like|python-like] [--view source|checked] [--json]
                    [--cache PATH] [--slice ID] [--no-analysis-cache]
-  export BINARY --out DIR [--language c-like|python-like] [--jobs N] [--name TEXT]
+  export BINARY --out DIR [--language c-like|python-like] [--source decompiled|reviewed]
+                 [--jobs N] [--name TEXT]
                  [--cache PATH] [--slice ID] [--no-analysis-cache]
                  Write every function as OUT/functions/NAME@0xADDR.c plus index/strings/imports TSVs
                  and OUT/types.h

@@ -298,7 +298,11 @@ export async function startHttpServer(
                     if (args.budget[key] > principal.config.max_budget[key])
                       throw new Error('Requested work budget exceeds principal ceiling');
                   }
-                  if (name === 'project_open' && 'source' in args) {
+                  if (
+                    name === 'project_open' &&
+                    'source' in args &&
+                    typeof args.source === 'object'
+                  ) {
                     if (!isAbsolute(args.source.project_path))
                       throw new Error('Project paths must be absolute');
                     const project = await authorizePath(
