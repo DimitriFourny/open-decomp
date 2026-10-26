@@ -9,6 +9,7 @@ import {
   expandEmission,
   newIdentity,
   typeLibraryIdentity,
+  userTypeIdentity,
   type ToolInput,
 } from '../../../src/core/index.js';
 import { QueryService } from '../../../src/service/queries/index.js';
@@ -128,32 +129,30 @@ test(
     );
     assert.ok('data' in declared, JSON.stringify(declared));
     assert.equal(declared.data.revision, revision + 1);
+    assert.equal(declared.data.library_id, library);
     revision = declared.data.revision;
     const typeOf = (name: string): string =>
       declared.data.types.find((type) => type.name === name || type.key === name)!.type_id;
     const node = typeOf('Node');
     assert.equal(node, entityIdentity(slice, 'user-type', ['Node']));
+    // Every named type comes with its pointer type; the parser's `struct Node *` is that type.
+    const pointer = typeOf('Node*');
+    assert.equal(pointer, userTypeIdentity(slice, 'Node*'));
+    assert.equal(typeOf('Node$next'), pointer);
+    assert.equal(typeOf('total_t*'), userTypeIdentity(slice, 'total_t*'));
 
-    // Binding only: a value subject takes a library pointer type; an unknown type is rejected.
+    // Binding only: a value subject takes the library pointer type; an unknown type is rejected.
     const parameter = expandEmission((await decompile('node_sum')).emission).inferences!.find(
       (inference) => inference.details.kind === 'parameter' && inference.details.ordinal === 0,
     );
     assert.ok(parameter?.details.kind === 'parameter');
     const value = parameter.details.value_ids[0]!;
-    const pointer = entityIdentity(slice, 'type-library-test', ['Node*']);
     const unknown = await apply([
       set(value, { kind: 'type', type_id: entityIdentity(slice, 'type-library-test', ['none']) }),
     ]);
     assert.equal(unknown.state, 'failed');
     assert.ok('error' in unknown && unknown.error.code === 'not_found');
-    const bound = await apply([
-      set(library, {
-        kind: 'type',
-        type_id: pointer,
-        definition: { kind: 'pointer', to: node, bits: 64 },
-      }),
-      set(value, { kind: 'type', type_id: pointer }),
-    ]);
+    const bound = await apply([set(value, { kind: 'type', type_id: pointer })]);
     assert.ok('data' in bound, JSON.stringify(bound));
     revision = bound.data.revision;
     const boundText = (await decompile('node_sum')).emission.text;
@@ -205,10 +204,15 @@ test(
     });
     assert.ok('data' in listed && listed.data.view === 'types');
     assert.deepEqual(
-      listed.data.library.map((item) => [item.name, item.type_id, item.declaration]).slice(0, 2),
+      listed.data.library.map((item) => [item.name, item.type_id, item.declaration]),
       [
         ['Node', node, 'struct Node { int32_t value; struct Node *next; };'],
         ['total_t', typeOf('total_t'), 'typedef int32_t total_t;'],
+        ...[
+          [null, typeOf('int32_t'), 'int32_t'],
+          [null, pointer, 'struct Node *'],
+          [null, typeOf('total_t*'), 'total_t *'],
+        ].sort((a, b) => (a[1]! < b[1]! ? -1 : 1)),
       ],
     );
 

@@ -1203,12 +1203,27 @@ test(
     assert.equal(first.revision, revision + 1);
     revision = first.revision;
     const named = (name: string) => first.types.find((type) => type.name === name)!;
+    const keyed = (types: typeof first.types, key: string) =>
+      types.find((type) => type.key === key)!;
     assert.deepEqual(
       (await library()).filter((item) => item.name !== null).map((item) => item.declaration),
       [
         'struct Item { int32_t count; int8_t tag; struct Item *next; };',
         'union Word { uint32_t u; float f; };',
       ],
+    );
+    // Each named type gets one pointer type (no name, key `Name*`): the parser's own
+    // `struct Item *` is that type.
+    const itemPointer = keyed(first.types, 'Item*');
+    assert.equal(itemPointer.name, null);
+    assert.equal(keyed(first.types, 'Item$next').type_id, itemPointer.type_id);
+    assert.equal(keyed(first.types, 'Item$next').annotation_id, itemPointer.annotation_id);
+    assert.deepEqual(
+      (await library())
+        .filter((item) => item.name === null && item.declaration.endsWith('*'))
+        .map((item) => item.declaration)
+        .sort(),
+      ['struct Item *', 'union Word *'],
     );
     const failed = await declare(
       'struct Item { int32_t count; };\nstruct Broken { int32_t x: 1; };',
@@ -1222,6 +1237,7 @@ test(
       second.types.find((type) => type.name === 'Item')!.annotation_id,
       named('Item').annotation_id,
     );
+    assert.deepEqual(keyed(second.types, 'Item*'), itemPointer, 'the pointer type is stable');
     revision = second.revision;
     const items = await library();
     assert.equal(items.filter((item) => item.name === 'Item').length, 1);
@@ -1245,6 +1261,11 @@ test(
         .filter((item) => item.name === 'Item' || item.name === 'ItemRef')
         .map((item) => item.declaration),
       ['struct Item { int64_t count; };', 'typedef struct Item *ItemRef;'],
+    );
+    assert.equal(
+      (await library()).find((item) => item.type_id === keyed(third.types, 'ItemRef*').type_id)!
+        .declaration,
+      'ItemRef *',
     );
     const forward = await declare('struct Item;');
     assert.equal(forward.state, 'failed');

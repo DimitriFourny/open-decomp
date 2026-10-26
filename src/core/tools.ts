@@ -1261,8 +1261,9 @@ export const typesDeclareResultSchema = resultSchema(
       revision: revisionSchema,
       /** The image's type library anchor: the subject of every library declaration. */
       library_id: entityIdSchema,
-      /** Every parsed type and typedef alias: C name (null for builtin/anonymous helper
-       * types), parser key, type ID and the library annotation declaring it. */
+      /** Every parsed type, typedef alias and each name's pointer type (key `Name*`): C
+       * name (null for builtin/anonymous helper and pointer types), parser key, type ID and
+       * the library annotation declaring it. */
       types: z
         .array(
           z.strictObject({

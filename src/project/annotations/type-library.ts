@@ -26,7 +26,8 @@ export interface LibraryListing extends Omit<LibraryType, 'definition'> {
   readonly declaration: string;
 }
 
-/** A declared type reported by `types_declare` (typedef aliases of a tag share its entry). */
+/** A declared type reported by `types_declare`: typedef aliases of a tag share its entry,
+ * and each name `N` also reports its library pointer type under key `N*` (name null). */
 export interface DeclaredLibraryType {
   readonly name: string | null;
   readonly key: string;
@@ -78,12 +79,15 @@ export function libraryListing(
 }
 
 /** Maps parsed C declarations to one `type` annotation per parsed type on the slice's
- * library anchor. Named types (and builtins/anonymous helpers, by parser key) get
- * deterministic IDs, so a redeclaration names the same type; it reuses the existing
- * library annotation of that name or type ID, replacing the previous declaration. A
- * forward declaration (`struct Node;`, or a tag only mentioned) never replaces a live
+ * library anchor, plus a pointer type to every named type (`Name*`). Named types (and
+ * builtins/anonymous helpers, by parser key) get deterministic IDs, so a redeclaration
+ * names the same type; it reuses the existing library annotation of that name or type
+ * ID, replacing the previous declaration. An anonymous pointer to a named type is that
+ * name's pointer type `userTypeIdentity(slice, 'Name*')`, declared once. A forward
+ * declaration (`struct Node;`, or a tag only mentioned) never replaces a live
  * definition, and declarations already in the library unchanged are not rewritten
- * (unless nothing changed at all), so functions using them keep their cached results. */
+ * (unless no parsed type changed at all), so functions using them keep their cached
+ * results. */
 export function typeLibraryEdits(
   parsed: CParseResult,
   sliceId: string,
@@ -92,14 +96,24 @@ export function typeLibraryEdits(
   context: OperationContext,
 ): { readonly edits: readonly AnnotationEdit[]; readonly types: readonly DeclaredLibraryType[] } {
   const anchor = typeLibraryIdentity(sliceId);
+  const names = new Map<string, string>();
+  for (const type of parsed.types) if (type.name !== null) names.set(type.key, type.name);
+  /** The pointer type of the named type with parser key `key`. */
+  const pointerId = (key: string): string => {
+    const name = names.get(key);
+    if (name === undefined) throw new Error(`C declaration parser left type key ${key} unnamed`);
+    return userTypeIdentity(sliceId, `${name}*`);
+  };
   const ids = new Map<string, string>();
   for (const type of parsed.types) {
     context.checkpoint(1);
     ids.set(
       type.key,
-      type.name === null
-        ? entityIdentity(sliceId, 'user-type', [type.key])
-        : userTypeIdentity(sliceId, type.name),
+      type.name !== null
+        ? userTypeIdentity(sliceId, type.name)
+        : type.definition.kind === 'pointer' && names.has(type.definition.to)
+          ? pointerId(type.definition.to)
+          : entityIdentity(sliceId, 'user-type', [type.key]),
     );
   }
   const idOf = (key: string): string => {
@@ -120,48 +134,91 @@ export function typeLibraryEdits(
   const edits: AnnotationEdit[] = [],
     unchanged: AnnotationEdit[] = [],
     types: DeclaredLibraryType[] = [],
+    /** The library annotation declaring each type ID of this batch. */
     annotations = new Map<string, string>();
+  /** The edit declaring `typeId` (reusing its prior library annotation), and whether the
+   * library already holds exactly that declaration. */
+  const declare = (
+    typeId: string,
+    name: string | null,
+    definition: RecoveredType,
+    prior: Annotation | undefined,
+  ): { readonly edit: AnnotationEdit; readonly same: boolean } => {
+    const id = prior?.id ?? newIdentity('annotation');
+    annotations.set(typeId, id);
+    const value = {
+      kind: 'type' as const,
+      type_id: typeId,
+      definition,
+      ...(name === null ? {} : { name }),
+    };
+    return {
+      edit: { operation: 'set', id, entity_id: anchor, value, status, evidence_ids: [] },
+      same:
+        prior?.status === status &&
+        prior.value.kind === 'type' &&
+        prior.value.type_id === typeId &&
+        (prior.value.name ?? null) === name &&
+        prior.value.definition !== undefined &&
+        JSON.stringify(encodeTypeDefinition(prior.value.definition)) ===
+          JSON.stringify(encodeTypeDefinition(definition)),
+    };
+  };
   for (const type of parsed.types) {
     context.checkpoint(1);
     const typeId = idOf(type.key);
+    const declared = annotations.get(typeId);
+    if (declared !== undefined) {
+      // Another anonymous pointer to the same named type: one declaration serves both.
+      types.push({ name: null, key: type.key, type_id: typeId, annotation_id: declared });
+      continue;
+    }
     const prior = (type.name === null ? undefined : byName.get(type.name)) ?? byType.get(typeId);
-    const id = prior?.id ?? newIdentity('annotation');
-    annotations.set(type.key, id);
-    types.push({ name: type.name, key: type.key, type_id: typeId, annotation_id: id });
     const forward =
       type.definition.kind === 'structure' &&
       type.definition.size === null &&
       type.definition.fields.length === 0;
-    if (forward && prior?.status !== 'retracted' && prior?.value.kind === 'type') continue;
-    const value = {
-      kind: 'type' as const,
-      type_id: typeId,
-      definition: libraryDefinition(type.definition, type.name ?? type.key, sliceId, idOf),
-      ...(type.name === null ? {} : { name: type.name }),
-    };
-    const edit: AnnotationEdit = {
-      operation: 'set',
-      id,
-      entity_id: anchor,
-      value,
-      status,
-      evidence_ids: [],
-    };
-    const same =
-      prior?.status === status &&
-      prior.value.kind === 'type' &&
-      prior.value.type_id === typeId &&
-      (prior.value.name ?? null) === type.name &&
-      prior.value.definition !== undefined &&
-      JSON.stringify(encodeTypeDefinition(prior.value.definition)) ===
-        JSON.stringify(encodeTypeDefinition(value.definition));
+    if (forward && prior?.status !== 'retracted' && prior?.value.kind === 'type') {
+      annotations.set(typeId, prior.id);
+      types.push({ name: type.name, key: type.key, type_id: typeId, annotation_id: prior.id });
+      continue;
+    }
+    const { edit, same } = declare(
+      typeId,
+      type.name,
+      libraryDefinition(type.definition, type.name ?? type.key, sliceId, idOf),
+      prior,
+    );
+    types.push({ name: type.name, key: type.key, type_id: typeId, annotation_id: edit.id });
     (same ? unchanged : edits).push(edit);
   }
   for (const [name, key] of parsed.named) {
     context.checkpoint(1);
-    const own = parsed.types.find((type) => type.key === key);
-    if (own?.name === name) continue;
-    types.push({ name, key, type_id: idOf(key), annotation_id: annotations.get(key)! });
+    if (names.get(key) === name) continue;
+    const typeId = idOf(key);
+    types.push({ name, key, type_id: typeId, annotation_id: annotations.get(typeId)! });
+  }
+  // The pointer type of every name (an alias's is its tag's). Only a new or changed pointer
+  // declaration is written, so a batch changing nothing else (a forward declaration of a
+  // defined tag) is still rejected as empty.
+  for (const [name, key] of parsed.named) {
+    context.checkpoint(1);
+    const typeId = pointerId(key);
+    if (!annotations.has(typeId)) {
+      const { edit, same } = declare(
+        typeId,
+        null,
+        { kind: 'pointer', to: idOf(key), bits: 64 },
+        byType.get(typeId),
+      );
+      if (!same) edits.push(edit);
+    }
+    types.push({
+      name: null,
+      key: `${name}*`,
+      type_id: typeId,
+      annotation_id: annotations.get(typeId)!,
+    });
   }
   return { edits: edits.length ? edits : unchanged, types };
 }
