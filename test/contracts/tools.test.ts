@@ -145,6 +145,14 @@ const inputs: Record<ToolName, object> = {
       },
     ],
   },
+  types_declare: {
+    project_id: project,
+    expected_revision: 3,
+    image_id: image,
+    author: 'analyst',
+    origin: 'llm',
+    source: 'struct Node { int32_t value; struct Node *next; };',
+  },
   functions_discover: { ...request, image_id: image },
   analysis_status: { ...request, job_id: jobId },
   analysis_cancel: { ...request, job_id: jobId },
@@ -222,6 +230,17 @@ const success: Record<ToolName, object> = {
       ],
       removed: [],
       invalidation: { scope: 'project', derived_before_revision: 4 },
+    },
+  },
+  types_declare: {
+    state: 'complete',
+    revision: 4,
+    data: {
+      previous_revision: 3,
+      revision: 4,
+      library_id: entity,
+      types: [{ name: 'Node', key: 'Node', type_id: entity, annotation_id: annotationId }],
+      diagnostics: [],
     },
   },
   functions_discover: {

@@ -479,6 +479,7 @@ export function runProjectWorker(handler?: WorkerHandler, observer?: WorkerRunti
       const requiresCurrent =
         work.request.kind === 'import' ||
         work.request.operation === 'annotations_apply' ||
+        work.request.operation === 'types_declare' ||
         work.request.operation === 'functions_discover' ||
         work.request.operation === 'function_decompile';
       if (requiresCurrent && job.input_revision !== db.snapshot().revision) {

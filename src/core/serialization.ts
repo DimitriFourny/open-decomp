@@ -62,16 +62,19 @@ export function encodeTypeDefinition(value: RecoveredType): z.output<typeof type
 }
 export function decodeAnnotation(input: z.input<typeof annotationSchema>): Annotation {
   const value = annotationSchema.parse(input);
-  if (value.value.kind === 'type')
-    return {
-      ...value,
-      value: { ...value.value, definition: decodeTypeDefinition(value.value.definition) },
-    };
-  return { ...value, value: value.value };
+  if (value.value.kind !== 'type') return { ...value, value: value.value };
+  const { definition, ...binding } = value.value;
+  return {
+    ...value,
+    value:
+      definition === undefined
+        ? binding
+        : { ...binding, definition: decodeTypeDefinition(definition) },
+  };
 }
 export function encodeAnnotation(value: Annotation): z.output<typeof annotationSchema> {
   return annotationSchema.parse(
-    value.value.kind === 'type'
+    value.value.kind === 'type' && value.value.definition !== undefined
       ? {
           ...value,
           value: { ...value.value, definition: encodeTypeDefinition(value.value.definition) },
@@ -83,15 +86,20 @@ export function decodeAnnotationEdit(input: z.input<typeof annotationEditSchema>
   const parsed = annotationEditSchema.parse(input);
   if (parsed.operation !== 'set') return parsed;
   const { address, value, ...edit } = parsed;
-  return {
+  const subject = {
     ...edit,
     ...(address === undefined
       ? {}
       : { address: { ...address, value: parseHexU64(address.value) } }),
+  };
+  if (value.kind !== 'type') return { ...subject, value };
+  const { definition, ...binding } = value;
+  return {
+    ...subject,
     value:
-      value.kind === 'type'
-        ? { ...value, definition: decodeTypeDefinition(value.definition) }
-        : value,
+      definition === undefined
+        ? binding
+        : { ...binding, definition: decodeTypeDefinition(definition) },
   };
 }
 export function encodeAnnotationEdit(edit: AnnotationEdit): z.output<typeof annotationEditSchema> {
@@ -103,7 +111,7 @@ export function encodeAnnotationEdit(edit: AnnotationEdit): z.output<typeof anno
       ? {}
       : { address: { ...address, value: formatHexU64(address.value) } }),
     value:
-      value.kind === 'type'
+      value.kind === 'type' && value.definition !== undefined
         ? { ...value, definition: encodeTypeDefinition(value.definition) }
         : value,
   });

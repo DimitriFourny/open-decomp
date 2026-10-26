@@ -34,6 +34,7 @@ import {
   DEFAULT_ANALYSIS_OPTIONS,
   pageRequestSchema,
   artifactSchema,
+  annotationIdSchema,
 } from './primitives.js';
 import {
   imageSummarySchema,
@@ -52,6 +53,8 @@ import {
   annotationEditSchema,
   annotationSchema,
   lineageSchema,
+  MAX_REVIEWED_SOURCE_CHARS,
+  cIdentifierSchema,
 } from './model.js';
 import { instructionSchema, cfgBlockSchema } from './decoder.js';
 import type { Internal } from './primitives.js';
@@ -69,6 +72,7 @@ export const toolNameSchema = z.enum([
   'evidence_get',
   'memory_read',
   'annotations_apply',
+  'types_declare',
   'functions_discover',
   'analysis_status',
   'analysis_cancel',
@@ -429,6 +433,14 @@ export const functionDecompileArgsSchema = z.strictObject({
    * short bounded time and otherwise returns the job. */
   wait: z.union([z.boolean(), z.literal('auto')]).default(false),
   delivery: z.enum(['auto', 'artifact']).default('auto'),
+  /** Which text a caller wants: the decompiler output, or the function's reviewed source
+   * delivered beside it (`reviewed_source`). Delivery only; never part of cache identity. */
+  source: z
+    .enum(['decompiled', 'reviewed'])
+    .default('decompiled')
+    .describe(
+      "reviewed: also deliver the function's unique asserted reviewed source for options.emitter (reviewed_source, null when none) and show it instead of the pseudocode; decompiled (default): the decompiler output only",
+    ),
   options: analysisOptionsSchema.default(DEFAULT_ANALYSIS_OPTIONS),
 });
 export const xrefsGetArgsSchema = z.strictObject({
@@ -521,6 +533,18 @@ export const annotationsApplyArgsSchema = z
       seen.add(edit.id);
     }
   });
+/** Declare C types (struct/union/enum/typedef) in one image's type library. */
+export const typesDeclareArgsSchema = z.strictObject({
+  project_id: projectIdSchema,
+  expected_revision: revisionSchema,
+  image_id: imageIdSchema,
+  author: z.string().min(1).max(1024),
+  origin: z.enum(['user', 'llm']),
+  status: z.enum(['asserted', 'hypothesis']).default('asserted'),
+  /** C declarations; every declared type becomes one type library annotation. */
+  source: z.string().min(1).max(262144),
+  budget: budgetSchema.default(DEFAULT_BUDGET),
+});
 export const analysisStatusArgsSchema = z.strictObject({ ...requestContext, job_id: jobIdSchema });
 export const analysisCancelArgsSchema = z.strictObject({ ...requestContext, job_id: jobIdSchema });
 /** Continue a budget-limited whole-image function discovery by one step at the current revision. */
@@ -684,6 +708,14 @@ export function resultSchema<S extends z.ZodType>(data: S): z.ZodType<ResultEnve
         context.addIssue({ code: 'custom', message: 'Job does not match result snapshot/state' });
     }) as z.ZodType<ResultEnvelope<z.output<S>>>;
 }
+const libraryTypeSchema = z.strictObject({
+  name: cIdentifierSchema.nullable(),
+  type_id: entityIdSchema,
+  annotation_id: annotationIdSchema,
+  status: z.enum(['asserted', 'hypothesis']),
+  /** C rendering: the declaration of a named type, else the anonymous type's spelling. */
+  declaration: z.string().max(65536),
+});
 const binaryInfoDataSchema = z.discriminatedUnion('view', [
   z.strictObject({ view: z.literal('summary'), image: imageSummarySchema }),
   z.strictObject({
@@ -730,6 +762,10 @@ const binaryInfoDataSchema = z.discriminatedUnion('view', [
       total: z.number().int().nonnegative(),
     }),
     types: z.number().int().nonnegative(),
+    /** The image's type library (`types_declare`): its anchor entity (subject of library
+     * `type` declarations) and live declarations, named types by name, then by type ID. */
+    library_id: entityIdSchema,
+    library: z.array(libraryTypeSchema).max(10000),
   }),
 ]);
 const symbolItemSchema = z.discriminatedUnion('kind', [
@@ -1090,6 +1126,22 @@ export const functionsFindResultSchema = resultSchema(
   z.strictObject({ items: z.array(functionSchema).max(1000), page: pageInfoSchema }),
 );
 export const functionGetResultSchema = resultSchema(functionGetDataSchema);
+/** Info diagnostics explaining why no reviewed source is delivered start with this prefix. */
+export const REVIEWED_SOURCE_NOTICE = 'Reviewed source not delivered: ';
+/** The reviewed (cleaned) source of a function, delivered beside its decompilation when the request
+ * asks `source: 'reviewed'`. `stale`: the current emission text is not the text the reviewer cleaned. */
+export const reviewedSourceSchema = z.strictObject({
+  annotation_id: annotationIdSchema,
+  language: z.enum(['c-like', 'python-like']),
+  text: z.string().min(1).max(MAX_REVIEWED_SOURCE_CHARS),
+  author: z.string().min(1).max(1024),
+  origin: z.enum(['user', 'llm']),
+  status: z.literal('asserted'),
+  revision: revisionSchema,
+  base_artifact_id: artifactSchema.shape.id,
+  stale: z.boolean(),
+});
+export type ReviewedSource = z.infer<typeof reviewedSourceSchema>;
 export const functionDecompileResultSchema = resultSchema(
   z.discriminatedUnion('delivery', [
     z.strictObject({
@@ -1103,6 +1155,7 @@ export const functionDecompileResultSchema = resultSchema(
        * `hit` reports the cost of serving the stored result, not of the run that computed it.
        * Absent from stored analyses; never part of cache identity or the emission. */
       work: z.number().int().nonnegative().optional(),
+      reviewed_source: reviewedSourceSchema.nullable().optional(),
     }),
     z.strictObject({
       delivery: z.literal('artifact'),
@@ -1114,6 +1167,7 @@ export const functionDecompileResultSchema = resultSchema(
        * `hit` reports the cost of serving the stored result, not of the run that computed it.
        * Absent from stored analyses; never part of cache identity or the emission. */
       work: z.number().int().nonnegative().optional(),
+      reviewed_source: reviewedSourceSchema.nullable().optional(),
     }),
   ]),
 ).superRefine((result, context) => {
@@ -1163,6 +1217,9 @@ export function projectDecompilationArtifactResult(
         artifact_id: artifact.id,
         cache: result.data.cache,
         ...(result.data.work === undefined ? {} : { work: result.data.work }),
+        ...(result.data.reviewed_source === undefined
+          ? {}
+          : { reviewed_source: result.data.reviewed_source }),
       },
     });
   return functionDecompileResultSchema.parse({
@@ -1194,6 +1251,9 @@ export function projectDecompilationArtifactResult(
       artifact_id: artifact.id,
       cache: result.data.cache,
       ...(result.data.work === undefined ? {} : { work: result.data.work }),
+      ...(result.data.reviewed_source === undefined
+        ? {}
+        : { reviewed_source: result.data.reviewed_source }),
     },
   });
 }
@@ -1224,6 +1284,38 @@ export const annotationsApplyResultSchema = resultSchema(
         context.addIssue({
           code: 'custom',
           message: 'An atomic annotation batch advances revision exactly once',
+        });
+    }),
+);
+export const typesDeclareResultSchema = resultSchema(
+  z
+    .strictObject({
+      previous_revision: revisionSchema,
+      revision: revisionSchema,
+      /** The image's type library anchor: the subject of every library declaration. */
+      library_id: entityIdSchema,
+      /** Every parsed type, typedef alias and each name's pointer type (key `Name*`): C
+       * name (null for builtin/anonymous helper and pointer types), parser key, type ID and
+       * the library annotation declaring it. */
+      types: z
+        .array(
+          z.strictObject({
+            name: cIdentifierSchema.nullable(),
+            key: z.string().min(1).max(4096),
+            type_id: entityIdSchema,
+            annotation_id: annotationIdSchema,
+          }),
+        )
+        .max(2000),
+      /** Parser diagnostics. Each is an error that rejects the whole batch (a failed
+       * result), so a committed declaration reports none. */
+      diagnostics: z.array(diagnosticSchema).max(1000),
+    })
+    .superRefine((data, context) => {
+      if (data.revision !== data.previous_revision + 1)
+        context.addIssue({
+          code: 'custom',
+          message: 'An atomic type declaration batch advances revision exactly once',
         });
     }),
 );
@@ -1296,6 +1388,10 @@ export interface ToolSchemaRegistry {
     input: typeof annotationsApplyArgsSchema;
     output: typeof annotationsApplyResultSchema;
   };
+  types_declare: {
+    input: typeof typesDeclareArgsSchema;
+    output: typeof typesDeclareResultSchema;
+  };
   functions_discover: {
     input: typeof functionsDiscoverArgsSchema;
     output: typeof functionsDiscoverResultSchema;
@@ -1322,6 +1418,7 @@ export const toolSchemas: ToolSchemaRegistry = {
   evidence_get: { input: evidenceGetArgsSchema, output: evidenceGetResultSchema },
   memory_read: { input: memoryReadArgsSchema, output: memoryReadResultSchema },
   annotations_apply: { input: annotationsApplyArgsSchema, output: annotationsApplyResultSchema },
+  types_declare: { input: typesDeclareArgsSchema, output: typesDeclareResultSchema },
   functions_discover: { input: functionsDiscoverArgsSchema, output: functionsDiscoverResultSchema },
   analysis_status: { input: analysisStatusArgsSchema, output: analysisStatusResultSchema },
   analysis_cancel: { input: analysisCancelArgsSchema, output: analysisCancelResultSchema },

@@ -8,6 +8,8 @@ import {
   createOperationContext,
   entityIdentity,
   newIdentity,
+  typeLibraryIdentity,
+  userTypeIdentity,
   type AnnotationBatch,
   type AnnotationEdit,
   type Evidence,
@@ -597,5 +599,118 @@ test('filtered annotation views keep local alternatives and only referenced shar
       { kind: 'float', bits: 32 },
       { kind: 'integer', bits: 64, signed: false },
     ],
+  );
+});
+
+test('type library declarations apply project-wide between local and shared declarations', async (t) => {
+  const { state, image, subject } = await project(t),
+    service = new AnnotationService(state.store);
+  const slice = image.selected_slice_id,
+    library = typeLibraryIdentity(slice),
+    other = image.sections[0]!.id;
+  const word = userTypeIdentity(slice, 'word_t'),
+    missing = entityIdentity(slice, 'scoped-type', 'missing');
+  assert.equal(
+    resolveDurableSubject(state.store, library, 2, createOperationContext())?.kind,
+    'type_library',
+  );
+  const set = (
+    entity_id: string,
+    value: Extract<AnnotationEdit, { operation: 'set' }>['value'],
+  ): AnnotationEdit => ({
+    operation: 'set',
+    id: newIdentity('annotation'),
+    entity_id,
+    value,
+    status: 'asserted',
+    evidence_ids: [],
+  });
+  const declared = set(library, {
+    kind: 'type',
+    type_id: word,
+    name: 'word_t',
+    definition: { kind: 'integer', bits: 32, signed: false },
+  });
+  const signature = set(subject, {
+    kind: 'signature',
+    value: {
+      abi: image.target.abi,
+      return_type: word,
+      parameters: [],
+      variadic: false,
+      noreturn: false,
+      evidence_ids: [],
+    },
+  });
+  const shared = set(other, {
+    kind: 'type',
+    type_id: word,
+    definition: { kind: 'float', bits: 64 },
+  });
+  assert.equal(
+    service.apply(batch(2, [declared, signature, shared]), createOperationContext()).state,
+    'committed',
+  );
+  const types = (revision: number) =>
+    service
+      .active(revision, createOperationContext(), { entity_ids: [subject] })
+      .types.filter((type) => type.id === word);
+  const [libraryRecord, ...rest] = types(3);
+  assert.deepEqual(rest, [], 'the library declaration hides the unrelated shared one');
+  assert.deepEqual(
+    { ...libraryRecord, evidence_ids: [] },
+    {
+      id: word,
+      definition: { kind: 'integer', bits: 32, signed: false },
+      source: 'user',
+      status: 'asserted',
+      evidence_ids: [],
+      spelling: 'word_t',
+      member_names: true,
+    },
+  );
+  const rejected = (edit: AnnotationEdit, code: string): void => {
+    const result = service.apply(batch(3, [edit]), createOperationContext());
+    assert.equal(result.state, 'rejected');
+    assert.equal(result.state === 'rejected' && result.diagnostics[0]!.code, code);
+    assert.equal(state.store.snapshot().revision, 3);
+  };
+  // Binding only needs a resolvable type and no name; the library only takes named,
+  // unique declarations with a definition.
+  rejected(set(other, { kind: 'type', type_id: missing }), 'not_found');
+  rejected(set(other, { kind: 'type', type_id: word, name: 'word_t' }), 'invalid_input');
+  rejected(set(library, { kind: 'type', type_id: word }), 'invalid_input');
+  rejected(set(library, { kind: 'note', value: 'library note' }), 'invalid_input');
+  rejected(
+    set(library, {
+      kind: 'type',
+      type_id: missing,
+      name: 'word_t',
+      definition: { kind: 'integer', bits: 8, signed: false },
+    }),
+    'invalid_input',
+  );
+  rejected(
+    set(library, { kind: 'type', type_id: word, definition: { kind: 'float', bits: 32 } }),
+    'invalid_input',
+  );
+  assert.equal(
+    service.apply(batch(3, [set(other, { kind: 'type', type_id: word })]), createOperationContext())
+      .state,
+    'committed',
+  );
+  // A local declaration takes precedence over the library.
+  assert.equal(
+    service.apply(
+      batch(4, [
+        set(subject, { kind: 'type', type_id: word, definition: { kind: 'float', bits: 32 } }),
+      ]),
+      createOperationContext(),
+    ).state,
+    'committed',
+  );
+  assert.deepEqual(
+    types(5).map((type) => type.definition),
+    [{ kind: 'float', bits: 32 }],
   );
 });

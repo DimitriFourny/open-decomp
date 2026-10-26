@@ -127,6 +127,18 @@ export function entityIdentity(sliceId: string, kind: string, birth: CanonicalVa
 export function globalDataIdentity(sliceId: string, address: Address): string {
   return entityIdentity(sliceId, 'global-data', [address.space, address.value]);
 }
+/** The per-slice type library anchor: `type` annotations on it declare project-wide types. */
+export function typeLibraryIdentity(sliceId: string): string {
+  return entityIdentity(sliceId, 'type-library', []);
+}
+/** A user-declared C type of one slice's type library, keyed by its C name (or parser key). */
+export function userTypeIdentity(sliceId: string, name: string): string {
+  return entityIdentity(sliceId, 'user-type', [name]);
+}
+/** A member of a user-declared structure/union, keyed by its type and member name. */
+export function userTypeFieldIdentity(sliceId: string, typeName: string, field: string): string {
+  return entityIdentity(sliceId, 'user-type-field', [typeName, field]);
+}
 export function newIdentity(
   kind: 'project' | 'job' | 'annotation' | 'evidence' | 'artifact',
 ): string {

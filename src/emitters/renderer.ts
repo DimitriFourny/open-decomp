@@ -3065,6 +3065,29 @@ export class Renderer {
     return name;
   }
 
+  /** Declared spelling of a user-named scalar or pointer typedef (`typedef uint32_t u32;`,
+   * `typedef struct Node* NodeRef;`) where a declaration states the type of `id`: its
+   * name, typedef'd where the finished text mentions it. Expressions, casts, member
+   * accesses and conversions keep the canonical spelling. */
+  private declarationSpelling(id: string | undefined, canonical: string): string {
+    const record = id === undefined ? undefined : this.typeRecords.get(id);
+    if (
+      !this.sourceView ||
+      (record?.source !== 'user' && record?.source !== 'llm') ||
+      record.spelling === undefined ||
+      (record.definition.kind !== 'integer' &&
+        record.definition.kind !== 'float' &&
+        record.definition.kind !== 'pointer') ||
+      canonical !== this.sourceType(id!)
+    )
+      return canonical;
+    if (this.language === 'c-like' && !this.handleTypedefs.has(record.spelling)) {
+      this.handleTypedefs.set(record.spelling, `typedef ${canonical} ${record.spelling};`);
+      this.deferredTypedefs.push(record.spelling);
+    }
+    return record.spelling;
+  }
+
   private sourceType(id: string, depth = 0): string {
     this.context.checkpoint(1);
     if (depth > 32) return this.sourceView ? this.opaqueType(id) : this.identifier(id, 'type');
@@ -3089,7 +3112,15 @@ export class Renderer {
             : 'double'
           : `ieee${type.bits}_t`;
       case 'pointer':
-        if (this.sourceView && this.language === 'c-like' && record.spelling !== undefined)
+        // A library handle (`HANDLE`, `CFStringRef`) is spelled by name everywhere; a
+        // user-named pointer typedef only where a declaration states it.
+        if (
+          this.sourceView &&
+          this.language === 'c-like' &&
+          record.spelling !== undefined &&
+          record.source !== 'user' &&
+          record.source !== 'llm'
+        )
           return record.spelling;
         if (this.byteAddress(type.to))
           return this.language === 'c-like' ? 'uint8_t*' : 'pointer[uint8_t]';
@@ -3110,11 +3141,12 @@ export class Renderer {
         return `vector<${this.sourceType(type.element, depth + 1)}, ${type.lanes}>`;
       case 'structure': {
         const scalar = this.naturalScalar(id);
-        return scalar
-          ? this.sourceType(scalar, depth + 1)
-          : this.sourceView
-            ? this.sourceStructs.name(id)
-            : this.identifier(id, 'type');
+        if (scalar) return this.sourceType(scalar, depth + 1);
+        if (!this.sourceView) return this.identifier(id, 'type');
+        return (
+          (this.language === 'c-like' ? this.sourceStructs.tag(id) : undefined) ??
+          this.sourceStructs.name(id)
+        );
       }
       case 'unknown':
         return this.sourceView ? this.opaqueType(id) : this.identifier(id, 'type');
@@ -3633,7 +3665,9 @@ export class Renderer {
       }
     }
     // Every structure name is typedef'd only where the finished text mentions it.
-    for (const id of structures) this.deferredTypedefs.push(this.sourceStructs.name(id));
+    // A user-declared tag (`struct Node`) is a complete type name and needs none.
+    for (const id of structures)
+      if (!this.sourceStructs.tag(id)) this.deferredTypedefs.push(this.sourceStructs.name(id));
     this.deferredTypedefs.push(...this.sourceOpaqueTypes.values());
     for (const id of pending) {
       const record = this.typeRecords.get(id);
@@ -10076,7 +10110,9 @@ export class Renderer {
       this.declaredTypes.set(value.id, type);
       parameters.push({
         value,
-        type: this.guessedFormal(value) ? this.likelyType(type) : type,
+        type: this.guessedFormal(value)
+          ? this.likelyType(type)
+          : this.declarationSpelling(source?.type_id, type),
         name,
       });
     }
@@ -10121,7 +10157,12 @@ export class Renderer {
     const floating = this.sourceView && this.program.source?.return_float;
     if (floating) returnType = floating === 32 ? 'float' : 'double';
     this.returnSpelling = returnType;
-    const returnShown = this.guessedResult() ? this.likelyType(returnType) : returnType;
+    const returnShown = this.guessedResult()
+      ? this.likelyType(returnType)
+      : this.declarationSpelling(
+          signature?.signature.return_type ?? this.program.source?.return_source_type,
+          returnType,
+        );
     // The scalar-support prelude is chosen from the finished text and inserted here.
     const supportAt = this.sourceView && this.language === 'c-like' ? w.offset : undefined;
     if (this.sourceView && this.language === 'c-like') {
@@ -10370,7 +10411,17 @@ export class Renderer {
       this.declaredTypes.set(value.id, spelling);
       // A coalesced phi class is declared once, as its representative.
       if (representative && representative.id !== value.id) continue;
-      w.statement(1, w.declaration(spelling, this.local(value)));
+      w.statement(
+        1,
+        w.declaration(
+          this.declarationSpelling(
+            this.sourceValueTypes.get(value.id) ??
+              this.program.source?.value_types?.get(value.id)?.type_id,
+            spelling,
+          ),
+          this.local(value),
+        ),
+      );
       this.mapped(this.dataOrigin(value.id), start, [value.id]);
       this.emitNotes(value.id, 1);
     }

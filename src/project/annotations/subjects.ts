@@ -1,6 +1,7 @@
 import {
   OperationError,
   entityIdSchema,
+  typeLibraryIdentity,
   encodeEvidence,
   encodeTypeDefinition,
   globalDataIdentity,
@@ -32,7 +33,9 @@ export interface AnnotationSubject {
     | 'mapping'
     | 'relocation'
     /** Image storage (a global) at `address`: `globalDataIdentity(slice_id, address)`. */
-    | 'data';
+    | 'data'
+    /** The per-slice type library anchor (`typeLibraryIdentity`). */
+    | 'type_library';
   readonly image_id: string;
   readonly slice_id: string;
   readonly abi: Target['abi'];
@@ -117,6 +120,7 @@ export function resolveDurableSubject(
       slice_id: image.selected_slice_id,
       abi: image.target.abi,
     });
+    if (id === typeLibraryIdentity(image.selected_slice_id)) return subject('type_library');
     for (const kind of ['function', 'string', 'reference', 'symbol', 'import', 'export'] as const) {
       context.checkpoint(1);
       if (

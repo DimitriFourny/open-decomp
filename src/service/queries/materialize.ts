@@ -90,6 +90,9 @@ export async function materializeDecompilation(
       ...stored.data,
       cache: result.data.cache,
       ...(result.data.work === undefined ? {} : { work: result.data.work }),
+      ...(result.data.reviewed_source === undefined
+        ? {}
+        : { reviewed_source: result.data.reviewed_source }),
     },
   });
 }

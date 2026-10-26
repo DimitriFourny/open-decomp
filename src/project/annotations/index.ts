@@ -17,7 +17,9 @@ import {
   type MutationResult,
   type OperationContext,
   type ProjectStore,
+  type ReviewedSourceEdit,
   type RecoveredType,
+  typeLibraryIdentity,
   type StoreTransaction,
 } from '../../core/index.js';
 import type { SuppliedTypeRecord } from '../../analysis/types/index.js';
@@ -44,6 +46,13 @@ export interface ActiveAnnotationView {
   /** Selected declarations and reachable type dependencies; alternatives in that scope remain separate. */
   readonly types: readonly SuppliedTypeRecord[];
 }
+
+/** Resolves the artifact a reviewed source was cleaned from: the server-side check that it is a
+ * published decompilation of this function. Throws `OperationError` (`invalid_input`) otherwise. */
+export type ReviewedSourceBase = (
+  subject: AnnotationSubject,
+  value: ReviewedSourceEdit,
+) => { readonly artifact_id: string; readonly text_sha256: string };
 
 /** Trusted synchronous composition hook; throwing rolls back annotations, evidence and the caller's durable job save. */
 export type AnnotationCommitHook = (
@@ -79,6 +88,13 @@ function liveAnnotations(
   return result;
 }
 
+/** The type library anchor of every image slice in the snapshot. */
+export function typeLibraries(store: ProjectStore, revision: number): ReadonlySet<string> {
+  return new Set(
+    store.snapshot(revision).images.map((image) => typeLibraryIdentity(image.selected_slice_id)),
+  );
+}
+
 /** Transactional domain operations over one owning store. No asserted type/signature is promoted to a fact table. */
 export class AnnotationService {
   constructor(readonly store: ProjectStore) {}
@@ -88,6 +104,7 @@ export class AnnotationService {
     context: OperationContext,
     catalog?: TrustedSemanticCatalog,
     onCommit?: AnnotationCommitHook,
+    sourceBase?: ReviewedSourceBase,
   ): MutationResult {
     try {
       context.checkpoint(1);
@@ -115,7 +132,7 @@ export class AnnotationService {
             edit.evidence_ids.length +
               (edit.value.kind === 'signature'
                 ? edit.value.value.parameters.length + edit.value.value.evidence_ids.length
-                : edit.value.kind === 'type' && edit.value.definition.kind === 'structure'
+                : edit.value.kind === 'type' && edit.value.definition?.kind === 'structure'
                   ? edit.value.definition.fields.length
                   : 0),
           );
@@ -140,10 +157,25 @@ export class AnnotationService {
       }).items;
       for (const annotation of existing) previous.set(annotation.id, annotation);
       const prospective = new Map(active.map((annotation) => [annotation.id, annotation]));
+      const subjectCache = new Map<string, AnnotationSubject | null>();
+      const resolveSubject = (id: string): AnnotationSubject | null => {
+        let subject = subjectCache.get(id);
+        if (subject === undefined) {
+          const semantic = catalog?.subject(id);
+          // A data subject a decompile names is still validated as data storage here.
+          subject =
+            semantic?.kind === 'data' && semantic.address
+              ? resolveDataAddressSubject(this.store, semantic.address, current, context)
+              : (semantic ?? resolveDurableSubject(this.store, id, current, context));
+          if (subject && subject.id !== id)
+            reject('invalid_input', 'Data subject identity does not match its address');
+          subjectCache.set(id, subject);
+        }
+        return subject;
+      };
       const prepared: Annotation[] = [],
         removed: string[] = [],
-        evidence: Evidence[] = [],
-        subjectCache = new Map<string, AnnotationSubject | null>();
+        evidence: Evidence[] = [];
       for (const edit of edits) {
         context.checkpoint(1);
         if (edit.operation !== 'set') {
@@ -197,10 +229,31 @@ export class AnnotationService {
           evidence.push(proof);
           evidenceIds = [proof.id];
         }
+        let value: Annotation['value'];
+        if (edit.value.kind === 'source') {
+          const subject = resolveSubject(entityId);
+          if (!subject)
+            reject(
+              'not_found',
+              'Annotation subject is absent from durable facts and the trusted semantic catalog',
+            );
+          if (subject.kind !== 'function')
+            reject('invalid_input', 'Reviewed source requires a function subject');
+          if (!sourceBase)
+            reject('invalid_input', 'Reviewed source requires a published base artifact resolver');
+          const base = sourceBase(subject, edit.value);
+          value = {
+            kind: 'source',
+            language: edit.value.language,
+            text: edit.value.text,
+            base_artifact_id: base.artifact_id,
+            base_text_sha256: base.text_sha256,
+          };
+        } else value = edit.value;
         const annotation: Annotation = {
           id: edit.id,
           entity_id: entityId,
-          value: edit.value,
+          value,
           status: edit.status,
           evidence_ids: evidenceIds,
           author: batch.author,
@@ -212,12 +265,32 @@ export class AnnotationService {
       }
       const declarations = new Map<string, RecoveredType[]>();
       for (const annotation of prospective.values())
-        if (annotation.value.kind === 'type') {
+        if (annotation.value.kind === 'type' && annotation.value.definition) {
           context.checkpoint(1);
           const definitions = declarations.get(annotation.value.type_id) ?? [];
           definitions.push(annotation.value.definition);
           declarations.set(annotation.value.type_id, definitions);
         }
+      // Each type library declares a C name and a type identity at most once.
+      const libraries = typeLibraries(this.store, current),
+        libraryNames = new Map<string, string>(),
+        libraryTypes = new Map<string, string>();
+      for (const annotation of prospective.values()) {
+        if (annotation.value.kind !== 'type' || !libraries.has(annotation.entity_id)) continue;
+        context.checkpoint(1);
+        const typeKey = `${annotation.entity_id}:${annotation.value.type_id}`;
+        if ((libraryTypes.get(typeKey) ?? annotation.id) !== annotation.id)
+          reject('invalid_input', 'A type library declares each type identity at most once');
+        libraryTypes.set(typeKey, annotation.id);
+        if (annotation.value.name === undefined) continue;
+        const nameKey = `${annotation.entity_id}:${annotation.value.name}`;
+        if ((libraryNames.get(nameKey) ?? annotation.id) !== annotation.id)
+          reject(
+            'invalid_input',
+            `Type name ${annotation.value.name} is already declared in this type library`,
+          );
+        libraryNames.set(nameKey, annotation.id);
+      }
       const generated = new Set(evidence.map((proof) => proof.id));
       const checkedEvidence = new Set<string>(),
         checkedTypes = new Set<string>();
@@ -284,26 +357,32 @@ export class AnnotationService {
       for (const annotation of prepared) {
         context.checkpoint(1);
         if (annotation.status === 'retracted') continue;
-        let subject = subjectCache.get(annotation.entity_id);
-        if (subject === undefined) {
-          const semantic = catalog?.subject(annotation.entity_id);
-          // A data subject a decompile names is still validated as data storage here.
-          subject =
-            semantic?.kind === 'data' && semantic.address
-              ? resolveDataAddressSubject(this.store, semantic.address, current, context)
-              : (semantic ??
-                resolveDurableSubject(this.store, annotation.entity_id, current, context));
-          if (subject && subject.id !== annotation.entity_id)
-            reject('invalid_input', 'Data subject identity does not match its address');
-          subjectCache.set(annotation.entity_id, subject);
-        }
+        const subject = resolveSubject(annotation.entity_id);
         if (!subject)
           reject(
             'not_found',
             'Annotation subject is absent from durable facts and the trusted semantic catalog',
           );
         validateEvidence(annotation.evidence_ids);
-        if (annotation.value.kind === 'type') validateTypes([annotation.value.type_id]);
+        if (subject.kind === 'type_library') {
+          if (annotation.value.kind !== 'type' || !annotation.value.definition)
+            reject(
+              'invalid_input',
+              'A type library subject takes only type declarations with a definition',
+            );
+        }
+        if (annotation.value.kind === 'type') {
+          if (!annotation.value.definition) {
+            if (subject.kind === 'function')
+              reject(
+                'invalid_input',
+                'A type annotation on a function declares a type and requires its definition',
+              );
+            if (annotation.value.name !== undefined)
+              reject('invalid_input', 'A type name requires the type definition');
+          }
+          validateTypes([annotation.value.type_id]);
+        }
         if (annotation.value.kind === 'signature') {
           if (!['function', 'call', 'import', 'export'].includes(subject.kind))
             reject('invalid_input', 'Signatures require an exact callable subject');
@@ -407,6 +486,7 @@ export class AnnotationService {
     const selected = options.entity_ids === undefined ? null : new Set(options.entity_ids);
     for (const id of selected ?? []) entityIdSchema.parse(id);
     const live = liveAnnotations(this.store, revision, context),
+      libraries = typeLibraries(this.store, revision),
       annotations: Annotation[] = [],
       types: SuppliedTypeRecord[] = [],
       pending: string[] = [];
@@ -422,23 +502,32 @@ export class AnnotationService {
     };
     for (const annotation of live) {
       context.checkpoint(1);
+      // Reviewed source is a presentation record; it never reaches type recovery, naming or the emitter.
+      if (annotation.value.kind === 'source') continue;
       const included = selected === null || selected.has(annotation.entity_id);
       if (included) {
         bound(encodeAnnotation(annotation));
         annotations.push(annotation);
       }
       if (annotation.value.kind === 'type') {
-        const record: SuppliedTypeRecord = {
-          id: annotation.value.type_id,
-          definition: annotation.value.definition,
-          source: annotation.origin,
-          status: annotation.status === 'asserted' ? 'asserted' : 'hypothesis',
-          evidence_ids: annotation.evidence_ids,
-        };
-        const group = declarations.get(record.id) ?? [];
-        group.push({ subject: annotation.entity_id, record });
-        declarations.set(record.id, group);
-        if (included) pending.push(record.id);
+        const definition = annotation.value.definition;
+        // A binding-only annotation declares nothing; its type resolves below.
+        if (definition) {
+          const record: SuppliedTypeRecord = {
+            id: annotation.value.type_id,
+            definition,
+            source: annotation.origin,
+            status: annotation.status === 'asserted' ? 'asserted' : 'hypothesis',
+            evidence_ids: annotation.evidence_ids,
+            ...(annotation.value.name === undefined
+              ? {}
+              : { spelling: annotation.value.name, member_names: true as const }),
+          };
+          const group = declarations.get(record.id) ?? [];
+          group.push({ subject: annotation.entity_id, record });
+          declarations.set(record.id, group);
+        }
+        if (included) pending.push(annotation.value.type_id);
       } else if (annotation.value.kind === 'signature' && included) {
         pending.push(
           annotation.value.value.return_type,
@@ -456,10 +545,20 @@ export class AnnotationService {
         semantic = options.catalog?.types(id) ?? [];
       const declared = declarations.get(id) ?? [];
       const local =
-        selected === null ? declared : declared.filter((item) => selected.has(item.subject));
-      // Explicit references may use a shared declaration when no local/native
-      // definition exists. Unrelated assertions cannot poison an existing type.
-      const applicable = local.length || fact || semantic.length ? local : declared;
+        selected === null
+          ? declared
+          : declared.filter((item) => selected.has(item.subject) && !libraries.has(item.subject));
+      // Precedence: a local declaration, else (when no durable/catalog definition
+      // exists) the image's type library, else any shared declaration. Unrelated
+      // assertions cannot poison an existing type.
+      const library = declared.filter((item) => libraries.has(item.subject));
+      const applicable = local.length
+        ? local
+        : fact || semantic.length
+          ? []
+          : library.length
+            ? library
+            : declared;
       const records: readonly SuppliedTypeRecord[] = [
         ...applicable.map((item) => item.record),
         ...(fact
