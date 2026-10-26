@@ -13,6 +13,7 @@ import {
   isSchemaValidated,
   markSchemaValidated,
   toolSchemas,
+  typeLibraryIdentity,
 } from '../../core/index.js';
 import type {
   Address,
@@ -44,7 +45,13 @@ import {
   loadFunctionGraph,
   type IndexState,
 } from './scope.js';
-import { executeDecompilation, executeAnnotations, executeImageTypes } from '../analysis/index.js';
+import {
+  executeDecompilation,
+  executeAnnotations,
+  executeImageTypes,
+  executeTypesDeclare,
+} from '../analysis/index.js';
+import { libraryListing } from '../../project/annotations/type-library.js';
 import { runNativeOpenJob } from '../analysis/native-open-job.js';
 import {
   investigationArtifact,
@@ -391,6 +398,8 @@ async function dispatch(
     return executeDecompilation(parsed as ToolArgs<'function_decompile'>, suppliedScope);
   if (operation === 'annotations_apply')
     return executeAnnotations(parsed as ToolArgs<'annotations_apply'>, suppliedScope);
+  if (operation === 'types_declare')
+    return executeTypesDeclare(parsed as ToolArgs<'types_declare'>, suppliedScope);
   if (operation === 'functions_discover')
     return executeDiscoveryStep(parsed as ToolArgs<'functions_discover'>, suppliedScope);
   const scope: Scope =
@@ -463,6 +472,13 @@ async function dispatch(
             text: dump.text,
             functions: { analyzed: dump.analyzed, total: dump.total },
             types: dump.types,
+            library_id: typeLibraryIdentity(image.selected_slice_id),
+            library: libraryListing(
+              scope.store,
+              image.selected_slice_id,
+              args.revision,
+              scope.context,
+            ),
           },
         };
       }

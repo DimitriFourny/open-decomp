@@ -243,16 +243,37 @@ export function recoverTypes(
       )
         budget.charge(budget.limit + 1);
       const existing = records.get(record.id) ?? [];
-      if (
-        existing.some(
-          (item) =>
-            typeKey(item.definition) === typeKey(record.definition) &&
-            item.source === record.source &&
-            item.status === record.status &&
-            item.evidence_ids.join() === record.evidence_ids.join(),
-        )
-      )
+      // The same declaration reached twice (a scoped declaration is both a view record and
+      // its annotation) is one alternative citing both proofs, never two that make it ambiguous.
+      const same = existing.findIndex(
+        (item) =>
+          typeKey(item.definition) === typeKey(record.definition) &&
+          item.source === record.source &&
+          item.status === record.status &&
+          item.spelling === record.spelling &&
+          item.member_names === record.member_names,
+      );
+      if (same >= 0) {
+        const item = existing[same]!;
+        const added = record.evidence_ids.filter((proof) => !item.evidence_ids.includes(proof));
+        if (!added.length) return;
+        const evidence_ids = [...item.evidence_ids, ...added];
+        if (evidence_ids.length > 1000) budget.charge(budget.limit + 1);
+        existing[same] = { ...item, evidence_ids };
+        if (record.definition.kind === 'structure')
+          for (const field of record.definition.fields) {
+            const alternatives = declaredFieldTypes.get(field.id) ?? [];
+            const index = alternatives.findIndex(
+              (alternative) =>
+                alternative.type_id === field.type_id &&
+                alternative.source === record.source &&
+                alternative.status === record.status &&
+                alternative.evidence_ids === item.evidence_ids,
+            );
+            if (index >= 0) alternatives[index] = { ...alternatives[index]!, evidence_ids };
+          }
         return;
+      }
       existing.push(record);
       records.set(record.id, existing);
       subjects.add(record.id);
@@ -343,7 +364,8 @@ export function recoverTypes(
       if (
         annotation.status === 'retracted' ||
         annotation.value.kind === 'name' ||
-        annotation.value.kind === 'note'
+        annotation.value.kind === 'note' ||
+        annotation.value.kind === 'source'
       )
         continue;
       const proof = reason('supplied source assertion', annotation.id, annotation.evidence_ids, {
@@ -352,21 +374,29 @@ export function recoverTypes(
         status: annotation.status,
       });
       if (annotation.value.kind === 'type') {
-        const record: SuppliedTypeRecord = {
+        const definition = annotation.value.definition;
+        const record: SuppliedTypeRecord | undefined = definition && {
           id: annotation.value.type_id,
-          definition: annotation.value.definition,
+          definition,
           source: annotation.origin,
           status: annotation.status,
           evidence_ids: [proof],
+          ...(annotation.value.name === undefined
+            ? {}
+            : { spelling: annotation.value.name, member_names: true as const }),
         };
         // A function anchor declares a source type in scope; it does not give the
         // function itself a scalar machine type.
         if (annotation.entity_id === input.id) {
-          addType(record);
+          if (record) addType(record);
           continue;
         }
-        if (typeSubjects.has(annotation.entity_id)) addType(record);
-        else deferredTypes.push({ record, subject_id: annotation.entity_id });
+        // Without a definition the annotation only binds its subject to a type
+        // supplied elsewhere (a library, shared or durable declaration).
+        if (record) {
+          if (typeSubjects.has(annotation.entity_id)) addType(record);
+          else deferredTypes.push({ record, subject_id: annotation.entity_id });
+        }
         bindings.push({
           subject_id: annotation.entity_id,
           type_id: annotation.value.type_id,

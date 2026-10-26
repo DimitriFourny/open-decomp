@@ -6,12 +6,17 @@ import {
   decodeAddress,
   encodeAddress,
   fingerprint,
+  formatHexU64,
+  hexU64Schema,
   LedgerHasher,
+  parseHexU64,
+  U64_LIMIT,
   type Address,
   type Annotation,
   type AnnotationQuery,
   type CacheIdentity,
   type CanonicalValue,
+  type DataEntityQuery,
   type Evidence,
   type FunctionRecord,
   type OperationContext,
@@ -43,6 +48,13 @@ const selectorSchema = z.discriminatedUnion('kind', [
     kind: z.literal('function_address'),
     image_id: z.string(),
     address: addressSchema,
+  }),
+  /** Registered data entities of an image VA window `[start, end)` (`end` = 2^64 is `null`). */
+  z.strictObject({
+    kind: z.literal('data_entities'),
+    image_id: z.string(),
+    start: hexU64Schema,
+    end: hexU64Schema.nullable(),
   }),
 ]);
 export const analysisReadsetSchema = z.strictObject({
@@ -96,6 +108,13 @@ interface AnnotationReadIndex {
   readonly rows: readonly Annotation[];
   readonly types: ReadonlyMap<string, readonly Annotation[]>;
 }
+/** Reviewed source is presentation only: no analysis may depend on it, so no selector's
+ * fingerprint (and no reuse decision) may observe it. */
+function analysisAnnotations(annotations: readonly Annotation[]): readonly Annotation[] {
+  return annotations.some((annotation) => annotation.value.kind === 'source')
+    ? annotations.filter((annotation) => annotation.value.kind !== 'source')
+    : annotations;
+}
 function allAnnotations(
   store: ProjectStore,
   revision: number,
@@ -112,7 +131,7 @@ function allAnnotations(
       ...(cursor === undefined ? {} : { cursor }),
     });
     context.checkpoint(page.items.length);
-    result.push(...page.items);
+    result.push(...analysisAnnotations(page.items));
     if (result.length > MAX_ANNOTATIONS) exhausted('Analysis annotation dependency bound exceeded');
     for (const annotation of page.items)
       if (annotation.value.kind === 'type') {
@@ -140,7 +159,7 @@ function readSelector(
     case 'proof':
       return store.readEvidence([selector.id], revision)[0] ?? null;
     case 'annotations':
-      return store.readAnnotations(selector.id, revision);
+      return analysisAnnotations(store.readAnnotations(selector.id, revision));
     case 'type_annotations':
       return annotations().types.get(selector.id) ?? [];
     case 'all_annotations':
@@ -169,6 +188,13 @@ function readSelector(
         exhausted('Analysis function frontier dependency bound exceeded');
       return page.items;
     }
+    case 'data_entities':
+      return store.readDataEntities({
+        image_id: selector.image_id,
+        revision,
+        start: parseHexU64(selector.start),
+        end: selector.end === null ? U64_LIMIT : parseHexU64(selector.end),
+      });
   }
 }
 
@@ -234,8 +260,9 @@ export class AnalysisDependencyCollector {
             return (id: string, at: number) => {
               const result = target.readAnnotations(id, at);
               if (at === revision) {
-                this.capture({ kind: 'annotations', id }, result);
-                this.recordAnnotationValues(result);
+                const analysis = analysisAnnotations(result);
+                this.capture({ kind: 'annotations', id }, analysis);
+                this.recordAnnotationValues(analysis);
               }
               return result;
             };
@@ -244,6 +271,22 @@ export class AnalysisDependencyCollector {
               const result = target.queryAnnotations(query);
               if (query.revision === revision && this.#annotationDepth === 0)
                 this.recordAnnotationScope(null, []);
+              return result;
+            };
+          case 'readDataEntities':
+            return (query: DataEntityQuery) => {
+              const result = target.readDataEntities(query);
+              if (query.revision === revision)
+                this.capture(
+                  {
+                    kind: 'data_entities',
+                    image_id: query.image_id,
+                    start: hexU64Schema.parse(formatHexU64(query.start)),
+                    end:
+                      query.end === U64_LIMIT ? null : hexU64Schema.parse(formatHexU64(query.end)),
+                  },
+                  result,
+                );
               return result;
             };
           case 'queryRecords':
@@ -371,7 +414,8 @@ export class AnalysisDependencyCollector {
         this.recordSignatureClosure(annotation.value.value);
       } else if (annotation.value.kind === 'type') {
         this.recordType(annotation.value.type_id);
-        for (const id of typeReferences(annotation.value.definition)) this.recordType(id);
+        if (annotation.value.definition)
+          for (const id of typeReferences(annotation.value.definition)) this.recordType(id);
       }
     }
   }
@@ -386,7 +430,7 @@ export class AnalysisDependencyCollector {
       this.recordAnnotationValues(annotations);
     } else
       for (const id of subjects) {
-        const annotations = this.source.readAnnotations(id, this.revision);
+        const annotations = analysisAnnotations(this.source.readAnnotations(id, this.revision));
         this.capture({ kind: 'annotations', id }, annotations);
         this.recordAnnotationValues(annotations);
       }

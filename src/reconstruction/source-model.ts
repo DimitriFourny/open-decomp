@@ -9,6 +9,7 @@ import type {
 } from '../core/index.js';
 import type { DataType, Instruction, RegisterBinding, Value } from '../ir/index.js';
 import type { MemoryShapeTransfer } from '../analysis/types/memory-shapes.js';
+import type { SuppliedTypeRecord } from '../analysis/types/model.js';
 import type { LikelyHeuristic, Requirement } from '../core/inference.js';
 import type { NativeContext } from '../service/analysis/native-context.js';
 import type { TypeSpec } from '../metadata/library-contracts/spec.js';
@@ -164,6 +165,9 @@ export interface SourceAddress {
   /** Byte storage identity; an unknown extent is never inferred from a use. */
   readonly object?: {
     readonly address: Address;
+    /** Data entity of the storage at `address` (`globalDataIdentity`): the one identity of
+     * this global in every function, the subject of its name and type annotations. */
+    readonly entity_id: string;
     readonly byte_length: bigint | null;
     /** An immutable object's bytes end no later than this many bytes after
      * `address`: the distance to the next symbol, data record or relocation
@@ -173,6 +177,9 @@ export interface SourceAddress {
     readonly mutable: boolean;
     readonly kind: 'bytes' | 'jump_table' | 'literal_pool' | 'unknown';
     readonly evidence_ids: readonly string[];
+    /** Declared C type of the whole object: an asserted `type` annotation on its data
+     * entity or covering symbol. Its records are `SourceEvidence.global_types`. */
+    readonly type_id?: string;
   };
   /** The address is the loader-bound slot of an imported symbol in storage only the
    * loader writes: a Mach-O non-lazy pointer section (`__got`, `__auth_got`) or a
@@ -226,6 +233,9 @@ export interface SourceEvidence {
   readonly call_argument_signatures?: ReadonlyMap<string, AbiSignature>;
   /** Bounded native parameter-associated shape constraints over original values. */
   readonly memory_transfers?: readonly MemoryShapeTransfer[];
+  /** Records of every type a declared global type (`object.type_id`) reaches: user/LLM
+   * declarations, one record per type id. */
+  readonly global_types?: readonly SuppliedTypeRecord[];
   /** Positive caller consumption gathered from available native units. This is
    * not an exhaustive caller scan; absence is never proof of non-consumption. */
   readonly function_return_demands?: readonly RegisterDescriptor[];

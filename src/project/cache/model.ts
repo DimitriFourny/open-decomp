@@ -1,4 +1,10 @@
-import type { CacheIdentity, Evidence, ResultMetadata, ToolResult } from '../../core/index.js';
+import type {
+  CacheIdentity,
+  Evidence,
+  ResultMetadata,
+  ReviewedSource,
+  ToolResult,
+} from '../../core/index.js';
 import type { SuppliedTypeRecord } from '../../analysis/types/index.js';
 import type { AnnotationSubject } from '../annotations/index.js';
 import type { AnalysisReadset } from './dependencies.js';
@@ -11,6 +17,12 @@ export type InlineDecompileData = Extract<
   Extract<ToolResult<'function_decompile'>, { data: unknown }>['data'],
   { delivery: 'inline' }
 >;
+/** The reviewed source delivered beside a decompilation (`null`: none applies), with the info
+ * diagnostics explaining a null caused by conflicting or unasserted reviewed sources. */
+export interface ReviewedSourceLookup {
+  readonly reviewed_source: ReviewedSource | null;
+  readonly diagnostics: ResultMetadata['diagnostics'];
+}
 /** Full semantic result. Output-limited delivery is a separate envelope pointing here;
  * neither a shortened emission nor a self-referencing artifact handle is stored here. */
 export type StoredDecompilation = ResultMetadata &

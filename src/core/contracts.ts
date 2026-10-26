@@ -396,6 +396,25 @@ export interface DiscoveryFrontier {
   readonly pending: readonly DiscoveryRoot[];
   readonly sweep: bigint;
 }
+/** A data entity (`globalDataIdentity` of `address`) some committed annotation names. The id is a
+ * pure function of slice and address, so the row only records that the storage is a validated
+ * data subject from `revision` on; it never changes and never carries annotation content. */
+export interface DataEntityRecord {
+  readonly id: string;
+  readonly image_id: string;
+  readonly slice_id: string;
+  readonly address: Address;
+  readonly revision: number;
+}
+export interface DataEntityQuery {
+  readonly image_id: string;
+  readonly revision: number;
+  /** Virtual addresses `[start, end)`. */
+  readonly start: bigint;
+  readonly end: bigint;
+}
+/** Data entities of one window a query returns at most, nearest the window end first. */
+export const MAX_DATA_ENTITIES = 4096;
 export interface StoreTransaction {
   /** Immutable facts never become annotations and cannot be overwritten by a rename. */
   putImage(image: LoadedImage): void;
@@ -417,6 +436,8 @@ export interface StoreTransaction {
   setDiscoveryFrontier(imageId: string, frontier: DiscoveryFrontier | null): void;
   setAnnotation(annotation: Annotation): void;
   removeAnnotation(id: string, actor: AnnotationActor): void;
+  /** Idempotent: an entity keeps the revision it was first registered at. */
+  registerDataEntity(entity: Omit<DataEntityRecord, 'revision'>): void;
 }
 /** One persisted prepared-callee summary. `scope` is the caller's opaque identity of the image
  * revision, component versions and supplied native types; `value` is a plain domain graph the
@@ -461,6 +482,11 @@ export interface ProjectStore {
   ): MutationResult;
   applyAnnotations(batch: AnnotationBatch): MutationResult;
   readAnnotations(entityId: string, revision: number): readonly Annotation[];
+  /** The registered data entity `id` at or before `revision`, if any. */
+  readDataEntity(id: string, revision: number): DataEntityRecord | null;
+  /** Registered data entities of an image in a VA window at or before `revision`, ordered by
+   * descending address, at most `MAX_DATA_ENTITIES`. */
+  readDataEntities(query: DataEntityQuery): readonly DataEntityRecord[];
   /** Latest nonremoved versions at the requested snapshot, including retracted assertions. */
   queryAnnotations(query: AnnotationQuery): {
     readonly items: readonly Annotation[];

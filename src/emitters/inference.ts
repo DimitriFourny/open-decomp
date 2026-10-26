@@ -943,6 +943,8 @@ function gatherInferences(
     );
   }
   for (const annotation of input.annotations ?? []) {
+    // Reviewed source is presentation only; analysis never supplies it to the emitter.
+    if (annotation.value.kind === 'source') continue;
     add(
       [annotation.entity_id],
       annotation.status === 'retracted' ? 'unresolved' : annotation.status,

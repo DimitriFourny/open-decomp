@@ -3,12 +3,15 @@ import { z } from 'zod';
 import {
   OperationError,
   SCHEMA_VERSION,
+  addressSchema,
   cacheIdentityKey,
   cacheIdentitySchema,
   contentHash,
   type CanonicalValue,
+  decodeAddress,
   decodeEvidence,
   decodeTypeDefinition,
+  encodeAddress,
   encodeArtifact,
   EMISSION_METADATA_SHED_ORDER,
   encodeEvidence,
@@ -47,6 +50,7 @@ import {
   type AnalysisArtifactPayload,
   type AnalysisCatalogData,
   type AnalysisComputation,
+  type ReviewedSourceLookup,
   type StoredDecompilation,
 } from './model.js';
 import {
@@ -59,28 +63,42 @@ import {
 export * from './model.js';
 export * from './dependencies.js';
 
-const subjectSchema = z.strictObject({
-  id: entityIdSchema,
-  kind: z.enum([
-    'function',
-    'call',
-    'value',
-    'stack',
-    'field',
-    'type',
-    'string',
-    'reference',
-    'symbol',
-    'import',
-    'export',
-    'section',
-    'mapping',
-    'relocation',
-  ]),
-  image_id: imageIdSchema,
-  slice_id: sliceIdSchema,
-  abi: targetSchema.shape.abi,
-});
+const subjectSchema = z
+  .strictObject({
+    id: entityIdSchema,
+    kind: z.enum([
+      'function',
+      'call',
+      'value',
+      'stack',
+      'field',
+      'type',
+      'string',
+      'reference',
+      'symbol',
+      'import',
+      'export',
+      'section',
+      'mapping',
+      'relocation',
+      'data',
+    ]),
+    image_id: imageIdSchema,
+    slice_id: sliceIdSchema,
+    abi: targetSchema.shape.abi,
+    address: addressSchema.optional(),
+  })
+  .superRefine((subject, context) => {
+    if ((subject.kind === 'data') !== (subject.address !== undefined))
+      context.addIssue({ code: 'custom', message: 'Exactly data subjects carry an address' });
+  });
+const encodeSubject = ({ address, ...subject }: AnnotationSubject) =>
+  address === undefined ? subject : { ...subject, address: encodeAddress(address) };
+const decodeSubject = ({
+  address,
+  ...subject
+}: z.output<typeof subjectSchema>): AnnotationSubject =>
+  address === undefined ? subject : { ...subject, address: decodeAddress(address) };
 const catalogSchema = z.strictObject({
   subjects: z.array(subjectSchema).max(100000),
   types: z
@@ -186,6 +204,7 @@ function validateComputation(
       ((result.reason === 'output_limit' && !result.data.emission.omitted?.length) ||
         result.continuation !== null)) ||
     result.data.cache !== 'computed' ||
+    result.data.reviewed_source !== undefined ||
     result.data.function_id !== identity.function_id ||
     result.project_id !== store.project_id ||
     result.revision !== revision ||
@@ -205,7 +224,7 @@ function validateComputation(
   if (parsed) catalog = computation.catalog;
   else {
     const wireCatalog = catalogSchema.parse({
-      subjects: computation.catalog.subjects,
+      subjects: computation.catalog.subjects.map(encodeSubject),
       types: computation.catalog.types.map((record) => ({
         id: record.id,
         definition: encodeTypeDefinition(record.definition),
@@ -216,7 +235,7 @@ function validateComputation(
       evidence: computation.catalog.evidence.map(encodeEvidence),
     });
     catalog = {
-      subjects: wireCatalog.subjects,
+      subjects: wireCatalog.subjects.map(decodeSubject),
       types: wireCatalog.types.map((record) => ({
         ...record,
         definition: decodeTypeDefinition(record.definition),
@@ -336,7 +355,7 @@ function parsePayload(sha256: string, bytes: Uint8Array): ParsedPayload {
     size: bytes.length,
     wire,
     catalog: {
-      subjects: wire.catalog.subjects,
+      subjects: wire.catalog.subjects.map(decodeSubject),
       types: wire.catalog.types.map((record) => ({
         ...record,
         definition: decodeTypeDefinition(record.definition),
@@ -424,16 +443,26 @@ function delivery(
   /** `result` is a stored, schema-validated inline result: wrapping it in a handle needs no
    * second full parse. */
   validated = false,
+  reviewed?: ReviewedSourceLookup,
 ): ToolResult<'function_decompile'> {
   const handle = encodeArtifact(artifact);
   const wrapped = {
     ...result,
     artifacts: [handle],
-    data: { ...result.data, cache, ...(work === undefined ? {} : { work }) },
+    ...(reviewed === undefined || reviewed.diagnostics.length === 0
+      ? {}
+      : { diagnostics: [...result.diagnostics, ...reviewed.diagnostics] }),
+    data: {
+      ...result.data,
+      cache,
+      ...(work === undefined ? {} : { work }),
+      ...(reviewed === undefined ? {} : { reviewed_source: reviewed.reviewed_source }),
+    },
   };
-  const inline = validated
-    ? (wrapped as ToolResult<'function_decompile'>)
-    : functionDecompileResultSchema.parse(wrapped);
+  const inline =
+    validated && reviewed === undefined
+      ? (wrapped as ToolResult<'function_decompile'>)
+      : functionDecompileResultSchema.parse(wrapped);
   if (preference === 'artifact') {
     const requested = projectDecompilationArtifactResult(inline, 'requested');
     if (Buffer.byteLength(JSON.stringify(requested)) > limit)
@@ -455,6 +484,9 @@ export async function runCachedDecompilation(
     readonly context: OperationContext;
     readonly inline_limit: number;
     readonly delivery?: 'auto' | 'artifact';
+    /** Reviewed source of the function for the stored emission text: delivered beside the result,
+     * never stored in it and never part of the cache identity. */
+    readonly review?: (emissionText: string) => ReviewedSourceLookup;
     readonly dependencies?: AnalysisDependencyCollector;
     /** False: read and reuse no stored result and publish none (a transient artifact serves any
      * artifact delivery for this session only). */
@@ -482,6 +514,7 @@ export async function runCachedDecompilation(
       limit,
       input.delivery ?? 'auto',
       true,
+      input.review?.(payload.result.data.emission.text),
     );
     const job = activeJob(store, job_id, identity, context);
     store.saveJob({
@@ -537,7 +570,7 @@ export async function runCachedDecompilation(
         result: value.result,
         ...(value.dependencies === undefined ? {} : { dependencies: value.dependencies }),
         catalog: {
-          subjects: value.catalog.subjects,
+          subjects: value.catalog.subjects.map(encodeSubject),
           types: value.catalog.types.map((record) => ({
             ...record,
             definition: encodeTypeDefinition(record.definition),
@@ -590,6 +623,7 @@ export async function runCachedDecompilation(
     limit,
     input.delivery ?? 'auto',
     !shed,
+    input.review?.(computation.result.data.emission.text),
   );
   if (!('data' in response)) fail('invalid_input', 'Invalid prepared analysis delivery');
   activeJob(store, job_id, identity, context);

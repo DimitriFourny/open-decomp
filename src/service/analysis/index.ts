@@ -42,6 +42,7 @@ import { emitPythonLike } from '../../emitters/python-like/index.js';
 import {
   AnnotationService,
   createTrustedSemanticCatalog,
+  type AnnotationSubject,
 } from '../../project/annotations/index.js';
 import { typeReferences } from '../../project/annotations/subjects.js';
 import {
@@ -63,6 +64,7 @@ import {
 } from './calls.js';
 import { boundedEvidence, semanticCatalog } from './catalog.js';
 import { pipelineComponents, pipelineVersions } from './versions.js';
+import { reviewedSourceLookup } from './reviewed-source.js';
 import { boundIR, requirePass } from './passes.js';
 import { recoverSourceEvidence } from './source-facts.js';
 import { likelyPointerTypes } from './likely-types.js';
@@ -71,6 +73,7 @@ import { imageTypeDump, recoverImageTypes, type ImageTypeDump } from './image-ty
 import type { NativePreparationInput } from './native-prepare.js';
 export type { ImageTypeDump } from './image-types.js';
 export { executeAnnotations } from './annotations.js';
+export { executeTypesDeclare } from './types-declare.js';
 
 export interface AnalysisScope {
   readonly store: ProjectStore;
@@ -130,6 +133,20 @@ export async function executeDecompilation(
       ...scope,
       identity,
       delivery: args.delivery,
+      ...(args.source === 'reviewed'
+        ? {
+            // Reviewed source is read around the dependency ledger: it is presentation, so it
+            // may not make a reusable analysis depend on it.
+            review: (text: string) =>
+              reviewedSourceLookup(
+                dependencies.source,
+                args.revision,
+                args.function_id,
+                args.options.emitter,
+                text,
+              ),
+          }
+        : {}),
       inline_limit: Math.min(
         args.budget.output_bytes,
         scope.max_result_bytes ?? Infinity,
@@ -753,7 +770,26 @@ export async function executeDecompilation(
         required: [uniqueDiagnostics, active.annotations, signature],
         emission: emitted.emission,
       });
-      const catalog = { ...semanticTypes, types: bounded.types };
+      // Every image global the function names is a data subject an LLM may annotate by the
+      // entity id the output carries (import-bound slots are named by their import).
+      const dataSubjects = new Map<string, AnnotationSubject>();
+      for (const item of source.addresses) {
+        context.checkpoint(1);
+        if (!item.object || item.import || item.object.address.space !== 'va') continue;
+        dataSubjects.set(item.object.entity_id, {
+          id: item.object.entity_id,
+          kind: 'data',
+          image_id: image.id,
+          slice_id: image.selected_slice_id,
+          abi: image.target.abi,
+          address: item.object.address,
+        });
+      }
+      const catalog = {
+        ...semanticTypes,
+        subjects: [...semanticTypes.subjects, ...dataSubjects.values()],
+        types: bounded.types,
+      };
       const evidence = bounded.evidence;
       const encoded = encodeEmission(emitted.emission);
       const shed = bounded.emission

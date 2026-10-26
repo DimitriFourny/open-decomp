@@ -274,7 +274,7 @@ test('schema-1 migration preserves old snapshots without inventing historical re
   // Recreate the v1 layout, before removal actors, semantic catalog indexing and normalized image facts.
   const legacy = new DatabaseSync(join(state.path, 'project.sqlite'));
   legacy.exec(
-    'DROP TABLE annotation_removals; DROP TABLE analysis_artifacts; DROP TABLE loaded_image_records; DROP TABLE analysis_reuse; DROP TABLE native_summaries; DROP TABLE discovery_frontiers; DROP INDEX records_scope_revision; DROP INDEX loaded_images_revision; PRAGMA user_version=1;',
+    'DROP TABLE annotation_removals; DROP TABLE analysis_artifacts; DROP TABLE loaded_image_records; DROP TABLE analysis_reuse; DROP TABLE native_summaries; DROP TABLE discovery_frontiers; DROP TABLE data_entities; DROP INDEX records_scope_revision; DROP INDEX loaded_images_revision; PRAGMA user_version=1;',
   );
   legacy.close();
   state.store = SqliteProjectStore.open(state.path, 'resume');

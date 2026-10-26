@@ -145,6 +145,14 @@ const inputs: Record<ToolName, object> = {
       },
     ],
   },
+  types_declare: {
+    project_id: project,
+    expected_revision: 3,
+    image_id: image,
+    author: 'analyst',
+    origin: 'llm',
+    source: 'struct Node { int32_t value; struct Node *next; };',
+  },
   functions_discover: { ...request, image_id: image },
   analysis_status: { ...request, job_id: jobId },
   analysis_cancel: { ...request, job_id: jobId },
@@ -222,6 +230,17 @@ const success: Record<ToolName, object> = {
       ],
       removed: [],
       invalidation: { scope: 'project', derived_before_revision: 4 },
+    },
+  },
+  types_declare: {
+    state: 'complete',
+    revision: 4,
+    data: {
+      previous_revision: 3,
+      revision: 4,
+      library_id: entity,
+      types: [{ name: 'Node', key: 'Node', type_id: entity, annotation_id: annotationId }],
+      diagnostics: [],
     },
   },
   functions_discover: {
@@ -407,6 +426,21 @@ test('revision and atomic annotation preconditions cannot be silently discarded'
     false,
   );
   assert.equal(annotationsApplyArgsSchema.safeParse({ ...args, edits: [] }).success, false);
+  // A set edit names its subject by exactly one of an entity id and a data VA.
+  const unaddressed = {
+    operation: 'set',
+    id: annotationId,
+    value: { kind: 'name', value: 'config' },
+    status: 'asserted',
+    evidence_ids: [],
+  };
+  const addressed = { ...unaddressed, address: { image_id: image, space: 'va', value: '0x4010' } };
+  const edits = (edit: object) =>
+    annotationsApplyArgsSchema.safeParse({ ...inputs.annotations_apply, edits: [edit] }).success;
+  assert.equal(edits(addressed), true);
+  assert.equal(edits(unaddressed), false);
+  assert.equal(edits({ ...addressed, entity_id: entity }), false);
+  assert.equal(edits({ ...addressed, address: { ...addressed.address, space: 'file' } }), false);
   const result = { ...envelope, ...success.annotations_apply };
   assert.equal(validateToolResponse('annotations_apply', result, args).revision, 4);
   assert.equal(

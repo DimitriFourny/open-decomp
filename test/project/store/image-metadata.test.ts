@@ -153,7 +153,7 @@ test('schema-3 migration preserves every historical loaded image and its ordered
       encodeStored(metadata(later)),
     );
     db.exec(
-      'DROP TABLE loaded_image_records; DROP TABLE analysis_reuse; DROP TABLE native_summaries; DROP TABLE discovery_frontiers; DROP INDEX records_scope_revision; DROP INDEX loaded_images_revision; PRAGMA user_version=3;',
+      'DROP TABLE loaded_image_records; DROP TABLE analysis_reuse; DROP TABLE native_summaries; DROP TABLE discovery_frontiers; DROP TABLE data_entities; DROP INDEX records_scope_revision; DROP INDEX loaded_images_revision; PRAGMA user_version=3;',
     );
   } finally {
     db.close();
@@ -192,7 +192,7 @@ test('failed migration rolls back both previously converted snapshots and the ne
       encodeStored({ ...metadata(image), id: `image_${'0'.repeat(64)}` }),
     );
     db.exec(
-      'DROP TABLE loaded_image_records; DROP TABLE analysis_reuse; DROP TABLE discovery_frontiers; DROP INDEX records_scope_revision; DROP INDEX loaded_images_revision; PRAGMA user_version=3;',
+      'DROP TABLE loaded_image_records; DROP TABLE analysis_reuse; DROP TABLE discovery_frontiers; DROP TABLE data_entities; DROP INDEX records_scope_revision; DROP INDEX loaded_images_revision; PRAGMA user_version=3;',
     );
   } finally {
     db.close();

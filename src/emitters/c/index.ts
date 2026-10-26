@@ -2,7 +2,7 @@ import type { Emitter, OperationContext } from '../../core/index.js';
 import type { EmissionInput, EmissionResult } from '../model.js';
 import { renderSource } from '../renderer.js';
 
-export const C_EMITTER_VERSION = 'reconstructed-c-109';
+export const C_EMITTER_VERSION = 'reconstructed-c-111';
 type Options = Parameters<Emitter<EmissionInput>['emit']>[1];
 
 /** C-like high-level pseudocode, not a compilable source translation.

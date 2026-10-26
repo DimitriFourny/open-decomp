@@ -353,7 +353,7 @@ export async function runMcpWorkflows(options: McpWorkflowOptions): Promise<McpW
         discovery.tools.map((tool) => tool.name).sort(),
         Object.keys(toolSchemas).sort(),
       );
-      assert.ok(Buffer.byteLength(JSON.stringify(discovery)) < 40_000, 'tools/list is compact');
+      assert.ok(Buffer.byteLength(JSON.stringify(discovery)) < 42_000, 'tools/list is compact');
       for (const tool of discovery.tools) {
         assert.equal(tool.inputSchema.type, 'object');
         assert.equal(tool.outputSchema, undefined);

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   createOperationContext,
+  globalDataIdentity,
   newIdentity,
   type AbiProfile,
   type AbiSignature,
@@ -38,6 +39,7 @@ const stringAt = (value: bigint, text: string): SourceAddress => ({
   string_start: true,
   object: {
     address: at(value),
+    entity_id: globalDataIdentity(slice, at(value)),
     byte_length: null,
     offset: 0n,
     mutable: false,

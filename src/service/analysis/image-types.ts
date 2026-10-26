@@ -44,7 +44,14 @@ import type {
   TypeRecoveryResult,
 } from '../../analysis/types/index.js';
 import { cSourceName } from '../../metadata/symbols/c-names.js';
+import { typeDeclarations } from '../../project/annotations/type-library.js';
 import { nativeCallIndex } from './calls.js';
+import {
+  imageTypeBindings,
+  type ImageTypeBindings,
+  type ImageTypeBindingSource,
+  type ImageTypeUserBinding,
+} from './image-type-bindings.js';
 import { nativeArgumentIndex, nativeArgumentValues } from './native-arguments.js';
 import { parameterRegisters } from './native-abi.js';
 import {
@@ -52,7 +59,7 @@ import {
   type NativePreparationInput,
   type PreparedNativeUnit,
 } from './native-prepare.js';
-import { renderImageTypeDeclarations } from '../../emitters/image-types.js';
+import { renderImageTypeDeclarations, type ImageTypeUserView } from '../../emitters/image-types.js';
 import type { NativeDependency } from './native-worklist.js';
 import {
   nativeLibraryContracts,
@@ -622,18 +629,29 @@ export function exploreImageTypes(
 
 /** Image type records for the classes reachable from the selected function's
  * views. Local recovered members keep their IDs and types; merged members from
- * other functions are added only where they do not overlap a local member. */
+ * other functions are added only where they do not overlap a local member. A class
+ * bound to a user-declared structure (`user`) is that structure here: this
+ * body's values in it take the declared pointer type (unless this body declares
+ * their type itself) and members pointing to it point to the declaration. */
 export function applyImageTypes(
   input: SourceFactsInput,
   solution: ImageTypeSolution,
   types: TypeRecoveryResult,
   context: OperationContext,
+  user: ImageTypeBindings,
 ): TypeRecoveryResult {
   const slice = input.image.selected_slice_id;
   const classes = new Map(solution.classes.map((item) => [item.id, item]));
   const records = [...types.types];
   const byId = new Map<string, SuppliedTypeRecord>();
   for (const record of records) byId.set(record.id, record);
+  // A declaration this body already has in scope takes precedence over the binding's.
+  const own = new Set(byId.keys());
+  for (const record of user.records)
+    if (!own.has(record.id)) {
+      records.push(record);
+      byId.set(record.id, record);
+    }
   const evidence: Evidence[] = [];
   const proofs = new Map<string, string>();
   const proof = (item: ImageTypeClass): string => {
@@ -659,6 +677,29 @@ export function applyImageTypes(
       revision: input.revision,
     });
     proofs.set(item.id, id);
+    return id;
+  };
+  /** The asserted signature roles a bound class's type comes from. */
+  const bindingProof = (item: ImageTypeClass, binding: ImageTypeUserBinding): string => {
+    const id = `evidence_${fingerprint([input.image.id, input.revision, 'image-type-binding', item.id, binding.type_id])}`;
+    if (proofs.has(id)) return id;
+    evidence.push({
+      id,
+      origin: {
+        kind: 'analysis',
+        analyzer: 'image-types',
+        version: '1',
+        rule: 'an asserted signature role of a member function declares the class type',
+      },
+      claim: `Layout ${item.label} is ${binding.spelling}: declared by the asserted signature of ${bindingRoles(input, binding.sources)}`,
+      derived_from: [
+        proof(item),
+        ...new Set(binding.sources.flatMap((source) => source.annotation.evidence_ids)),
+      ].sort(),
+      conflicts_with: [],
+      revision: input.revision,
+    });
+    proofs.set(id, id);
     return id;
   };
   const generated = (definition: RecoveredType, evidence_ids: readonly string[]): string => {
@@ -696,7 +737,7 @@ export function applyImageTypes(
   /** Pointer members name their pointee class; a class without a view in this
    * function is declared by name only (its layout is in the image types). */
   const typeOf = (class_id: string): string => {
-    const existing = typeIds.get(class_id);
+    const existing = user.bound.get(class_id)?.type_id ?? typeIds.get(class_id);
     if (existing) return existing;
     const id = entityIdentity(slice, 'image-type', [class_id]);
     typeIds.set(class_id, id);
@@ -851,6 +892,16 @@ export function applyImageTypes(
     );
     return keys.size === 1 && !keys.has('') ? item.declared[0] : undefined;
   };
+  // This body's own declarations (its signature, call prototypes, type annotations)
+  // of a value take precedence over a class binding.
+  const declaredValues = new Set(
+    types.associations.flatMap((association) =>
+      association.source !== 'analysis' &&
+      (association.status === 'established' || association.status === 'asserted')
+        ? [association.subject_id]
+        : [],
+    ),
+  );
   const flows: { value_id: string; class_id: string }[] = [];
   for (const [key, class_id] of solution.class_of) {
     context.checkpoint(1);
@@ -860,7 +911,9 @@ export function applyImageTypes(
     if (
       value_id === 'stack' ||
       shapeBases.has(value_id) ||
-      (!item?.fields.length && declaredType(item) === undefined)
+      (user.bound.has(class_id)
+        ? declaredValues.has(value_id)
+        : !item?.fields.length && declaredType(item) === undefined)
     )
       continue;
     flows.push({ value_id, class_id });
@@ -897,20 +950,60 @@ export function applyImageTypes(
       )
         continue;
       const item = classes.get(class_id)!,
-        proofIds = [proof(item)];
+        binding = user.bound.get(class_id);
+      // A bound class's values hold the declared structure's address, as the
+      // asserted signature role states (a declaration, so it wins over observed views).
+      const proofIds = [binding ? bindingProof(item, binding) : proof(item)];
       associations.push({
         id: entityIdentity(slice, 'image-type-association', [input.ir.id, value_id, class_id]),
         subject_id: value_id,
-        type_id:
-          declaredType(item) ??
-          generated({ kind: 'pointer', bits: 64, to: typeOf(class_id) }, proofIds),
-        source: 'analysis',
-        status: 'candidate',
+        type_id: binding
+          ? binding.pointer_id
+          : (declaredType(item) ??
+            generated({ kind: 'pointer', bits: 64, to: typeOf(class_id) }, proofIds)),
+        source: binding ? binding.sources[0]!.annotation.origin : 'analysis',
+        status: binding ? 'asserted' : 'candidate',
         evidence_ids: proofIds,
         machine_type: value.type,
         value_offset_bits: 0,
         machine_offset_bits: 0,
         width_bits: 64,
+      });
+    }
+  }
+  // Every value this body types as a pointer to its own view of a bound class (the
+  // view's base, register fragments of it, values it reaches) holds the declared
+  // structure's address instead.
+  const boundViews = new Map<string, string>();
+  for (const [class_id, list] of localTypes)
+    if (user.bound.has(class_id)) for (const type_id of list) boundViews.set(type_id, class_id);
+  if (boundViews.size) {
+    const pointers = new Map<string, string>();
+    for (const record of types.types) {
+      context.checkpoint(1);
+      if (
+        record.source === 'analysis' &&
+        record.definition.kind === 'pointer' &&
+        boundViews.has(record.definition.to)
+      )
+        pointers.set(record.id, boundViews.get(record.definition.to)!);
+    }
+    for (const association of types.associations) {
+      context.checkpoint(1);
+      const class_id = pointers.get(association.type_id);
+      if (!class_id || declaredValues.has(association.subject_id)) continue;
+      const binding = user.bound.get(class_id)!;
+      associations.push({
+        ...association,
+        id: entityIdentity(slice, 'image-type-association', [
+          input.ir.id,
+          association.id,
+          class_id,
+        ]),
+        type_id: binding.pointer_id,
+        source: binding.sources[0]!.annotation.origin,
+        status: 'asserted',
+        evidence_ids: [bindingProof(classes.get(class_id)!, binding)],
       });
     }
   }
@@ -979,6 +1072,74 @@ export function applyImageTypes(
   };
 }
 
+/** `rec_id parameter 0 (rec), make_rec result`: the asserted signature roles of sources. */
+function bindingRoles(
+  input: Pick<NativePreparationInput, 'functions' | 'image'>,
+  sources: readonly ImageTypeBindingSource[],
+): string {
+  const names = typeFunctions(
+    input,
+    sources.map((source) => source.function_id),
+  );
+  return sources
+    .map((source) => {
+      const fn = names.get(source.function_id)?.name ?? source.function_id;
+      if (source.parameter === null) return `${fn} result`;
+      const { value } = source.annotation;
+      const name =
+        value.kind === 'signature' ? value.value.parameters[source.parameter]?.name : null;
+      return `${fn} parameter ${source.parameter}${name ? ` (${name})` : ''}`;
+    })
+    .join(', ');
+}
+
+/** `+0x18 (32 bits), +0x20 (64 bits)`: observed members a bound declaration lacks. */
+function outsideMembers(fields: readonly ImageTypeField[]): string {
+  return `${fields
+    .slice(0, 16)
+    .map((field) => `+0x${field.offset.toString(16)} (${field.width_bits} bits)`)
+    .join(', ')}${fields.length > 16 ? ', …' : ''}`;
+}
+
+/** Binding outcomes of the classes the selected body has views in: a binding whose
+ * declaration does not cover every observed member (applied anyway: the assertion
+ * wins) warns; competing declared structures leave the class unbound (info). */
+function bindingDiagnostics(
+  input: SourceFactsInput,
+  solution: ImageTypeSolution,
+  user: ImageTypeBindings,
+): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  const evidenceOf = (sources: readonly ImageTypeBindingSource[]) =>
+    [...new Set(sources.flatMap((source) => source.annotation.evidence_ids))].sort().slice(0, 1000);
+  for (const item of solution.classes) {
+    if (!item.functions.includes(input.ir.id)) continue;
+    const binding = user.bound.get(item.id),
+      conflict = user.conflicts.get(item.id);
+    if (binding?.outside.length)
+      diagnostics.push({
+        code: 'conflicting_evidence',
+        severity: 'warning',
+        message:
+          `Image type ${item.label} is bound to ${binding.spelling} by the asserted signature of ` +
+          `${bindingRoles(input, binding.sources)}, but its observed members at ` +
+          `${outsideMembers(binding.outside)} are no member of that declaration; the declaration ` +
+          'is applied and those accesses print without a member name',
+        evidence_ids: evidenceOf(binding.sources),
+      });
+    else if (conflict)
+      diagnostics.push({
+        code: 'conflicting_evidence',
+        severity: 'info',
+        message:
+          `Image type ${item.label} stays unbound: asserted signatures declare it as different structures (` +
+          `${conflict.map((entry) => `${entry.spelling}: ${bindingRoles(input, entry.sources)}`).join('; ')})`,
+        evidence_ids: evidenceOf(conflict.flatMap((entry) => entry.sources)),
+      });
+  }
+  return diagnostics;
+}
+
 /** Merge the selected function's observed layouts with every compatible view
  * reachable through exact pointer flows, under its own work sub-budget. */
 export function recoverImageTypes(
@@ -1030,7 +1191,17 @@ export function recoverImageTypes(
     );
     if (!rootObjects.length) return { types, diagnostics: [] };
     const solution = exploreImageTypes(input, rootObjects, bounded);
-    return { types: applyImageTypes(input, solution, types, bounded), diagnostics: [] };
+    const user = imageTypeBindings(
+      input.scope,
+      input.revision,
+      input.components.abi,
+      solution.classes,
+      bounded,
+    );
+    return {
+      types: applyImageTypes(input, solution, types, bounded, user),
+      diagnostics: bindingDiagnostics(input, solution, user),
+    };
   } catch (error) {
     const details = error instanceof OperationError ? error.diagnostic.details : undefined;
     if (
@@ -1169,11 +1340,47 @@ export function imageTypeDump(
   const declared = [...solution.classes]
     .filter((item) => !item.local && item.fields.length)
     .sort((a, b) => a.name.localeCompare(b.name));
+  // Bound classes print as their declaration; competing declarations are noted.
+  const user = imageTypeBindings(
+    input.scope,
+    input.revision,
+    input.components.abi,
+    declared,
+    context,
+  );
+  const declarations = user.records.map((record) => ({
+    name: record.spelling ?? null,
+    type_id: record.id,
+    definition: record.definition,
+  }));
+  const views = new Map<string, ImageTypeUserView>();
+  for (const [class_id, binding] of user.bound)
+    views.set(class_id, {
+      bound: {
+        spelling: binding.spelling,
+        declarations: typeDeclarations(declarations, [binding.type_id], context),
+      },
+      note:
+        `declared by the asserted signature of ${bindingRoles(input, binding.sources)}` +
+        (binding.outside.length
+          ? `; observed members outside the declaration: ${outsideMembers(binding.outside)}`
+          : ''),
+    });
+  for (const [class_id, conflict] of user.conflicts)
+    views.set(class_id, {
+      note: `unbound: asserted signatures declare ${conflict
+        .map((entry) => `${entry.spelling} (${bindingRoles(input, entry.sources)})`)
+        .join(', ')}`,
+    });
   let shown = declared.length,
     text = '';
   for (;;) {
     context.checkpoint(shown + 1);
-    text = renderImageTypeDeclarations(declared.slice(0, shown), (id) => names.get(id)?.name ?? id);
+    text = renderImageTypeDeclarations(
+      declared.slice(0, shown),
+      (id) => names.get(id)?.name ?? id,
+      views,
+    );
     if (Buffer.byteLength(text) <= max_bytes || shown === 0) break;
     shown = Math.floor(shown / 2);
   }

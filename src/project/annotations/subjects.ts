@@ -1,8 +1,11 @@
 import {
   OperationError,
   entityIdSchema,
+  typeLibraryIdentity,
   encodeEvidence,
   encodeTypeDefinition,
+  globalDataIdentity,
+  type Address,
   type Evidence,
   type OperationContext,
   type ProjectStore,
@@ -10,6 +13,7 @@ import {
   type Target,
 } from '../../core/index.js';
 import type { SuppliedTypeRecord } from '../../analysis/types/index.js';
+import { recoverDataAddress } from '../../analysis/strings/source-data.js';
 
 export interface AnnotationSubject {
   readonly id: string;
@@ -27,14 +31,49 @@ export interface AnnotationSubject {
     | 'export'
     | 'section'
     | 'mapping'
-    | 'relocation';
+    | 'relocation'
+    /** Image storage (a global) at `address`: `globalDataIdentity(slice_id, address)`. */
+    | 'data'
+    /** The per-slice type library anchor (`typeLibraryIdentity`). */
+    | 'type_library';
   readonly image_id: string;
   readonly slice_id: string;
   readonly abi: Target['abi'];
+  /** Data subjects only: the storage VA, validated as data when the subject was established. */
+  readonly address?: Address;
 }
 
 function missing(message: string): never {
   throw new OperationError({ code: 'invalid_input', severity: 'error', message, evidence_ids: [] });
+}
+
+/** The data subject at an image VA. The address must be data storage by the rules every
+ * decompile applies to a global (`recoverDataAddress`: mapped or zero-fill memory inside
+ * exactly one readable non-code section); anything else is `invalid_input`. */
+export function resolveDataAddressSubject(
+  store: ProjectStore,
+  address: Address,
+  revision: number,
+  context: OperationContext,
+): AnnotationSubject {
+  context.checkpoint(1);
+  const imported = store
+    .snapshot(revision)
+    .images.find((image) => image.image_id === address.image_id);
+  if (!imported) missing('Data address belongs to no image of this project snapshot');
+  const image = store.readLoadedImage(imported.image_id, imported.selected_slice_id, revision);
+  if (address.space !== 'va' || !recoverDataAddress(image, address, context))
+    missing(
+      'Data address must be mapped or zero-fill image storage inside exactly one readable non-code section',
+    );
+  return {
+    id: globalDataIdentity(image.selected_slice_id, address),
+    kind: 'data',
+    image_id: image.id,
+    slice_id: image.selected_slice_id,
+    abi: image.target.abi,
+    address,
+  };
 }
 
 /** Resolve exact durable IDs, never labels, addresses masquerading as IDs, or lineage successors. */
@@ -46,6 +85,25 @@ export function resolveDurableSubject(
 ): AnnotationSubject | null {
   entityIdSchema.parse(id);
   const snapshot = store.snapshot(revision);
+  // A registered data entity is a validated data address of an image in this snapshot.
+  const data = store.readDataEntity(id, revision);
+  if (data) {
+    context.checkpoint(1);
+    if (
+      snapshot.images.some(
+        (image) => image.image_id === data.image_id && image.selected_slice_id === data.slice_id,
+      )
+    )
+      return {
+        id,
+        kind: 'data',
+        image_id: data.image_id,
+        slice_id: data.slice_id,
+        abi: store.readLoadedImage(data.image_id, data.slice_id, revision).target.abi,
+        address: data.address,
+      };
+    return null;
+  }
   for (const imported of snapshot.images) {
     context.checkpoint(1);
     let image;
@@ -62,6 +120,7 @@ export function resolveDurableSubject(
       slice_id: image.selected_slice_id,
       abi: image.target.abi,
     });
+    if (id === typeLibraryIdentity(image.selected_slice_id)) return subject('type_library');
     for (const kind of ['function', 'string', 'reference', 'symbol', 'import', 'export'] as const) {
       context.checkpoint(1);
       if (

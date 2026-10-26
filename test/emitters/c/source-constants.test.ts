@@ -7,7 +7,11 @@ import test from 'node:test';
 import { sysvAMD64Abi } from '../../../src/abi/sysv-amd64/index.js';
 import { constructSSA } from '../../../src/analysis/ssa/index.js';
 import { recoverDataAddress, recoverDataBytes } from '../../../src/analysis/strings/source-data.js';
-import { createOperationContext, type LoadedImage } from '../../../src/core/index.js';
+import {
+  createOperationContext,
+  globalDataIdentity,
+  type LoadedImage,
+} from '../../../src/core/index.js';
 import { integer, type SSAForm } from '../../../src/ir/index.js';
 import { unknownClobbers } from '../../../src/lifters/arm64/semantics.js';
 import { structureControlFlow } from '../../../src/presentation/index.js';
@@ -15,7 +19,7 @@ import { reconstruct } from '../../../src/reconstruction/index.js';
 import { LocalValidationSession } from '../../../src/reconstruction/local-validation.js';
 import { projectSourceConstants } from '../../../src/reconstruction/source-data.js';
 import { navigationBytes } from '../../analysis/navigation-fixture.js';
-import { builder, image, register } from '../../ir/support.js';
+import { builder, image, register, slice } from '../../ir/support.js';
 import { emit, emittedFormals, execute } from './support.js';
 
 function immutableImage(bytes: Uint8Array): LoadedImage {
@@ -81,6 +85,7 @@ function fixture(
     constant_bytes: options.short ? bytes.slice(1) : bytes,
     object: {
       address,
+      entity_id: globalDataIdentity(slice, address),
       byte_length: BigInt(bytes.length),
       offset: 0n,
       mutable: options.mutable ?? false,

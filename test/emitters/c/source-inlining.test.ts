@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import test, { describe } from 'node:test';
-import { createOperationContext, entityIdentity } from '../../../src/core/index.js';
+import {
+  createOperationContext,
+  entityIdentity,
+  globalDataIdentity,
+} from '../../../src/core/index.js';
 import { DarwinArm64Abi } from '../../../src/abi/darwin-arm64/index.js';
 import { sysvAMD64Abi } from '../../../src/abi/sysv-amd64/index.js';
 import { constructSSA } from '../../../src/analysis/ssa/index.js';
@@ -104,6 +108,7 @@ for (const language of ['c-like', 'python-like'] as const)
                 name: 'lookup',
                 object: {
                   address,
+                  entity_id: globalDataIdentity(slice, address),
                   byte_length: 256n,
                   offset: 0n,
                   mutable: false,

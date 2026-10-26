@@ -6,15 +6,17 @@ import {
 import { bitWidth, type DataType, type Instruction, type Value } from '../ir/index.js';
 import type { Reconstruction } from '../reconstruction/model.js';
 import type { SourceAddress } from '../reconstruction/source-model.js';
+import type { ObservedMember } from './source-structs.js';
 
 /** One image-backed or import-bound object the function names. Declaration shape
  * follows only the accesses observed in this function; its extent stays unknown
  * unless the image established one, and a use never invents an array bound. */
 export interface GlobalObject {
-  /** Stable identity: the object's base VA, or the imported symbol. */
+  /** Stable identity: the data entity of the object's base (`object.entity_id`), the subject
+   * of its annotations in every function, or `import:<library>:<name>` for an imported symbol. */
   readonly key: string;
   readonly address: Address;
-  readonly object: NonNullable<SourceAddress['object']>;
+  readonly object: Omit<NonNullable<SourceAddress['object']>, 'entity_id'>;
   readonly import?: NonNullable<SourceAddress['import']>;
   /** Preferred C identifier stem; native names use their C spelling. */
   readonly stem: string;
@@ -37,6 +39,10 @@ export interface GlobalObject {
   element: { readonly bits: 8 | 16 | 32 | 64; readonly float: boolean };
   /** First planned access, for provenance of the declaration. */
   first?: string;
+  /** Declared C type of the object (`object.type_id`, an asserted annotation): the declaration
+   * spells it, and each access of exactly one scalar it declares prints as the object, its
+   * element or its member. Other accesses stay explicit casts through the object's address. */
+  readonly typed?: string;
   /** Header-declared type of an imported data object, when every observed access
    * agrees with it: one scalar element at offset 0 of exactly its width and kind
    * (a pointer object is only read). Otherwise the object keeps its access type. */
@@ -50,6 +56,22 @@ export interface GlobalAccess {
   readonly object: GlobalObject;
   /** Byte displacement from the object base. */
   readonly offset: bigint;
+  /** The scalar of the object's declared type this access is. */
+  readonly declared?: DeclaredAccess;
+}
+/** A scalar a declared global type has at one byte offset with one access width and kind. */
+export interface DeclaredAccess {
+  /** Accessor after the object's name: `''` (the object), `[i]`, `.member`, `.member[i]`. */
+  readonly text: string;
+  /** Type id of the scalar accessed. */
+  readonly type_id: string;
+  /** A structure member access: the structure type and its member, printed in its body. */
+  readonly member?: { readonly structure: string; readonly member: ObservedMember };
+}
+export interface DeclaredGlobalTypes {
+  /** The type is an array: the object's name is then its first element's address. */
+  array(type_id: string): boolean;
+  access(type_id: string, offset: bigint, bits: number, float: boolean): DeclaredAccess | undefined;
 }
 export interface GlobalPlan {
   /** Loads and stores printed as the object itself (`name`, `name[i]`). */
@@ -80,6 +102,8 @@ export function planGlobals(
     readonly pointer_bits: number | undefined;
     /** Target ABI that sizes header-declared library types. */
     readonly abi: AbiProfile | undefined;
+    /** Source view: declared global types (`object.type_id`) and the scalars they declare. */
+    readonly declared?: DeclaredGlobalTypes;
   },
 ): GlobalPlan {
   const objects = new Map<string, GlobalObject>();
@@ -114,13 +138,16 @@ export function planGlobals(
   const object = (item: SourceAddress): GlobalObject | undefined => {
     const base = item.object;
     if (!base) return undefined;
-    const key = `va:${keyOf(base.address)}`;
+    const key = base.entity_id;
     let found = objects.get(key);
     if (!found) {
+      const { entity_id: _entity, ...storage } = base;
+      const typed = options.declared && base.type_id;
       found = {
         key,
         address: base.address,
-        object: { ...base, offset: 0n },
+        object: { ...storage, offset: 0n },
+        ...(typed ? { typed } : {}),
         stem:
           item.source_name ??
           item.name ??
@@ -142,7 +169,7 @@ export function planGlobals(
         ...(item.initial_import !== undefined && base.offset === 0n
           ? { initial_import: item.initial_import }
           : {}),
-        shape: 'bytes',
+        shape: typed ? (options.declared!.array(typed) ? 'array' : 'scalar') : 'bytes',
         element: { bits: 8, float: false },
       };
       objects.set(key, found);
@@ -239,6 +266,16 @@ export function planGlobals(
     target.first ??= node.id;
   }
   for (const [target, list] of observed) {
+    // A declared type fixes the object's shape: each access of exactly one scalar it
+    // declares prints as that scalar; any other access stays an explicit cast.
+    if (target.typed !== undefined) {
+      for (const item of list) {
+        if (!item.plain) continue;
+        const declared = options.declared!.access(target.typed, item.offset, item.bits, item.float);
+        if (declared) accesses.set(item.node.id, { object: target, offset: item.offset, declared });
+      }
+      continue;
+    }
     const first = list[0]!;
     const bytes = BigInt(first.bits / 8);
     const known = target.object.byte_length;

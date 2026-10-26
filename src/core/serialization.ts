@@ -62,16 +62,19 @@ export function encodeTypeDefinition(value: RecoveredType): z.output<typeof type
 }
 export function decodeAnnotation(input: z.input<typeof annotationSchema>): Annotation {
   const value = annotationSchema.parse(input);
-  if (value.value.kind === 'type')
-    return {
-      ...value,
-      value: { ...value.value, definition: decodeTypeDefinition(value.value.definition) },
-    };
-  return { ...value, value: value.value };
+  if (value.value.kind !== 'type') return { ...value, value: value.value };
+  const { definition, ...binding } = value.value;
+  return {
+    ...value,
+    value:
+      definition === undefined
+        ? binding
+        : { ...binding, definition: decodeTypeDefinition(definition) },
+  };
 }
 export function encodeAnnotation(value: Annotation): z.output<typeof annotationSchema> {
   return annotationSchema.parse(
-    value.value.kind === 'type'
+    value.value.kind === 'type' && value.value.definition !== undefined
       ? {
           ...value,
           value: { ...value.value, definition: encodeTypeDefinition(value.value.definition) },
@@ -80,22 +83,38 @@ export function encodeAnnotation(value: Annotation): z.output<typeof annotationS
   );
 }
 export function decodeAnnotationEdit(input: z.input<typeof annotationEditSchema>): AnnotationEdit {
-  const edit = annotationEditSchema.parse(input);
-  if (edit.operation !== 'set') return edit;
-  const value = edit.value;
-  if (value.kind === 'type')
-    return { ...edit, value: { ...value, definition: decodeTypeDefinition(value.definition) } };
-  return { ...edit, value };
+  const parsed = annotationEditSchema.parse(input);
+  if (parsed.operation !== 'set') return parsed;
+  const { address, value, ...edit } = parsed;
+  const subject = {
+    ...edit,
+    ...(address === undefined
+      ? {}
+      : { address: { ...address, value: parseHexU64(address.value) } }),
+  };
+  if (value.kind !== 'type') return { ...subject, value };
+  const { definition, ...binding } = value;
+  return {
+    ...subject,
+    value:
+      definition === undefined
+        ? binding
+        : { ...binding, definition: decodeTypeDefinition(definition) },
+  };
 }
 export function encodeAnnotationEdit(edit: AnnotationEdit): z.output<typeof annotationEditSchema> {
-  return annotationEditSchema.parse(
-    edit.operation === 'set' && edit.value.kind === 'type'
-      ? {
-          ...edit,
-          value: { ...edit.value, definition: encodeTypeDefinition(edit.value.definition) },
-        }
-      : edit,
-  );
+  if (edit.operation !== 'set') return annotationEditSchema.parse(edit);
+  const { address, value, ...rest } = edit;
+  return annotationEditSchema.parse({
+    ...rest,
+    ...(address === undefined
+      ? {}
+      : { address: { ...address, value: formatHexU64(address.value) } }),
+    value:
+      value.kind === 'type' && value.definition !== undefined
+        ? { ...value, definition: encodeTypeDefinition(value.definition) }
+        : value,
+  });
 }
 export function encodeArtifact(value: Artifact): WireArtifact {
   return artifactSchema.parse({ ...value, size: formatHexU64(value.size) });

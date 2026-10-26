@@ -9,6 +9,7 @@ import {
   entityIdSchema,
 } from './primitives.js';
 import { formatHexU64 } from './integers.js';
+import type { Address } from './addresses.js';
 
 export type CanonicalValue =
   | null
@@ -119,6 +120,24 @@ export function sliceIdentity(
 export function entityIdentity(sliceId: string, kind: string, birth: CanonicalValue): string {
   sliceIdSchema.parse(sliceId);
   return entityIdSchema.parse(`entity_${fingerprint([sliceId, kind, birth])}`);
+}
+/** Data entity of image storage at `address` (a global): the subject of its name and type
+ * annotations, a pure function of the slice and the address, so the same storage has one
+ * identity in every function, revision and analysis. */
+export function globalDataIdentity(sliceId: string, address: Address): string {
+  return entityIdentity(sliceId, 'global-data', [address.space, address.value]);
+}
+/** The per-slice type library anchor: `type` annotations on it declare project-wide types. */
+export function typeLibraryIdentity(sliceId: string): string {
+  return entityIdentity(sliceId, 'type-library', []);
+}
+/** A user-declared C type of one slice's type library, keyed by its C name (or parser key). */
+export function userTypeIdentity(sliceId: string, name: string): string {
+  return entityIdentity(sliceId, 'user-type', [name]);
+}
+/** A member of a user-declared structure/union, keyed by its type and member name. */
+export function userTypeFieldIdentity(sliceId: string, typeName: string, field: string): string {
+  return entityIdentity(sliceId, 'user-type-field', [typeName, field]);
 }
 export function newIdentity(
   kind: 'project' | 'job' | 'annotation' | 'evidence' | 'artifact',

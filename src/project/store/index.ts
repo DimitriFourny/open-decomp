@@ -23,7 +23,9 @@ import {
   AddressMap,
   ImmutableBytes,
   OperationError,
+  MAX_DATA_ENTITIES,
   SCHEMA_VERSION,
+  U64_LIMIT,
   addressSchema,
   annotationIdSchema,
   annotationSchema,
@@ -78,6 +80,8 @@ import {
   type Artifact,
   type CacheIdentity,
   type Diagnostic,
+  type DataEntityQuery,
+  type DataEntityRecord,
   type DiscoveryFrontier,
   type Evidence,
   type Job,
@@ -109,7 +113,7 @@ import {
 } from './image-metadata.js';
 
 // Persistence migrations are independent of the public wire/artifact schema version.
-const STORE_SCHEMA_VERSION = 7;
+const STORE_SCHEMA_VERSION = 8;
 /** Per-project cap on persisted prepared-callee summaries (compressed payload bytes), the
  * default of the `unitStoreBytes` / `--unit-store-mib` open option. Entries of superseded
  * revisions go first, then the oldest write; see `flushNativeSummaries`. The open-time job
@@ -133,6 +137,10 @@ const NATIVE_SUMMARIES_TABLE = `CREATE TABLE native_summaries(scope TEXT NOT NUL
 /** Resumable image-wide discovery state per image; a NULL payload records completion. */
 const DISCOVERY_FRONTIERS_TABLE =
   'CREATE TABLE discovery_frontiers(image_id TEXT NOT NULL, revision INTEGER NOT NULL, payload BLOB, PRIMARY KEY(image_id,revision)) STRICT;';
+/** Validated data subjects (globals) that annotations name; `value` is the zero-padded 16-digit
+ * hex VA so windows are index range scans. Rows are never updated or deleted. */
+const DATA_ENTITIES_TABLE = `CREATE TABLE data_entities(id TEXT PRIMARY KEY, image_id TEXT NOT NULL REFERENCES images(image_id), slice_id TEXT NOT NULL, space TEXT NOT NULL CHECK(space='va'), value TEXT NOT NULL, revision INTEGER NOT NULL) STRICT;
+  CREATE INDEX data_entities_address ON data_entities(image_id,space,value,revision);`;
 const discoveryFrontierSchema = z.strictObject({
   pending: z
     .array(
@@ -179,6 +187,24 @@ function stringField(row: Row | undefined, field: string): string {
   const value = row?.[field];
   if (typeof value !== 'string') fail('invalid_input', `Invalid persisted ${field}`);
   return value;
+}
+/** Zero-padded hex VA: text order is address order. */
+function dataEntityValue(value: bigint): string {
+  if (value < 0n || value >= U64_LIMIT) fail('invalid_address', 'Data entity VA is out of range');
+  return value.toString(16).padStart(16, '0');
+}
+function dataEntityRecord(row: Row): DataEntityRecord {
+  const image_id = imageIdSchema.parse(stringField(row, 'image_id'));
+  const value = stringField(row, 'value');
+  if (!/^[0-9a-f]{16}$/.test(value) || stringField(row, 'space') !== 'va')
+    fail('invalid_input', 'Invalid persisted data entity address');
+  return {
+    id: entityIdSchema.parse(stringField(row, 'id')),
+    image_id,
+    slice_id: sliceIdSchema.parse(stringField(row, 'slice_id')),
+    address: { image_id, space: 'va', value: BigInt(`0x${value}`) },
+    revision: numberField(row, 'revision'),
+  };
 }
 function directory(path: string, create: boolean): void {
   if (!existsSync(path) && create) mkdirSync(path, { recursive: true, mode: 0o700 });
@@ -494,6 +520,7 @@ export class SqliteProjectStore implements ProjectStore {
           CREATE TABLE analysis_reuse(scope TEXT NOT NULL, revision INTEGER NOT NULL, artifact_id TEXT NOT NULL REFERENCES artifacts(id), PRIMARY KEY(scope,revision DESC,artifact_id)) STRICT;
           ${NATIVE_SUMMARIES_TABLE}
           ${DISCOVERY_FRONTIERS_TABLE}
+          ${DATA_ENTITIES_TABLE}
           PRAGMA user_version=${STORE_SCHEMA_VERSION};`);
         db.prepare('INSERT INTO metadata VALUES (1,?,0)').run(newIdentity('project'));
         db.exec('COMMIT');
@@ -536,6 +563,7 @@ export class SqliteProjectStore implements ProjectStore {
             // traversal finished; it never proved that an unlisted address is no function.
             db.exec(`${DISCOVERY_FRONTIERS_TABLE}
               UPDATE indexes SET state='partial' WHERE kind='function' AND state='complete';`);
+          if (version < 8) db.exec(DATA_ENTITIES_TABLE);
           db.exec(`PRAGMA user_version=${STORE_SCHEMA_VERSION}; COMMIT;`);
         } catch (error) {
           db.exec('ROLLBACK');
@@ -1008,6 +1036,37 @@ export class SqliteProjectStore implements ProjectStore {
         );
         removed.push(id);
       },
+      registerDataEntity: (entity) => {
+        guard();
+        entityIdSchema.parse(entity.id);
+        imageIdSchema.parse(entity.image_id);
+        sliceIdSchema.parse(entity.slice_id);
+        if (entity.address.image_id !== entity.image_id || entity.address.space !== 'va')
+          fail('invalid_address', 'Data entity address must be a VA of its image');
+        const imported = this.#prepare(
+          'SELECT 1 FROM image_imports WHERE image_id=? AND slice_id=? AND revision<=?',
+        ).get(entity.image_id, entity.slice_id, current);
+        if (!imported) fail('not_found', 'Data entity image is not imported');
+        const value = dataEntityValue(entity.address.value);
+        const existing = this.#prepare(
+          'SELECT image_id,slice_id,space,value FROM data_entities WHERE id=?',
+        ).get(entity.id);
+        if (
+          existing &&
+          (existing['image_id'] !== entity.image_id ||
+            existing['slice_id'] !== entity.slice_id ||
+            existing['value'] !== value)
+        )
+          fail('conflicting_evidence', 'Data entity identity cannot move to another address');
+        this.#prepare('INSERT OR IGNORE INTO data_entities VALUES (?,?,?,?,?,?)').run(
+          entity.id,
+          entity.image_id,
+          entity.slice_id,
+          'va',
+          value,
+          revision,
+        );
+      },
     };
     this.#db.exec('BEGIN IMMEDIATE');
     this.#transaction = true;
@@ -1059,6 +1118,8 @@ export class SqliteProjectStore implements ProjectStore {
     )
       fail('invalid_input', 'Invalid annotation batch');
     for (const edit of batch.edits) {
+      if (edit.operation === 'set' && edit.entity_id === undefined)
+        fail('invalid_input', 'Address-form edits require subject validation (AnnotationService)');
       encodeAnnotationEdit(edit);
       if (seen.has(edit.id)) fail('invalid_input', 'An annotation can occur only once in a batch');
       seen.add(edit.id);
@@ -1066,10 +1127,12 @@ export class SqliteProjectStore implements ProjectStore {
     return this.transaction(batch.expected_revision, (tx) => {
       const revision = nextRevision(batch.expected_revision);
       for (const edit of batch.edits) {
-        if (edit.operation === 'set')
+        if (edit.operation === 'set') {
+          if (edit.value.kind === 'source')
+            fail('invalid_input', 'Reviewed source requires a validated base artifact');
           tx.setAnnotation({
             id: edit.id,
-            entity_id: edit.entity_id,
+            entity_id: edit.entity_id!,
             value: edit.value,
             status: edit.status,
             evidence_ids: edit.evidence_ids,
@@ -1077,7 +1140,7 @@ export class SqliteProjectStore implements ProjectStore {
             origin: batch.origin,
             revision,
           });
-        else if (edit.operation === 'remove')
+        } else if (edit.operation === 'remove')
           tx.removeAnnotation(edit.id, { author: batch.author, origin: batch.origin });
         else {
           const row = this.#latest('annotations', edit.id, batch.expected_revision);
@@ -1122,6 +1185,33 @@ export class SqliteProjectStore implements ProjectStore {
       encodeAnnotation(value);
       return value;
     });
+  }
+
+  readDataEntity(id: string, revision: number): DataEntityRecord | null {
+    this.#revision(revision);
+    entityIdSchema.parse(id);
+    const row = this.#prepare('SELECT * FROM data_entities WHERE id=? AND revision<=?').get(
+      id,
+      revision,
+    );
+    return row ? dataEntityRecord(row) : null;
+  }
+
+  readDataEntities(query: DataEntityQuery): readonly DataEntityRecord[] {
+    this.#revision(query.revision);
+    imageIdSchema.parse(query.image_id);
+    if (query.start < 0n || query.end > U64_LIMIT || query.start >= query.end)
+      fail('invalid_input', 'Invalid data entity window');
+    return this.#prepare(
+      `SELECT * FROM data_entities WHERE image_id=? AND space='va' AND value>=? AND value<=? AND revision<=? ORDER BY value DESC LIMIT ${MAX_DATA_ENTITIES}`,
+    )
+      .all(
+        query.image_id,
+        dataEntityValue(query.start),
+        dataEntityValue(query.end - 1n),
+        query.revision,
+      )
+      .map(dataEntityRecord);
   }
 
   queryAnnotations(query: AnnotationQuery): {

@@ -23,7 +23,11 @@ import { PELoader } from '../../../src/loaders/pe/index.js';
 import { ELFLoader } from '../../../src/loaders/elf/index.js';
 import { SqliteProjectStore } from '../../../src/project/store/index.js';
 import { prepareQueryImport } from '../../../src/service/queries/prepare.js';
-import { executeAnnotations, executeDecompilation } from '../../../src/service/analysis/index.js';
+import {
+  executeAnnotations,
+  executeDecompilation,
+  executeTypesDeclare,
+} from '../../../src/service/analysis/index.js';
 import type { AnnotationSubject } from '../../../src/project/annotations/index.js';
 import type { StoredDecompilation } from '../../../src/project/cache/index.js';
 import { encodeAnnotationEdit } from '../../../src/core/index.js';
@@ -71,7 +75,7 @@ export async function project(t: TestContext, fixture: string | Uint8Array) {
     limit: 1000,
   }).items;
   function job(
-    operation: 'function_decompile' | 'annotations_apply',
+    operation: 'function_decompile' | 'annotations_apply' | 'types_declare',
     revision = state.store.snapshot().revision,
   ): string {
     const id = newIdentity('job');
@@ -136,6 +140,23 @@ export async function project(t: TestContext, fixture: string | Uint8Array) {
     });
     return { result, job_id };
   }
+  /** Declares C types in the image's type library (`types_declare`). */
+  async function declare(source: string) {
+    const expected_revision = state.store.snapshot().revision;
+    const args = toolSchemas.types_declare.input.parse({
+      project_id: state.store.project_id,
+      expected_revision,
+      image_id: image.id,
+      author: 'pipeline-regression',
+      origin: 'user',
+      source,
+    });
+    return executeTypesDeclare(args, {
+      store: state.store,
+      job_id: job('types_declare', expected_revision),
+      context: createOperationContext({ budget: args.budget }),
+    });
+  }
   function payload(result: ToolResult<'function_decompile'>): {
     result: StoredDecompilation;
     catalog: { subjects: AnnotationSubject[]; types: { id: string; source: string }[] };
@@ -155,5 +176,5 @@ export async function project(t: TestContext, fixture: string | Uint8Array) {
     await state.store.close();
     state.store = SqliteProjectStore.open(path, 'resume');
   }
-  return { image, state, functions, job, decompile, annotate, payload, reopen, path };
+  return { image, state, functions, job, decompile, annotate, declare, payload, reopen, path };
 }

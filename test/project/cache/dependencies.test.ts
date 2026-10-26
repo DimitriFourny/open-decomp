@@ -1,17 +1,27 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
+  ImmutableBytes,
   LedgerHasher,
+  contentHash,
   createOperationContext,
   fingerprint,
+  globalDataIdentity,
+  imageIdentity,
+  sliceIdentity,
   type CanonicalValue,
   type ProjectStore,
 } from '../../../src/core/index.js';
 import {
   createAnalysisReadset,
+  validateAnalysisReadset,
   type AnalysisDependencyCollector,
   type AnalysisReadset,
 } from '../../../src/project/cache/dependencies.js';
+import { SqliteProjectStore } from '../../../src/project/store/index.js';
 
 // Every read below carries its value, so the collector never touches the store.
 const collector = (): AnalysisDependencyCollector =>
@@ -128,4 +138,47 @@ test('foreign and empty readsets are hashed in full', () => {
   assert.equal(owner.readsetFingerprint(empty), direct(empty));
   assert.equal(owner.readsetFingerprint(readset), direct(readset));
   assert.equal(collector().readsetFingerprint(empty), direct(empty));
+});
+
+test('a data entity window read is invalidated only by a registration inside the window', async (t) => {
+  const path = mkdtempSync(join(tmpdir(), 'open-decomp-dependencies-'));
+  const store = SqliteProjectStore.open(path, 'create');
+  t.after(async () => {
+    await store.close();
+    rmSync(path, { recursive: true, force: true });
+  });
+  const raw = Uint8Array.of(0x90, 0xc3),
+    sha256 = contentHash(raw),
+    image_id = imageIdentity(sha256),
+    slice_id = sliceIdentity(image_id, 0n, 2n, 'x86_64');
+  await store.importImage({ bytes: new ImmutableBytes(raw), sha256, selected_slice_id: slice_id });
+  const register = (value: bigint): void => {
+    const address = { image_id, space: 'va' as const, value };
+    const revision = store.snapshot().revision;
+    assert.equal(
+      store.transaction(revision, (tx) =>
+        tx.registerDataEntity({
+          id: globalDataIdentity(slice_id, address),
+          image_id,
+          slice_id,
+          address,
+        }),
+      ).state,
+      'committed',
+    );
+  };
+  register(0x1000n);
+  const context = createOperationContext(),
+    revision = store.snapshot().revision;
+  const collected = createAnalysisReadset(store, revision, context);
+  assert.equal(
+    collected.store.readDataEntities({ image_id, revision, start: 0x800n, end: 0x2000n }).length,
+    1,
+  );
+  const readset = collected.finish();
+  assert.ok(readset.reads.some((item) => item.selector.kind === 'data_entities'));
+  register(0x2000n);
+  assert.equal(validateAnalysisReadset(store, store.snapshot().revision, readset, context), true);
+  register(0x1fffn);
+  assert.equal(validateAnalysisReadset(store, store.snapshot().revision, readset, context), false);
 });

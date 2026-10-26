@@ -102,8 +102,10 @@ async function setup(t: TestContext, options: Partial<WorkerPoolOptions> = {}) {
       const decompiled = toolSchemas.function_decompile.output.parse(result);
       if ('data' in decompiled && decompiled.data.delivery === 'inline')
         assert.ok(
-          text.text.endsWith(decompiled.data.emission.text),
-          'pseudocode is delivered as text',
+          text.text.endsWith(
+            decompiled.data.reviewed_source?.text ?? decompiled.data.emission.text,
+          ),
+          'pseudocode (or the requested reviewed source) is delivered as text',
         );
     } else
       assert.deepEqual(
@@ -137,8 +139,9 @@ test(
       undefined,
       'results are validated by the server, not advertised',
     );
+    // 16 tools, including types_declare and address-form annotation edits.
     assert.ok(
-      Buffer.byteLength(JSON.stringify(listed)) < 40_000,
+      Buffer.byteLength(JSON.stringify(listed)) < 42_000,
       'tools/list stays small enough to put in a model context',
     );
     assert.ok(open.inputSchema.properties?.['source']);
@@ -702,5 +705,101 @@ test(
     } finally {
       await store.close();
     }
+  },
+);
+
+test(
+  'real SDK reviewed source: source:"reviewed" prints header, reviewed line and saved text; otherwise the decompilation and a caveat',
+  { timeout: 120000 },
+  async (t) => {
+    const { root, client, call } = await setup(t);
+    const opened = (
+      await call('project_open', {
+        wait: true,
+        source: {
+          kind: 'import',
+          input_path: join(fixtures, 'libcorpus-arm64-symbols.dylib'),
+          project_path: join(root, 'project'),
+        },
+      })
+    ).result;
+    assert.ok('data' in opened && opened.data.image);
+    let revision = opened.revision!;
+    const project_id = opened.project_id!;
+    const found = (
+      await call('functions_find', {
+        project_id,
+        revision,
+        image_id: opened.data.image.id,
+        query: { text: '_fixture_stack', match: 'exact', case_sensitive: true },
+      })
+    ).result;
+    assert.ok('data' in found && found.data.items.length === 1);
+    const fn = found.data.items[0]!;
+    const text = async (extra: Record<string, unknown> = {}): Promise<string> => {
+      const response = await client.callTool({
+        name: 'function_decompile',
+        arguments: { project_id, revision, function_id: fn.id, wait: true, ...extra },
+      });
+      assert.ok(!response.isError, JSON.stringify(response.content));
+      const item = response.content.find((part) => part.type === 'text');
+      assert.ok(item?.type === 'text');
+      return item.text;
+    };
+    const plain = await text();
+    const [head] = plain.split('\n');
+    const handle = head!.slice(head!.lastIndexOf(' ') + 1);
+    assert.match(handle, /^artifact_[0-9a-f]{12}$/);
+    // No reviewed source yet: the decompilation, with a caveat that none exists.
+    const missing = await text({ source: 'reviewed' });
+    assert.match(missing, /caveats: .*no reviewed source/);
+    assert.ok(missing.endsWith(plain.slice(plain.indexOf('\n') + 1)));
+    const saved = (
+      await call('annotations_apply', {
+        project_id,
+        expected_revision: revision,
+        author: 'mcp-reviewer',
+        origin: 'llm',
+        edits: [
+          {
+            operation: 'set',
+            id: newIdentity('annotation'),
+            entity_id: fn.id,
+            value: {
+              kind: 'source',
+              language: 'c-like',
+              text: 'uint32_t stack_plus_seven(uint32_t x) { return x + 7; }',
+              base_artifact_id: handle,
+            },
+            status: 'asserted',
+            evidence_ids: [],
+          },
+        ],
+      })
+    ).result;
+    assert.ok(saved.state === 'complete', JSON.stringify(saved));
+    revision = saved.revision!;
+    const reviewed = await text({ revision, source: 'reviewed' });
+    const lines = reviewed.split('\n');
+    assert.match(
+      lines[0]!,
+      /^\/\/ \S+ @ va:0x[0-9a-f]+ \| (complete|partial\(\w+\)) \| artifact_[0-9a-f]{12}$/,
+    );
+    assert.equal(lines[1], '// reviewed: mcp-reviewer (llm) | current');
+    assert.equal(
+      lines.slice(2).join('\n'),
+      'uint32_t stack_plus_seven(uint32_t x) { return x + 7; }',
+    );
+    // The default request is untouched by the saved source.
+    assert.ok((await text({ revision })).endsWith(plain.slice(plain.indexOf('\n') + 1)));
+    // detail:"full" carries the structured field.
+    const full = await call('function_decompile', {
+      project_id,
+      revision,
+      function_id: fn.id,
+      wait: true,
+      source: 'reviewed',
+    });
+    assert.ok('data' in full.result && full.result.data.reviewed_source?.stale === false);
   },
 );

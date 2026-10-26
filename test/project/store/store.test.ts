@@ -11,6 +11,7 @@ import {
   imageIdentity,
   sliceIdentity,
   entityIdentity,
+  globalDataIdentity,
   newIdentity,
   DEFAULT_BUDGET,
   DEFAULT_ANALYSIS_OPTIONS,
@@ -450,6 +451,52 @@ test('newer schema rejection leaves database bytes untouched and an active store
     code: 'unsupported_version',
   });
   assert.equal(contentHash(readFileSync(join(state.path, 'project.sqlite'))), before);
+});
+
+test('a schema-7 store migrates to 8; data entities resolve by id and VA window at their revision and never move', async (t) => {
+  const { state, imageId, sliceId } = await project(t);
+  await state.store.close();
+  const db = new DatabaseSync(join(state.path, 'project.sqlite'));
+  db.exec('DROP TABLE data_entities; PRAGMA user_version=7;');
+  db.close();
+  state.store = SqliteProjectStore.open(state.path, 'resume');
+  assert.equal(state.store.snapshot().schema_version, 8);
+  const at = (value: bigint) => ({ image_id: imageId, space: 'va' as const, value });
+  const entity = (value: bigint) => ({
+    id: globalDataIdentity(sliceId, at(value)),
+    image_id: imageId,
+    slice_id: sliceId,
+    address: at(value),
+  });
+  const low = entity(0x1000n),
+    high = entity(0x1ff0n);
+  assert.equal(
+    state.store.transaction(1, (tx) => {
+      tx.registerDataEntity(low);
+      tx.registerDataEntity(high);
+      // Registering again is idempotent.
+      tx.registerDataEntity(low);
+    }).state,
+    'committed',
+  );
+  assert.equal(state.store.readDataEntity(low.id, 1), null);
+  assert.deepEqual(state.store.readDataEntity(low.id, 2), { ...low, revision: 2 });
+  const window = (start: bigint, end: bigint, revision = 2) =>
+    state.store
+      .readDataEntities({ image_id: imageId, revision, start, end })
+      .map((item) => item.id);
+  assert.deepEqual(window(0n, 0x10000n), [high.id, low.id]);
+  assert.deepEqual(window(0x1001n, 0x1ff0n), []);
+  assert.deepEqual(window(0x1000n, 0x1001n), [low.id]);
+  assert.deepEqual(window(0n, 0x10000n, 1), []);
+  // An entity id names one address forever.
+  assert.equal(
+    state.store.transaction(2, (tx) => tx.registerDataEntity({ ...high, id: low.id })).state,
+    'rejected',
+  );
+  await state.store.close();
+  state.store = SqliteProjectStore.open(state.path, 'resume');
+  assert.deepEqual(window(0n, 0x10000n), [high.id, low.id]);
 });
 
 test('process exit during SQLite mutation rolls back and releases the project lock', async (t) => {

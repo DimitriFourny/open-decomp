@@ -70,6 +70,7 @@ import {
 import { indexedDataAccesses, type IndexedDataAccess } from './source-tables.js';
 import {
   planGlobals,
+  type DeclaredAccess,
   type GlobalAccess,
   type GlobalObject,
   type GlobalPlan,
@@ -657,6 +658,11 @@ export class Renderer {
       context.checkpoint(1);
       this.typeRecords.set(record.id, this.typeRecords.has(record.id) ? null : record);
     }
+    // Declared global types: the function's own records of an id stay authoritative.
+    for (const record of input.source?.global_types ?? []) {
+      context.checkpoint(1);
+      if (!this.typeRecords.has(record.id)) this.typeRecords.set(record.id, record);
+    }
     if (this.sourceView)
       for (const proof of input.types?.evidence ?? []) {
         context.checkpoint(1);
@@ -700,6 +706,10 @@ export class Renderer {
       pretty: this.sourceView && this.program.source !== undefined,
       pointer_bits: this.input.source?.abi.layout.pointer_bits,
       abi: this.input.source?.abi,
+      declared: {
+        array: (id) => this.typeRecords.get(id)?.definition.kind === 'array',
+        access: (id, offset, bits, float) => this.declaredGlobalAccess(id, offset, bits, float),
+      },
     });
     for (const projection of this.program.calls.values()) {
       if (!projection.signature) continue;
@@ -833,7 +843,9 @@ export class Renderer {
     return identifier;
   }
 
-  private sourceIdentifier(id: string, preferred: string, linkage = false): string {
+  /** `entity`: the entity the identifier presents when `id` is one view of it (an indexed
+   * table of a data entity at one element width). */
+  private sourceIdentifier(id: string, preferred: string, linkage = false, entity = id): string {
     const previous = this.identifiers.get(id);
     if (previous) return previous.identifier;
     const entryStack =
@@ -854,7 +866,7 @@ export class Renderer {
     this.usedSourceNames.add(name);
     this.writer.metadata(id.length + name.length + Buffer.byteLength(preferred));
     this.identifiers.set(id, {
-      entity_id: id,
+      entity_id: entity,
       identifier: name,
       original_name: this.names.get(id) ?? null,
     });
@@ -2519,6 +2531,7 @@ export class Renderer {
     node: Extract<Instruction, { kind: 'load' | 'store' }>,
     access: GlobalAccess,
   ): string | undefined {
+    if (access.declared) return this.declaredGlobalStorage(node, access, access.declared);
     if (
       !this.permitUnaligned(node) ||
       !this.localValidation.presentation(
@@ -2531,6 +2544,97 @@ export class Renderer {
     const name = this.globalName(access.object);
     if (this.language === 'c-like' && access.object.shape === 'scalar') return name;
     return `${name}[${access.offset / BigInt(access.object.element.bits / 8)}]`;
+  }
+
+  /** `name`, `name[i]`, `name.member` or `name.member[i]`: an access of exactly one scalar
+   * the global's declared type (an asserted annotation) has at that offset, width and kind. */
+  private declaredGlobalStorage(
+    node: Extract<Instruction, { kind: 'load' | 'store' }>,
+    access: GlobalAccess,
+    declared: DeclaredAccess,
+  ): string | undefined {
+    if (
+      !this.permitUnaligned(node) ||
+      !this.localValidation.presentation(
+        'declared_global_access',
+        node.id,
+        'access to an image global whose type is declared by an asserted annotation, of exactly the scalar (the object, an array element or a structure member) that type declares at the accessed offset with the access width and kind; any other access stays an explicit cast through the object address, and the declaration states the declared type',
+        [access.object.key],
+      )
+    )
+      return undefined;
+    const text = `${this.globalName(access.object)}${declared.text}`;
+    const scalar = this.typeRecords.get(declared.type_id)?.definition;
+    if (scalar?.kind === 'pointer' && this.language === 'c-like')
+      this.memberPointers.set(node.id, declared.type_id);
+    if (scalar?.kind === 'integer')
+      this.memberTypes.set(text, { bits: scalar.bits, signed: scalar.signed });
+    if (declared.member) {
+      const structure = this.sourceStructs.name(declared.member.structure);
+      const used = this.usedMembers.get(structure) ?? new Set<string>();
+      used.add(usedMemberKey(declared.member.member));
+      this.usedMembers.set(structure, used);
+      if (!this.structAccess.has(structure)) this.structAccess.set(structure, node.id);
+    }
+    return text;
+  }
+
+  /** The scalar a declared global type has at `offset` for one access of `bits` and kind:
+   * the object itself, an array element, or (C) a member of the structure's declared layout. */
+  private declaredGlobalAccess(
+    id: string,
+    offset: bigint,
+    bits: number,
+    float: boolean,
+  ): DeclaredAccess | undefined {
+    const scalar = (typeId: string): boolean => {
+      const record = this.typeRecords.get(typeId);
+      const type = record?.definition;
+      if (!type || (record.status !== 'established' && record.status !== 'asserted')) return false;
+      if (type.kind === 'float') return float && type.bits === bits;
+      return !float && (type.kind === 'integer' || type.kind === 'pointer') && type.bits === bits;
+    };
+    const type = this.typeRecords.get(id)?.definition;
+    if (type?.kind === 'integer' || type?.kind === 'float' || type?.kind === 'pointer')
+      return offset === 0n && scalar(id)
+        ? { text: this.language === 'c-like' ? '' : '[0]', type_id: id }
+        : undefined;
+    if (type?.kind === 'array') {
+      const size = BigInt(bits / 8),
+        index = offset / size;
+      return scalar(type.element) &&
+        offset % size === 0n &&
+        (type.count === null || index < type.count)
+        ? { text: `[${index}]`, type_id: type.element }
+        : undefined;
+    }
+    if (type?.kind !== 'structure') return undefined;
+    const member = this.partialLayout(id)?.find((item) => {
+      const kind = this.typeRecords.get(item.typeId)?.definition.kind;
+      if (
+        item.bits !== bits ||
+        !(float
+          ? kind === 'float'
+          : kind === 'integer' || (kind === 'pointer' && item.count === undefined))
+      )
+        return false;
+      if (item.count === undefined) return item.offset === offset;
+      const displacement = offset - item.offset,
+        size = BigInt(item.bits / 8);
+      return (
+        displacement >= 0n &&
+        displacement % size === 0n &&
+        (item.count === null || displacement / size < item.count)
+      );
+    });
+    if (!member) return undefined;
+    const element =
+      member.count === undefined ? '' : `[${(offset - member.offset) / BigInt(member.bits / 8)}]`;
+    return {
+      text: `.${structMemberName(member)}${element}`,
+      type_id: member.typeId,
+      member: { structure: id, member },
+    };
   }
 
   private sourceAddressValue(value: Value, literal = false): string {
@@ -2959,6 +3063,29 @@ export class Renderer {
     return name;
   }
 
+  /** Declared spelling of a user-named scalar or pointer typedef (`typedef uint32_t u32;`,
+   * `typedef struct Node* NodeRef;`) where a declaration states the type of `id`: its
+   * name, typedef'd where the finished text mentions it. Expressions, casts, member
+   * accesses and conversions keep the canonical spelling. */
+  private declarationSpelling(id: string | undefined, canonical: string): string {
+    const record = id === undefined ? undefined : this.typeRecords.get(id);
+    if (
+      !this.sourceView ||
+      (record?.source !== 'user' && record?.source !== 'llm') ||
+      record.spelling === undefined ||
+      (record.definition.kind !== 'integer' &&
+        record.definition.kind !== 'float' &&
+        record.definition.kind !== 'pointer') ||
+      canonical !== this.sourceType(id!)
+    )
+      return canonical;
+    if (this.language === 'c-like' && !this.handleTypedefs.has(record.spelling)) {
+      this.handleTypedefs.set(record.spelling, `typedef ${canonical} ${record.spelling};`);
+      this.deferredTypedefs.push(record.spelling);
+    }
+    return record.spelling;
+  }
+
   private sourceType(id: string, depth = 0): string {
     this.context.checkpoint(1);
     if (depth > 32) return this.sourceView ? this.opaqueType(id) : this.identifier(id, 'type');
@@ -2983,7 +3110,15 @@ export class Renderer {
             : 'double'
           : `ieee${type.bits}_t`;
       case 'pointer':
-        if (this.sourceView && this.language === 'c-like' && record.spelling !== undefined)
+        // A library handle (`HANDLE`, `CFStringRef`) is spelled by name everywhere; a
+        // user-named pointer typedef only where a declaration states it.
+        if (
+          this.sourceView &&
+          this.language === 'c-like' &&
+          record.spelling !== undefined &&
+          record.source !== 'user' &&
+          record.source !== 'llm'
+        )
           return record.spelling;
         if (this.byteAddress(type.to))
           return this.language === 'c-like' ? 'uint8_t*' : 'pointer[uint8_t]';
@@ -3004,11 +3139,12 @@ export class Renderer {
         return `vector<${this.sourceType(type.element, depth + 1)}, ${type.lanes}>`;
       case 'structure': {
         const scalar = this.naturalScalar(id);
-        return scalar
-          ? this.sourceType(scalar, depth + 1)
-          : this.sourceView
-            ? this.sourceStructs.name(id)
-            : this.identifier(id, 'type');
+        if (scalar) return this.sourceType(scalar, depth + 1);
+        if (!this.sourceView) return this.identifier(id, 'type');
+        return (
+          (this.language === 'c-like' ? this.sourceStructs.tag(id) : undefined) ??
+          this.sourceStructs.name(id)
+        );
       }
       case 'unknown':
         return this.sourceView ? this.opaqueType(id) : this.identifier(id, 'type');
@@ -3527,7 +3663,9 @@ export class Renderer {
       }
     }
     // Every structure name is typedef'd only where the finished text mentions it.
-    for (const id of structures) this.deferredTypedefs.push(this.sourceStructs.name(id));
+    // A user-declared tag (`struct Node`) is a complete type name and needs none.
+    for (const id of structures)
+      if (!this.sourceStructs.tag(id)) this.deferredTypedefs.push(this.sourceStructs.name(id));
     this.deferredTypedefs.push(...this.sourceOpaqueTypes.values());
     for (const id of pending) {
       const record = this.typeRecords.get(id);
@@ -3575,21 +3713,30 @@ export class Renderer {
 
   /** The declarations of the structures the finished text accesses, one entry per
    * structure: only the members it prints, never the image-wide layout, which stays
-   * in the types view / types.h. A structure the text never indexes stays an
-   * incomplete type. External text (`compact` false) keeps every offset as byte
-   * gaps (`uint8_t pad_0xN[K];`); compact (inline) text omits the gaps before members
-   * whose name states their offset (`field_0x14`), returning them in `gaps`: only a
-   * declared member name (an Objective-C ivar) keeps its pad, as the name does not
-   * carry the offset. The access stride comment states what a trailing pad would. */
+   * in the types view / types.h. A user-declared named structure (`types_declare`, a
+   * named type annotation, a bound image type) is one C type: every function that
+   * mentions it prints its whole declaration, the same text everywhere, as does a global's
+   * declared structure. A structure
+   * the text never indexes otherwise stays an incomplete type. External text
+   * (`compact` false) keeps every offset as byte gaps (`uint8_t pad_0xN[K];`); compact
+   * (inline) text omits the gaps before members whose name states their offset
+   * (`field_0x14`), returning them in `gaps`: a declared member name (an Objective-C
+   * ivar, a user declaration) keeps its pad, as the name does not carry the offset.
+   * The access stride comment states what a trailing pad would. */
   private structureBodies(compact: boolean): StructureBody[] {
     const bodies: StructureBody[] = [];
     for (const id of this.structureSlot?.ids ?? []) {
       this.context.checkpoint(1);
       const members = this.partialLayout(id);
       if (!members) continue;
+      const record = this.typeRecords.get(id);
+      const tag =
+        record?.source === 'user' || record?.source === 'llm'
+          ? this.sourceStructs.tag(id)
+          : undefined;
       const name = this.sourceStructs.name(id),
         used = this.usedMembers.get(name);
-      if (!used) continue;
+      if (!used && !tag) continue;
       const parts: string[] = [],
         lines: string[] = [],
         gaps: StructureBody['gaps'][number][] = [];
@@ -3616,8 +3763,8 @@ export class Renderer {
         // both print as one anonymous union only when the text uses both.
         const partner = member.overlaid && !member.float ? members[index + 1] : undefined;
         if (partner) index++;
-        const printed = [member, ...(partner ? [partner] : [])].filter((item) =>
-          used.has(usedMemberKey(item)),
+        const printed = [member, ...(partner ? [partner] : [])].filter(
+          (item) => tag !== undefined || used?.has(usedMemberKey(item)),
         );
         if (!printed.length) continue;
         // A member named by its offset states where it is: compact text omits the gap.
@@ -3651,7 +3798,7 @@ export class Renderer {
       else if (image?.conflicts.length)
         lines.push(`/* conflicts with ${image.conflicts.join(', ')} */`);
       lines.push(
-        `struct ${name} { ${parts.join(' ')} }${packed ? ' __attribute__((packed))' : ''};`,
+        `${tag ?? `struct ${name}`} { ${parts.join(' ')} }${packed ? ' __attribute__((packed))' : ''};`,
       );
       bodies.push({ name, lines, gaps });
     }
@@ -3942,15 +4089,22 @@ export class Renderer {
       this.context.checkpoint(1);
       const declared = global.declared;
       if (declared && !python) this.registerTypedefs(declared.type);
-      const type = declared
-          ? python
-            ? declared.type.python
-            : declared.type.c
-          : global.element.float
-            ? global.element.bits === 32
-              ? 'float'
-              : 'double'
-            : `uint${global.element.bits}_t`,
+      // A declared global type (an asserted annotation) spells the whole object; an array
+      // type declares its element type and bound.
+      const typed = global.typed === undefined ? undefined : this.typeRecords.get(global.typed);
+      const typedArray = typed?.definition.kind === 'array' ? typed.definition : undefined;
+      if (typed && !python) this.declareWholeLayout(typed.id, global.first);
+      const type = typed
+          ? this.sourceType(typedArray ? typedArray.element : typed.id)
+          : declared
+            ? python
+              ? declared.type.python
+              : declared.type.c
+            : global.element.float
+              ? global.element.bits === 32
+                ? 'float'
+                : 'double'
+              : `uint${global.element.bits}_t`,
         first = lines.length;
       // Comment text only: names stay readable, a comment terminator cannot occur.
       const plain = (text: string): string => text.replace(/\*\//g, '* /');
@@ -3992,9 +4146,11 @@ export class Renderer {
         );
       } else
         lines.push(
-          declared
-            ? `extern ${type}${declared.constant ? ' const' : ''} ${name};${comment}`
-            : `extern ${global.object.mutable || global.import ? '' : 'const '}${type} ${name}${global.shape === 'scalar' ? '' : '[]'};${comment}`,
+          typed
+            ? `extern ${global.object.mutable ? '' : 'const '}${type} ${name}${typedArray ? `[${typedArray.count ?? ''}]` : ''};${comment}`
+            : declared
+              ? `extern ${type}${declared.constant ? ' const' : ''} ${name};${comment}`
+              : `extern ${global.object.mutable || global.import ? '' : 'const '}${type} ${name}${global.shape === 'scalar' ? '' : '[]'};${comment}`,
         );
       const length = lines.slice(first).reduce((sum, line) => sum + line.length + 1, 0);
       spans.push({
@@ -4008,19 +4164,35 @@ export class Renderer {
     const delta = insert(at, lines);
     for (const span of spans) {
       const origin = this.origins.get(span.object.first ?? '') ?? this.input.function;
+      const typed =
+        span.object.typed === undefined ? undefined : this.typeRecords.get(span.object.typed);
+      // The data entity (the subject of the global's annotations) is a mapped subject.
       this.mapped(
         origin,
         span.start,
-        [],
+        span.object.import ? [] : [span.object.key],
         [
           span.object.object.evidence_ids,
           ...(span.object.import ? [span.object.import.evidence_ids] : []),
           ...(span.relative && span.object.relative ? [span.object.relative.evidence_ids] : []),
+          ...(typed ? [typed.evidence_ids] : []),
         ],
         span.end,
       );
     }
     void delta;
+  }
+
+  /** A global's declared structure prints every member of its declared layout, not only the
+   * members this function accesses: each function that names the global states the same type. */
+  private declareWholeLayout(id: string, node: string | undefined): void {
+    const members = this.partialLayout(id);
+    if (!members) return;
+    const name = this.sourceStructs.name(id);
+    const used = this.usedMembers.get(name) ?? new Set<string>();
+    for (const member of members) used.add(usedMemberKey(member));
+    this.usedMembers.set(name, used);
+    if (node !== undefined && !this.structAccess.has(name)) this.structAccess.set(name, node);
   }
 
   /** Contents bytes a function's table declarations may print in total. */
@@ -4054,7 +4226,8 @@ export class Renderer {
         )
       )
         continue;
-      const key = `${this.addressKey(object.address)}:u${table.bits}`;
+      // One table view per element width of the object's data entity.
+      const key = `${object.entity_id}:u${table.bits}`;
       const symbolRelative = table.data.symbol_relative;
       const relative =
         symbolRelative?.source_name !== undefined &&
@@ -4072,7 +4245,7 @@ export class Renderer {
         relative?.stem ??
         `data_${object.address.value.toString(16)}`;
       if (table.data.name !== undefined) this.names.set(key, table.data.name);
-      const name = this.sourceIdentifier(key, stem);
+      const name = this.sourceIdentifier(key, stem, false, object.entity_id);
       this.dataTables.set(id, { ...table, name });
       const group = groups.get(key);
       if (group) group.reach = group.reach > table.last + 1n ? group.reach : table.last + 1n;
@@ -9957,7 +10130,9 @@ export class Renderer {
       this.declaredTypes.set(value.id, type);
       parameters.push({
         value,
-        type: this.guessedFormal(value) ? this.likelyType(type) : type,
+        type: this.guessedFormal(value)
+          ? this.likelyType(type)
+          : this.declarationSpelling(source?.type_id, type),
         name,
       });
     }
@@ -10002,7 +10177,12 @@ export class Renderer {
     const floating = this.sourceView && this.program.source?.return_float;
     if (floating) returnType = floating === 32 ? 'float' : 'double';
     this.returnSpelling = returnType;
-    const returnShown = this.guessedResult() ? this.likelyType(returnType) : returnType;
+    const returnShown = this.guessedResult()
+      ? this.likelyType(returnType)
+      : this.declarationSpelling(
+          signature?.signature.return_type ?? this.program.source?.return_source_type,
+          returnType,
+        );
     // The scalar-support prelude is chosen from the finished text and inserted here.
     const supportAt = this.sourceView && this.language === 'c-like' ? w.offset : undefined;
     if (this.sourceView && this.language === 'c-like') {
@@ -10025,6 +10205,13 @@ export class Renderer {
           this.sourceValueTypes.get(value.id) ??
           this.program.source?.value_types?.get(value.id)?.type_id;
         if (id) typeIds.push(id);
+      }
+      // Declared global types; an array global declares its element type and bound itself.
+      for (const item of this.program.source?.addresses ?? []) {
+        const id = item.object?.type_id;
+        if (id === undefined) continue;
+        const type = this.typeRecords.get(id)?.definition;
+        typeIds.push(type?.kind === 'array' ? type.element : id);
       }
       this.structDeclarations(typeIds);
       // The incoming object's members sit at their entry-SP offsets from its start.
@@ -10244,7 +10431,17 @@ export class Renderer {
       this.declaredTypes.set(value.id, spelling);
       // A coalesced phi class is declared once, as its representative.
       if (representative && representative.id !== value.id) continue;
-      w.statement(1, w.declaration(spelling, this.local(value)));
+      w.statement(
+        1,
+        w.declaration(
+          this.declarationSpelling(
+            this.sourceValueTypes.get(value.id) ??
+              this.program.source?.value_types?.get(value.id)?.type_id,
+            spelling,
+          ),
+          this.local(value),
+        ),
+      );
       this.mapped(this.dataOrigin(value.id), start, [value.id]);
       this.emitNotes(value.id, 1);
     }

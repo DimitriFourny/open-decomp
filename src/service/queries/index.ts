@@ -113,6 +113,7 @@ export class QueryService {
       const asynchronous =
         (operation === 'project_open' &&
           'source' in args &&
+          typeof args.source === 'object' &&
           args.source.kind === 'import' &&
           !args.wait) ||
         (operation === 'function_decompile' && 'wait' in args && args.wait === false);
@@ -322,7 +323,7 @@ export class QueryService {
             requireCompleted(outcome);
             queryFailure(
               'not_found',
-              operation === 'annotations_apply'
+              operation === 'annotations_apply' || operation === 'types_declare'
                 ? 'Annotation job committed, but its response was lost; inspect the saved revision and annotation IDs instead of retrying the mutation'
                 : 'Completed job has no transient query result; submit the read-only query again',
             );

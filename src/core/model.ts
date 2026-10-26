@@ -11,6 +11,7 @@ import {
   capabilitySchema,
   digestSchema,
   annotationIdSchema,
+  artifactIdSchema,
   revisionSchema,
   type Target,
   type Evidence,
@@ -349,15 +350,53 @@ export type ReferenceRecord = Internal<z.infer<typeof referenceSchema>>;
 /** A loader that emits this format capability reports the completeness of its native symbol and
  * export tables independently of unrelated metadata (unwind, CFI, relocations). */
 export const NATIVE_SYMBOL_TABLES_FEATURE = 'Native symbol and export tables';
-export const annotationValueSchema = z.discriminatedUnion('kind', [
+/** Longest reviewed source text, in characters. */
+export const MAX_REVIEWED_SOURCE_CHARS = 262_144;
+/** A C identifier (type name / struct tag) of a user-declared type. */
+export const cIdentifierSchema = z
+  .string()
+  .max(1024)
+  .regex(/^[A-Za-z_][A-Za-z0-9_]*$/);
+const annotationKindSchemas = [
   z.strictObject({ kind: z.literal('name'), value: z.string().min(1).max(1024) }),
   z.strictObject({ kind: z.literal('note'), value: z.string().min(1).max(65536) }),
   z.strictObject({
     kind: z.literal('type'),
     type_id: entityIdSchema,
-    definition: typeDefinitionSchema,
+    /** Absent: binding only; `type_id` must resolve to a declared, library, durable or catalog type. */
+    definition: typeDefinitionSchema.optional(),
+    /** C spelling/tag: a named structure prints `struct <name>` with its declared field names. */
+    name: cIdentifierSchema.optional(),
   }),
   z.strictObject({ kind: z.literal('signature'), value: signatureSchema }),
+] as const;
+const sha256HexSchema = z.string().regex(/^[0-9a-f]{64}$/);
+const reviewedSourceFields = {
+  kind: z.literal('source'),
+  language: z.enum(['c-like', 'python-like']),
+  text: z.string().min(1).max(MAX_REVIEWED_SOURCE_CHARS),
+};
+/** Reviewed (cleaned) source of one function, kept next to the decompiler output and never an
+ * analysis input. The client names the artifact it cleaned (a full ID or a unique prefix of at
+ * least 12 hex digits); the server resolves it and records the artifact's text digest. */
+const sourceEditValueSchema = z.strictObject({
+  ...reviewedSourceFields,
+  base_artifact_id: z.string().regex(/^artifact_[0-9a-f]{12,64}$/),
+});
+const sourceStoredValueSchema = z.strictObject({
+  ...reviewedSourceFields,
+  base_artifact_id: artifactIdSchema,
+  /** SHA-256 of the base artifact's emission text, computed by the server at apply time. */
+  base_text_sha256: sha256HexSchema,
+});
+export const annotationValueSchema = z.discriminatedUnion('kind', [
+  ...annotationKindSchemas,
+  sourceStoredValueSchema,
+]);
+/** What a client may submit: `base_text_sha256` is server-computed and cannot be forged. */
+export const annotationEditValueSchema = z.discriminatedUnion('kind', [
+  ...annotationKindSchemas,
+  sourceEditValueSchema,
 ]);
 export const annotationSchema = z.strictObject({
   id: annotationIdSchema,
@@ -369,18 +408,38 @@ export const annotationSchema = z.strictObject({
   evidence_ids: evidenceRefsSchema,
   revision: revisionSchema,
 });
+/** Image storage named by its virtual address: the data subject (a global) at that address. */
+export const dataAddressSchema = z.strictObject({
+  image_id: imageIdSchema,
+  space: z.literal('va'),
+  value: hexU64Schema,
+});
 export const annotationEditSchema = z.discriminatedUnion('operation', [
-  z.strictObject({
-    operation: z.literal('set'),
-    id: annotationIdSchema,
-    entity_id: entityIdSchema,
-    value: annotationValueSchema,
-    status: z.enum(['hypothesis', 'asserted']),
-    evidence_ids: evidenceRefsSchema,
-  }),
+  z
+    .strictObject({
+      operation: z.literal('set'),
+      id: annotationIdSchema,
+      /** Exactly one of `entity_id` and `address`; an address names the data entity there
+       * (`globalDataIdentity`), and the committed annotation stores that entity id. */
+      entity_id: entityIdSchema.optional(),
+      address: dataAddressSchema.optional(),
+      value: annotationEditValueSchema,
+      status: z.enum(['hypothesis', 'asserted']),
+      evidence_ids: evidenceRefsSchema,
+    })
+    .superRefine((edit, context) => {
+      if ((edit.entity_id === undefined) === (edit.address === undefined))
+        context.addIssue({
+          code: 'custom',
+          path: ['entity_id'],
+          message: 'A set edit names exactly one of entity_id or address',
+        });
+    }),
   z.strictObject({ operation: z.literal('retract'), id: annotationIdSchema }),
   z.strictObject({ operation: z.literal('remove'), id: annotationIdSchema }),
 ]);
+/** The client form of a reviewed source (before the server resolves its base artifact). */
+export type ReviewedSourceEdit = z.infer<typeof sourceEditValueSchema>;
 export type Annotation = Internal<z.infer<typeof annotationSchema>>;
 export type AnnotationEdit = Internal<z.infer<typeof annotationEditSchema>>;
 export type RecoveredType = Internal<z.infer<typeof typeDefinitionSchema>>;
