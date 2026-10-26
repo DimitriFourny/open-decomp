@@ -426,6 +426,21 @@ test('revision and atomic annotation preconditions cannot be silently discarded'
     false,
   );
   assert.equal(annotationsApplyArgsSchema.safeParse({ ...args, edits: [] }).success, false);
+  // A set edit names its subject by exactly one of an entity id and a data VA.
+  const unaddressed = {
+    operation: 'set',
+    id: annotationId,
+    value: { kind: 'name', value: 'config' },
+    status: 'asserted',
+    evidence_ids: [],
+  };
+  const addressed = { ...unaddressed, address: { image_id: image, space: 'va', value: '0x4010' } };
+  const edits = (edit: object) =>
+    annotationsApplyArgsSchema.safeParse({ ...inputs.annotations_apply, edits: [edit] }).success;
+  assert.equal(edits(addressed), true);
+  assert.equal(edits(unaddressed), false);
+  assert.equal(edits({ ...addressed, entity_id: entity }), false);
+  assert.equal(edits({ ...addressed, address: { ...addressed.address, space: 'file' } }), false);
   const result = { ...envelope, ...success.annotations_apply };
   assert.equal(validateToolResponse('annotations_apply', result, args).revision, 4);
   assert.equal(

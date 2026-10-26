@@ -139,8 +139,9 @@ test(
       undefined,
       'results are validated by the server, not advertised',
     );
+    // 16 tools, including types_declare and address-form annotation edits.
     assert.ok(
-      Buffer.byteLength(JSON.stringify(listed)) < 40_000,
+      Buffer.byteLength(JSON.stringify(listed)) < 42_000,
       'tools/list stays small enough to put in a model context',
     );
     assert.ok(open.inputSchema.properties?.['source']);

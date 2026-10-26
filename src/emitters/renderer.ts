@@ -2629,9 +2629,7 @@ export class Renderer {
     });
     if (!member) return undefined;
     const element =
-      member.count === undefined
-        ? ''
-        : `[${(offset - member.offset) / BigInt(member.bits / 8)}]`;
+      member.count === undefined ? '' : `[${(offset - member.offset) / BigInt(member.bits / 8)}]`;
     return {
       text: `.${structMemberName(member)}${element}`,
       type_id: member.typeId,
@@ -3714,9 +3712,10 @@ export class Renderer {
   }
 
   /** The declarations of the structures the finished text accesses, one entry per
-   * structure: only the members it prints, never the image-wide layout, which stays
-   * in the types view / types.h. A structure the text never indexes stays an
-   * incomplete type. External text (`compact` false) keeps every offset as byte
+   * structure: only the members it prints (every declared member of a global's declared
+   * structure), never the image-wide layout, which stays in the types view / types.h.
+   * A structure the text never indexes stays an incomplete type. External text
+   * (`compact` false) keeps every offset as byte
    * gaps (`uint8_t pad_0xN[K];`); compact (inline) text omits the gaps before members
    * whose name states their offset (`field_0x14`), returning them in `gaps`: only a
    * declared member name (an Objective-C ivar) keeps its pad, as the name does not
@@ -4086,6 +4085,7 @@ export class Renderer {
       // type declares its element type and bound.
       const typed = global.typed === undefined ? undefined : this.typeRecords.get(global.typed);
       const typedArray = typed?.definition.kind === 'array' ? typed.definition : undefined;
+      if (typed && !python) this.declareWholeLayout(typed.id, global.first);
       const type = typed
           ? this.sourceType(typedArray ? typedArray.element : typed.id)
           : declared
@@ -4173,6 +4173,18 @@ export class Renderer {
       );
     }
     void delta;
+  }
+
+  /** A global's declared structure prints every member of its declared layout, not only the
+   * members this function accesses: each function that names the global states the same type. */
+  private declareWholeLayout(id: string, node: string | undefined): void {
+    const members = this.partialLayout(id);
+    if (!members) return;
+    const name = this.sourceStructs.name(id);
+    const used = this.usedMembers.get(name) ?? new Set<string>();
+    for (const member of members) used.add(usedMemberKey(member));
+    this.usedMembers.set(name, used);
+    if (node !== undefined && !this.structAccess.has(name)) this.structAccess.set(name, node);
   }
 
   /** Contents bytes a function's table declarations may print in total. */

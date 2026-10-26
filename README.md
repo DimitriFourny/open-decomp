@@ -8,7 +8,7 @@ Open Decomp started as an experiment: how far can a decompiler go when it is wri
 
 - **Small.** A 9 MB package, about 50 MB installed with every dependency. Anything that runs Node 24 runs it.
 - **On demand.** Functions are analyzed when you ask for them, not after a whole-program pass, and results are cached in a SQLite project next to the binary.
-- **Built for agents.** An MCP server, a JS/TS API, and `export`, which writes one greppable file per function. An agent can declare C types once per image (`types_declare`) and reference them in signature and type annotations; every function that uses them then prints `struct Node` with the declared field names.
+- **Built for agents.** An MCP server, a JS/TS API, and `export`, which writes one greppable file per function. An agent can declare C types once per image (`types_declare`) and reference them in signature and type annotations; every function that uses them then prints `struct Node` with the declared field names. A global (even a `data_<VA>` in a stripped binary) is named and typed once, by its address, and prints as `config.limit` in every function that touches it.
 
 ### A taste
 

@@ -92,7 +92,8 @@ export function resolveGlobalTypes(
     const record = [...group].sort((a, b) => rank(a) - rank(b))[0]!;
     resolved.set(
       id,
-      record.definition.kind === 'structure' && (record.source === 'user' || record.source === 'llm')
+      record.definition.kind === 'structure' &&
+        (record.source === 'user' || record.source === 'llm')
         ? { ...record, member_names: true }
         : record,
     );

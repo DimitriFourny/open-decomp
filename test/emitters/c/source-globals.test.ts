@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { expandEmission, type Address } from '../../../src/core/index.js';
+import { expandEmission, globalDataIdentity, type Address } from '../../../src/core/index.js';
 import { sysvAMD64Abi } from '../../../src/abi/sysv-amd64/index.js';
 import { constructSSA } from '../../../src/analysis/ssa/index.js';
 import { integer, type SSAForm } from '../../../src/ir/index.js';
@@ -9,13 +9,16 @@ import { navigationBytes } from '../../analysis/navigation-fixture.js';
 import { builder } from '../../ir/support.js';
 import { emit, execute } from './support.js';
 
-const IMAGE = navigationBytes(Uint8Array.of(0xc3), Buffer.alloc(16)).id;
+const LOADED = navigationBytes(Uint8Array.of(0xc3), Buffer.alloc(16));
+const IMAGE = LOADED.id;
 const at = (value: bigint): Address => ({ image_id: IMAGE, space: 'va', value });
+const entity = (address: Address): string => globalDataIdentity(LOADED.selected_slice_id, address);
 const SLOT = at(0x2010n);
 const slot: SourceAddress = {
   address: SLOT,
   object: {
     address: SLOT,
+    entity_id: entity(SLOT),
     byte_length: 8n,
     offset: 0n,
     mutable: true,
@@ -132,6 +135,7 @@ const object = (
   base = GLOBAL,
 ): NonNullable<SourceAddress['object']> => ({
   address: base,
+  entity_id: entity(base),
   byte_length: byteLength,
   offset,
   mutable: true,
@@ -284,6 +288,7 @@ const relativeSlot: SourceAddress = {
   initial_import: 'fstat',
   object: {
     address: RELATIVE,
+    entity_id: entity(RELATIVE),
     byte_length: null,
     offset: 0n,
     mutable: true,

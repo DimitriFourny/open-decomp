@@ -282,7 +282,8 @@ export class AnalysisDependencyCollector {
                     kind: 'data_entities',
                     image_id: query.image_id,
                     start: hexU64Schema.parse(formatHexU64(query.start)),
-                    end: query.end === U64_LIMIT ? null : hexU64Schema.parse(formatHexU64(query.end)),
+                    end:
+                      query.end === U64_LIMIT ? null : hexU64Schema.parse(formatHexU64(query.end)),
                   },
                   result,
                 );

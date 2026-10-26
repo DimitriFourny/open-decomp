@@ -243,16 +243,37 @@ export function recoverTypes(
       )
         budget.charge(budget.limit + 1);
       const existing = records.get(record.id) ?? [];
-      if (
-        existing.some(
-          (item) =>
-            typeKey(item.definition) === typeKey(record.definition) &&
-            item.source === record.source &&
-            item.status === record.status &&
-            item.evidence_ids.join() === record.evidence_ids.join(),
-        )
-      )
+      // The same declaration reached twice (a scoped declaration is both a view record and
+      // its annotation) is one alternative citing both proofs, never two that make it ambiguous.
+      const same = existing.findIndex(
+        (item) =>
+          typeKey(item.definition) === typeKey(record.definition) &&
+          item.source === record.source &&
+          item.status === record.status &&
+          item.spelling === record.spelling &&
+          item.member_names === record.member_names,
+      );
+      if (same >= 0) {
+        const item = existing[same]!;
+        const added = record.evidence_ids.filter((proof) => !item.evidence_ids.includes(proof));
+        if (!added.length) return;
+        const evidence_ids = [...item.evidence_ids, ...added];
+        if (evidence_ids.length > 1000) budget.charge(budget.limit + 1);
+        existing[same] = { ...item, evidence_ids };
+        if (record.definition.kind === 'structure')
+          for (const field of record.definition.fields) {
+            const alternatives = declaredFieldTypes.get(field.id) ?? [];
+            const index = alternatives.findIndex(
+              (alternative) =>
+                alternative.type_id === field.type_id &&
+                alternative.source === record.source &&
+                alternative.status === record.status &&
+                alternative.evidence_ids === item.evidence_ids,
+            );
+            if (index >= 0) alternatives[index] = { ...alternatives[index]!, evidence_ids };
+          }
         return;
+      }
       existing.push(record);
       records.set(record.id, existing);
       subjects.add(record.id);

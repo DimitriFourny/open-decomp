@@ -900,8 +900,7 @@ function sourceAddresses(
   } => {
     const facts = assertedFacts(scope.store.readAnnotations(symbol.id, revision));
     return {
-      name:
-        facts.name ?? (facts.named ? undefined : (symbol.display_name ?? symbol.original_name)),
+      name: facts.name ?? (facts.named ? undefined : (symbol.display_name ?? symbol.original_name)),
       annotated: facts.named,
       ...(facts.type_id === undefined ? {} : { type_id: facts.type_id }),
     };

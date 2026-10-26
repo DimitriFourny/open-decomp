@@ -94,7 +94,10 @@ const subjectSchema = z
   });
 const encodeSubject = ({ address, ...subject }: AnnotationSubject) =>
   address === undefined ? subject : { ...subject, address: encodeAddress(address) };
-const decodeSubject = ({ address, ...subject }: z.output<typeof subjectSchema>): AnnotationSubject =>
+const decodeSubject = ({
+  address,
+  ...subject
+}: z.output<typeof subjectSchema>): AnnotationSubject =>
   address === undefined ? subject : { ...subject, address: decodeAddress(address) };
 const catalogSchema = z.strictObject({
   subjects: z.array(subjectSchema).max(100000),

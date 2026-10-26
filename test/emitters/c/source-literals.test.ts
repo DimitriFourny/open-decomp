@@ -8,7 +8,11 @@ import { recoverLibraryContracts } from '../../../src/metadata/library-contracts
 import { recoverDataAddress } from '../../../src/analysis/strings/source-data.js';
 import { navigationBytes } from '../../analysis/navigation-fixture.js';
 import { constructSSA } from '../../../src/analysis/ssa/index.js';
-import { createOperationContext, type Address } from '../../../src/core/index.js';
+import {
+  createOperationContext,
+  globalDataIdentity,
+  type Address,
+} from '../../../src/core/index.js';
 import { characterLiteral, stringLiteral } from '../../../src/emitters/string-literals.js';
 import { integer, type IRBuilder, type RegisterIR, type SSAForm } from '../../../src/ir/index.js';
 import type { SourceAddress } from '../../../src/reconstruction/source-model.js';
@@ -35,6 +39,7 @@ function stringAt(value: bigint, text: string, mutable = false, start = true): S
     ...(start ? { string_start: true as const } : {}),
     object: {
       address: at(value),
+      entity_id: globalDataIdentity(slice, at(value)),
       byte_length: null,
       offset: 0n,
       mutable,

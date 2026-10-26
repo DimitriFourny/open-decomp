@@ -4,7 +4,11 @@ import { windowsX64Abi } from '../../../src/abi/windows-x64/index.js';
 import { sysvAMD64Abi } from '../../../src/abi/sysv-amd64/index.js';
 import { recoverTypes } from '../../../src/analysis/types/index.js';
 import { constructSSA } from '../../../src/analysis/ssa/index.js';
-import { createOperationContext, type Address } from '../../../src/core/index.js';
+import {
+  createOperationContext,
+  globalDataIdentity,
+  type Address,
+} from '../../../src/core/index.js';
 import { integer, type SSAForm, type Value } from '../../../src/ir/index.js';
 import { findDeclaration } from '../../../src/metadata/library-contracts/catalog.js';
 import { recoverLibraryContracts } from '../../../src/metadata/library-contracts/index.js';
@@ -135,13 +139,15 @@ test('library contracts name nothing when none establishes the call', () => {
 
 /* ------------------------------------------------------------ typed data */
 
-const IMAGE = navigationBytes(Uint8Array.of(0xc3), Buffer.alloc(16)).id;
+const LOADED = navigationBytes(Uint8Array.of(0xc3), Buffer.alloc(16));
+const IMAGE = LOADED.id;
 const SLOT: Address = { image_id: IMAGE, space: 'va', value: 0x2010n };
 function slot(variable?: NonNullable<SourceAddress['import']>['variable']): SourceAddress {
   return {
     address: SLOT,
     object: {
       address: SLOT,
+      entity_id: globalDataIdentity(LOADED.selected_slice_id, SLOT),
       byte_length: 8n,
       offset: 0n,
       mutable: true,
