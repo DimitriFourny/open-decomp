@@ -371,7 +371,8 @@ export class AnalysisDependencyCollector {
         this.recordSignatureClosure(annotation.value.value);
       } else if (annotation.value.kind === 'type') {
         this.recordType(annotation.value.type_id);
-        for (const id of typeReferences(annotation.value.definition)) this.recordType(id);
+        if (annotation.value.definition)
+          for (const id of typeReferences(annotation.value.definition)) this.recordType(id);
       }
     }
   }

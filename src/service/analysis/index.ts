@@ -71,6 +71,7 @@ import { imageTypeDump, recoverImageTypes, type ImageTypeDump } from './image-ty
 import type { NativePreparationInput } from './native-prepare.js';
 export type { ImageTypeDump } from './image-types.js';
 export { executeAnnotations } from './annotations.js';
+export { executeTypesDeclare } from './types-declare.js';
 
 export interface AnalysisScope {
   readonly store: ProjectStore;

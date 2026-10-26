@@ -65,7 +65,7 @@ const descriptions: Record<ToolName, string> = {
   project_close:
     'Persist and release an open project without deleting analysis. Revision and running-job policy are explicit.',
   binary_info:
-    'Structured binary facts: summary, headers, sections, mappings, entry points, relocations, hints, capabilities. view:"types" returns C declarations of the image-wide merged structure types (the same names function_decompile uses; observed members only; analyzes function bodies within the budget, so it can be partial). Omit image_id only when the snapshot has one image. Evidence is by ID; resolve with evidence_get.',
+    'Structured binary facts: summary, headers, sections, mappings, entry points, relocations, hints, capabilities. view:"types" returns C declarations of the image-wide merged structure types (the same names function_decompile uses; observed members only; analyzes function bodies within the budget, so it can be partial), preceded by the image type library (types_declare: each declared type with its type_id). Omit image_id only when the snapshot has one image. Evidence is by ID; resolve with evidence_get.',
   symbols_find:
     'Search symbols, imports and exports by name/address (compact rows; evidence IDs in structuredContent). A symbol name does not establish a source signature. A Mach-O name also matches its C spelling (one leading underscore removed).',
   strings_find:
@@ -83,7 +83,9 @@ const descriptions: Record<ToolName, string> = {
   memory_read:
     'Read bounded immutable mapped bytes or typed machine bits. Zero-fill, unmapped holes and continuations stay distinct; target bytes never execute.',
   annotations_apply:
-    'Atomically apply revision-checked name, note, type or signature assertions, retractions and removals. Assertions are not binary facts; a successful edit advances one revision and invalidates derived analysis.',
+    'Atomically apply revision-checked name, note, type or signature assertions, retractions and removals. Assertions are not binary facts; a successful edit advances one revision and invalidates derived analysis. A type value without definition binds its subject (value, stack slot, field) to an existing type such as a types_declare library type.',
+  types_declare:
+    'Declare C types (struct, union, enum, typedef; stdint/size_t/bool; pointers, arrays, packed/#pragma pack) once per image in its type library. Returns each type_id (deterministic per name); use them in annotations_apply signature/type values, and every function using them prints `struct Name` with declared field names. Redeclaring a name replaces it. One revision per call; any parse error rejects the whole batch. binary_info view:"types" lists the library.',
   functions_discover:
     'Continue a budget-limited whole-image function discovery by one step at the current revision (a selection reported "incomplete"). A step that progresses publishes the functions it found and advances one revision; progressed false means complete or unable to finish a root within the instruction limit.',
   analysis_status:
@@ -417,10 +419,14 @@ export function createMcpServer(service: QueryService, policy: McpServerPolicy =
           text = symbolsListing(result as ToolResult<'symbols_find'>) ?? text;
         else if (name === 'strings_find')
           text = stringsListing(result as ToolResult<'strings_find'>) ?? text;
-        else if (types?.view === 'types')
+        else if (types?.view === 'types') {
           // The C declarations are the answer; counts and state stay structured.
-          text = `/* ${types.types} type(s); ${types.functions.analyzed}/${types.functions.total} functions analyzed; state ${result.state} */\n${types.text}`;
-        else if (navigationTools.has(name)) text = navigationText(result) ?? text;
+          const library = types.library.map(
+            (item) =>
+              `${item.declaration} /* ${item.type_id}${item.status === 'hypothesis' ? ' hypothesis' : ''} */\n`,
+          );
+          text = `/* type library ${types.library_id}: ${library.length} declaration(s) (types_declare) */\n${library.join('')}/* ${types.types} type(s); ${types.functions.analyzed}/${types.functions.total} functions analyzed; state ${result.state} */\n${types.text}`;
+        } else if (navigationTools.has(name)) text = navigationText(result) ?? text;
         else if (name === 'function_decompile' && view !== undefined) text = view;
         else if (name === 'function_decompile' && 'job' in result)
           text = jobText(result as Extract<ToolResult<'function_decompile'>, { job: unknown }>);
@@ -480,6 +486,7 @@ export function createMcpServer(service: QueryService, policy: McpServerPolicy =
             'project_close',
             'function_decompile',
             'annotations_apply',
+            'types_declare',
             'functions_discover',
             'analysis_cancel',
           ].includes(name),

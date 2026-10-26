@@ -34,6 +34,7 @@ import {
   DEFAULT_ANALYSIS_OPTIONS,
   pageRequestSchema,
   artifactSchema,
+  annotationIdSchema,
 } from './primitives.js';
 import {
   imageSummarySchema,
@@ -52,6 +53,7 @@ import {
   annotationEditSchema,
   annotationSchema,
   lineageSchema,
+  cIdentifierSchema,
 } from './model.js';
 import { instructionSchema, cfgBlockSchema } from './decoder.js';
 import type { Internal } from './primitives.js';
@@ -69,6 +71,7 @@ export const toolNameSchema = z.enum([
   'evidence_get',
   'memory_read',
   'annotations_apply',
+  'types_declare',
   'functions_discover',
   'analysis_status',
   'analysis_cancel',
@@ -521,6 +524,18 @@ export const annotationsApplyArgsSchema = z
       seen.add(edit.id);
     }
   });
+/** Declare C types (struct/union/enum/typedef) in one image's type library. */
+export const typesDeclareArgsSchema = z.strictObject({
+  project_id: projectIdSchema,
+  expected_revision: revisionSchema,
+  image_id: imageIdSchema,
+  author: z.string().min(1).max(1024),
+  origin: z.enum(['user', 'llm']),
+  status: z.enum(['asserted', 'hypothesis']).default('asserted'),
+  /** C declarations; every declared type becomes one type library annotation. */
+  source: z.string().min(1).max(262144),
+  budget: budgetSchema.default(DEFAULT_BUDGET),
+});
 export const analysisStatusArgsSchema = z.strictObject({ ...requestContext, job_id: jobIdSchema });
 export const analysisCancelArgsSchema = z.strictObject({ ...requestContext, job_id: jobIdSchema });
 /** Continue a budget-limited whole-image function discovery by one step at the current revision. */
@@ -684,6 +699,14 @@ export function resultSchema<S extends z.ZodType>(data: S): z.ZodType<ResultEnve
         context.addIssue({ code: 'custom', message: 'Job does not match result snapshot/state' });
     }) as z.ZodType<ResultEnvelope<z.output<S>>>;
 }
+const libraryTypeSchema = z.strictObject({
+  name: cIdentifierSchema.nullable(),
+  type_id: entityIdSchema,
+  annotation_id: annotationIdSchema,
+  status: z.enum(['asserted', 'hypothesis']),
+  /** C rendering: the declaration of a named type, else the anonymous type's spelling. */
+  declaration: z.string().max(65536),
+});
 const binaryInfoDataSchema = z.discriminatedUnion('view', [
   z.strictObject({ view: z.literal('summary'), image: imageSummarySchema }),
   z.strictObject({
@@ -730,6 +753,10 @@ const binaryInfoDataSchema = z.discriminatedUnion('view', [
       total: z.number().int().nonnegative(),
     }),
     types: z.number().int().nonnegative(),
+    /** The image's type library (`types_declare`): its anchor entity (subject of library
+     * `type` declarations) and live declarations, named types by name, then by type ID. */
+    library_id: entityIdSchema,
+    library: z.array(libraryTypeSchema).max(10000),
   }),
 ]);
 const symbolItemSchema = z.discriminatedUnion('kind', [
@@ -1227,6 +1254,37 @@ export const annotationsApplyResultSchema = resultSchema(
         });
     }),
 );
+export const typesDeclareResultSchema = resultSchema(
+  z
+    .strictObject({
+      previous_revision: revisionSchema,
+      revision: revisionSchema,
+      /** The image's type library anchor: the subject of every library declaration. */
+      library_id: entityIdSchema,
+      /** Every parsed type and typedef alias: C name (null for builtin/anonymous helper
+       * types), parser key, type ID and the library annotation declaring it. */
+      types: z
+        .array(
+          z.strictObject({
+            name: cIdentifierSchema.nullable(),
+            key: z.string().min(1).max(4096),
+            type_id: entityIdSchema,
+            annotation_id: annotationIdSchema,
+          }),
+        )
+        .max(2000),
+      /** Parser diagnostics. Each is an error that rejects the whole batch (a failed
+       * result), so a committed declaration reports none. */
+      diagnostics: z.array(diagnosticSchema).max(1000),
+    })
+    .superRefine((data, context) => {
+      if (data.revision !== data.previous_revision + 1)
+        context.addIssue({
+          code: 'custom',
+          message: 'An atomic type declaration batch advances revision exactly once',
+        });
+    }),
+);
 export const functionsDiscoverResultSchema = resultSchema(
   z
     .strictObject({
@@ -1296,6 +1354,10 @@ export interface ToolSchemaRegistry {
     input: typeof annotationsApplyArgsSchema;
     output: typeof annotationsApplyResultSchema;
   };
+  types_declare: {
+    input: typeof typesDeclareArgsSchema;
+    output: typeof typesDeclareResultSchema;
+  };
   functions_discover: {
     input: typeof functionsDiscoverArgsSchema;
     output: typeof functionsDiscoverResultSchema;
@@ -1322,6 +1384,7 @@ export const toolSchemas: ToolSchemaRegistry = {
   evidence_get: { input: evidenceGetArgsSchema, output: evidenceGetResultSchema },
   memory_read: { input: memoryReadArgsSchema, output: memoryReadResultSchema },
   annotations_apply: { input: annotationsApplyArgsSchema, output: annotationsApplyResultSchema },
+  types_declare: { input: typesDeclareArgsSchema, output: typesDeclareResultSchema },
   functions_discover: { input: functionsDiscoverArgsSchema, output: functionsDiscoverResultSchema },
   analysis_status: { input: analysisStatusArgsSchema, output: analysisStatusResultSchema },
   analysis_cancel: { input: analysisCancelArgsSchema, output: analysisCancelResultSchema },

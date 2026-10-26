@@ -6,6 +6,7 @@ import type { Socket } from 'node:net';
 import type { Server as HttpServer } from 'node:http';
 import type { Server as HttpsServer } from 'node:https';
 import { createMcpHandler, type McpHttpHandler } from '@modelcontextprotocol/server';
+import type { ToolArgs } from '../../core/index.js';
 import { QueryService } from '../../service/queries/index.js';
 import { authorizePath } from '../../workers/paths.js';
 import type { QueryServiceOptions } from '../../service/queries/index.js';
@@ -298,20 +299,21 @@ export async function startHttpServer(
                     if (args.budget[key] > principal.config.max_budget[key])
                       throw new Error('Requested work budget exceeds principal ceiling');
                   }
-                  if (name === 'project_open' && 'source' in args) {
-                    if (!isAbsolute(args.source.project_path))
+                  if (name === 'project_open') {
+                    const { source } = args as ToolArgs<'project_open'>;
+                    if (!isAbsolute(source.project_path))
                       throw new Error('Project paths must be absolute');
                     const project = await authorizePath(
                       [principal.config.project_root],
-                      args.source.project_path,
-                      args.source.kind === 'import' && args.source.mode === 'create',
+                      source.project_path,
+                      source.kind === 'import' && source.mode === 'create',
                     );
                     if (project === principal.config.project_root)
                       throw new Error('Use a project directory below the provisioned root');
-                    if (args.source.kind === 'import') {
-                      if (!isAbsolute(args.source.input_path))
+                    if (source.kind === 'import') {
+                      if (!isAbsolute(source.input_path))
                         throw new Error('Input paths must be absolute');
-                      await authorizePath(principal.config.input_roots, args.source.input_path);
+                      await authorizePath(principal.config.input_roots, source.input_path);
                     }
                   }
                   if (closing || context.requestInfo?.signal.aborted)

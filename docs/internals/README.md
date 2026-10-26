@@ -81,7 +81,7 @@ flowchart LR
   H --> OJ["Open-time job helpers: prepare callee units"]
 ```
 
-- **One tool vocabulary** (15 operations: `project_open`, `function_decompile`, `functions_discover`, `xrefs_get`, `memory_read`, `annotations_apply`, `analysis_status`, …) declared once with Zod schemas; every surface speaks it. Validated on the host (fail early) and again in the child (trust boundary).
+- **One tool vocabulary** (16 operations: `project_open`, `function_decompile`, `functions_discover`, `xrefs_get`, `memory_read`, `annotations_apply`, `types_declare`, `analysis_status`, …) declared once with Zod schemas; every surface speaks it. Validated on the host (fail early) and again in the child (trust boundary).
 - **One owner child process per project**, the only writer of its SQLite store. IPC = length-prefixed JSON frames. Pool bounds owners and queue.
 - **Optional request workers** (`openBinary({ requestWorkers })`, `export --jobs N`): N processes decompile in parallel over a read-only clone of the project; the owner republishes their artifacts and summaries, so output and per-function work are identical for any N. **Open-time job helpers** prepare every function's callee units after `project_open` and hand them to the owner. See [project-cache](project-cache.md#4a-open-time-job).
 - **Durable facts vs derived results.** Images, native records (functions, symbols, strings, references…), evidence, annotations and jobs live in revision-checked store transactions. Recovered types and decompilations live only in published artifacts keyed by a full cache identity; reuse at a newer revision is validated against a recorded dependency readset.

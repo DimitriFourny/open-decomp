@@ -475,6 +475,7 @@ export class ProjectWorker {
     if (job.request.kind === 'import') return 'exclusive';
     if (job.request.operation === 'function_decompile') return 'pool';
     return job.request.operation === 'annotations_apply' ||
+      job.request.operation === 'types_declare' ||
       job.request.operation === 'functions_discover'
       ? 'exclusive'
       : 'owner';
@@ -527,8 +528,11 @@ export class ProjectWorker {
         let result: JobOutcome['result'];
         if (event.result !== undefined) {
           if (job.request.kind === 'import') result = snapshotSchema.parse(event.result);
-          else if (job.request.operation === 'annotations_apply') {
-            const mutation = toolSchemas.annotations_apply.output.parse(event.result);
+          else if (
+            job.request.operation === 'annotations_apply' ||
+            job.request.operation === 'types_declare'
+          ) {
+            const mutation = toolSchemas[job.request.operation].output.parse(event.result);
             if (
               event.job.state === 'completed' &&
               mutation.state === 'complete' &&

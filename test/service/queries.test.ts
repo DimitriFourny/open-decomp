@@ -1161,3 +1161,92 @@ test(
     }
   },
 );
+
+test(
+  'types_declare commits one revision per batch, redeclares in place and rejects any parse error whole',
+  { timeout: 120000 },
+  async (t) => {
+    const { root, service } = await setup(t);
+    const opened = await service.execute('project_open', {
+      wait: true,
+      source: {
+        kind: 'import',
+        input_path: join(fixtures, 'pe-x86_64-symbols.exe'),
+        project_path: join(root, 'project'),
+      },
+    });
+    const image_id = openedImage(opened).id,
+      project_id = opened.project_id!;
+    let revision = opened.revision!;
+    const declare = (source: string) =>
+      service.execute('types_declare', {
+        project_id,
+        expected_revision: revision,
+        image_id,
+        author: 'type-library',
+        origin: 'llm',
+        source,
+      });
+    const library = async () => {
+      const types = data(
+        await service.execute('binary_info', { project_id, revision, image_id, view: 'types' }),
+      );
+      assert.ok(types.view === 'types');
+      return types.library;
+    };
+    // windows-x64 is LLP64: `long` is 32-bit.
+    const first = data(
+      await declare(
+        'typedef struct Item { long count; char tag; struct Item *next; } Item;\nunion Word { uint32_t u; float f; };',
+      ),
+    );
+    assert.equal(first.revision, revision + 1);
+    revision = first.revision;
+    const named = (name: string) => first.types.find((type) => type.name === name)!;
+    assert.deepEqual(
+      (await library()).filter((item) => item.name !== null).map((item) => item.declaration),
+      [
+        'struct Item { int32_t count; int8_t tag; struct Item *next; };',
+        'union Word { uint32_t u; float f; };',
+      ],
+    );
+    const failed = await declare(
+      'struct Item { int32_t count; };\nstruct Broken { int32_t x: 1; };',
+    );
+    assert.equal(failed.state, 'failed');
+    assert.ok('error' in failed && /line 2/.test(failed.error.message));
+    assert.ok('current_revision' in failed && failed.current_revision === revision);
+    const second = data(await declare('struct Item { int64_t count; };'));
+    assert.equal(second.revision, revision + 1);
+    assert.equal(
+      second.types.find((type) => type.name === 'Item')!.annotation_id,
+      named('Item').annotation_id,
+    );
+    revision = second.revision;
+    const items = await library();
+    assert.equal(items.filter((item) => item.name === 'Item').length, 1);
+    assert.equal(
+      items.find((item) => item.name === 'Item')!.declaration,
+      'struct Item { int64_t count; };',
+    );
+    assert.ok(
+      items.some((item) => item.name === 'Word'),
+      'other declarations stay',
+    );
+    // A tag only mentioned (here through a pointer typedef) keeps its library definition.
+    const third = data(await declare('typedef struct Item *ItemRef;'));
+    revision = third.revision;
+    assert.equal(
+      third.types.find((type) => type.name === 'Item')!.annotation_id,
+      named('Item').annotation_id,
+    );
+    assert.deepEqual(
+      (await library())
+        .filter((item) => item.name === 'Item' || item.name === 'ItemRef')
+        .map((item) => item.declaration),
+      ['struct Item { int64_t count; };', 'typedef struct Item *ItemRef;'],
+    );
+    const forward = await declare('struct Item;');
+    assert.equal(forward.state, 'failed');
+  },
+);
