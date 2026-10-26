@@ -85,6 +85,11 @@ export interface ImageTypeClass {
   readonly local: boolean;
   /** Declared pointer types the members are passed as (see ImageTypeObject). */
   readonly declared: readonly string[];
+  /** Sorted `imageAnchorKey`s of the members' own (callee-side) interface roles,
+   * `argument:<function>:<integer register ordinal>` and `return:<function>`: keys
+   * independent of analysis versions and of where exploration started, by which a
+   * user declaration binds this class. */
+  readonly anchors: readonly string[];
 }
 
 export interface ImageTypeSolution {
@@ -477,6 +482,19 @@ export function solveImageTypes(
       local: item.local === true,
       declared: [
         ...new Set(item.members.flatMap((member) => byKey.get(member)!.declared ?? [])),
+      ].sort(),
+      anchors: [
+        ...new Set(
+          item.members.flatMap((member) =>
+            byKey
+              .get(member)!
+              .anchors.filter(
+                ({ anchor, own }) =>
+                  own && (anchor.kind === 'argument' || anchor.kind === 'return'),
+              )
+              .map(({ anchor }) => imageAnchorKey(anchor)),
+          ),
+        ),
       ].sort(),
     });
   }

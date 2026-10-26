@@ -570,7 +570,8 @@ class Exporter {
       const bodies = [...this.#structures.get(name)!.bodies].sort(
         (left, right) => right[1].size - left[1].size || compare(left[0], right[0]),
       );
-      let defined = merged.includes(`struct ${name} {`);
+      // The merged types define bound user structures (and unions) under their own tags.
+      let defined = merged.includes(`struct ${name} {`) || merged.includes(`union ${name} {`);
       for (const [body, functions] of bodies) {
         lines.push(`/* used by ${users(functions)} */`);
         if (defined) lines.push('#if 0', body, '#endif');

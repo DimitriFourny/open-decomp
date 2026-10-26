@@ -253,12 +253,53 @@ function libraryDefinition(
   }
 }
 
+type DeclaredType = Pick<LibraryType, 'name' | 'type_id' | 'definition'>;
+
+/** C declarations of the named types `roots` (each a `struct Name { ... };` or `typedef`),
+ * preceded by the named types their declarations need, dependencies first, each once:
+ * a by-value member, array element or typedef target in full, a typedef name behind a
+ * pointer too; a pointer to a named structure needs only its tag. `types` resolves every
+ * reference; an unknown one renders as a commented `void`. */
+export function typeDeclarations(
+  types: readonly DeclaredType[],
+  roots: readonly string[],
+  context: OperationContext,
+): readonly { readonly type_id: string; readonly declaration: string }[] {
+  const records = new Map<string, DeclaredType>();
+  for (const type of types) if (!records.has(type.type_id)) records.set(type.type_id, type);
+  const ordered: DeclaredType[] = [];
+  const visited = new Set<string>();
+  const need = (id: string, complete: boolean, depth: number): void => {
+    context.checkpoint(1);
+    const type = records.get(id);
+    if (!type || depth > 64) return;
+    const named = type.name !== null;
+    if (named && (visited.has(id) || (!complete && type.definition.kind === 'structure'))) return;
+    if (named) visited.add(id);
+    const definition = type.definition;
+    if (definition.kind === 'pointer') need(definition.to, false, depth + 1);
+    else if (definition.kind === 'array') need(definition.element, complete, depth + 1);
+    else if (definition.kind === 'vector') need(definition.element, true, depth + 1);
+    else if (definition.kind === 'structure')
+      for (const field of definition.fields) need(field.type_id, true, depth + 1);
+    if (named) ordered.push(type);
+  };
+  for (const id of roots) need(id, true, 0);
+  const declarations = renderLibraryTypes(types, context, ordered);
+  return ordered.map((type, index) => ({
+    type_id: type.type_id,
+    declaration: declarations[index]!,
+  }));
+}
+
 /** C declarations of a type library: a named type's declaration (`struct Node { ... };`,
  * `typedef int32_t myint;`), an anonymous helper type's spelling (`struct Node *`). A
- * structure whose members all start at offset 0 renders as the union it was declared as. */
+ * structure whose members all start at offset 0 renders as the union it was declared as.
+ * `types` resolves references; `declared` (default: all of them) are rendered. */
 function renderLibraryTypes(
-  types: readonly LibraryType[],
+  types: readonly DeclaredType[],
   context: OperationContext,
+  declared: readonly DeclaredType[] = types,
 ): readonly string[] {
   const records = new Map(types.map((type) => [type.type_id, type]));
   /** Type specifier; a named aggregate prints its body only when `body` is set. */
@@ -327,7 +368,7 @@ function renderLibraryTypes(
     const spelled = specifier(type.definition, type.name, false, depth);
     return inner ? `${spelled} ${inner}` : spelled;
   };
-  return types.map((type) =>
+  return declared.map((type) =>
     type.name === null
       ? declare(type.definition, '', 0)
       : type.definition.kind === 'structure'
