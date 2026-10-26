@@ -14,6 +14,7 @@ import type {
 import {
   buildOnce,
   fingerprint,
+  globalDataIdentity,
   OperationError,
   recordBuilds,
   replayBuilds,
@@ -111,6 +112,13 @@ import {
   type NativeInterfaceIndex,
 } from './native-entry.js';
 import { pipelineVersions } from './versions.js';
+import {
+  annotatedDataAddress,
+  annotatedDataEntities,
+  assertedFacts,
+  resolveGlobalTypes,
+  type GlobalTypes,
+} from './global-data.js';
 import {
   nativeArgumentIndex,
   nativeArgumentValues,
@@ -686,7 +694,7 @@ const TABLE_BYTES_READ = 64n;
 function sourceAddresses(
   input: SourceFactsInput,
   formatPointers: readonly bigint[],
-): readonly SourceAddress[] {
+): { readonly addresses: readonly SourceAddress[]; readonly global_types: GlobalTypes['records'] } {
   const { image, scope, revision } = input,
     context = scope.context;
   const candidates = new Map<string, Address>();
@@ -879,34 +887,29 @@ function sourceAddresses(
   const names = new Map<string, Set<string>>();
   const sourceNames = new Map<string, string>();
   /** A symbol's name under its name annotations: one asserted name verbatim, none
-   * when other annotations leave it unresolved, otherwise its loader name. */
+   * when other annotations leave it unresolved, otherwise its loader name; and its one
+   * asserted type, the declared type of the global it starts. */
   const symbolName = (symbol: {
     readonly id: string;
     readonly display_name: string | null;
     readonly original_name: string | null;
-  }): { readonly name: string | null | undefined; readonly annotated: boolean } => {
-    const annotations = scope.store
-      .readAnnotations(symbol.id, revision)
-      .filter(
-        (annotation) => annotation.value.kind === 'name' && annotation.status !== 'retracted',
-      );
-    const asserted = new Set(
-      annotations.flatMap((annotation) =>
-        annotation.status === 'asserted' && annotation.value.kind === 'name'
-          ? [annotation.value.value]
-          : [],
-      ),
-    );
+  }): {
+    readonly name: string | null | undefined;
+    readonly annotated: boolean;
+    readonly type_id?: string;
+  } => {
+    const facts = assertedFacts(scope.store.readAnnotations(symbol.id, revision));
     return {
       name:
-        asserted.size === 1
-          ? [...asserted][0]
-          : annotations.length
-            ? undefined
-            : (symbol.display_name ?? symbol.original_name),
-      annotated: annotations.length > 0,
+        facts.name ?? (facts.named ? undefined : (symbol.display_name ?? symbol.original_name)),
+      annotated: facts.named,
+      ...(facts.type_id === undefined ? {} : { type_id: facts.type_id }),
     };
   };
+  /** Declared types asserted on object symbols, by symbol id and by base VA. */
+  const typeRoots = new Map<string, string>(),
+    symbolTypes = new Map<bigint, string>(),
+    symbolBases: bigint[] = [];
   const symbols = records(scope, revision, image.id, 'symbol').items.map((symbol) => {
     context.checkpoint(1);
     if (!symbol.address) return symbol;
@@ -926,7 +929,12 @@ function sourceAddresses(
         }
       }
     if (!relevant) return symbol;
-    const { name, annotated } = symbolName(symbol);
+    if (start.space === 'va') symbolBases.push(start.value);
+    const { name, annotated, type_id } = symbolName(symbol);
+    if (type_id !== undefined && symbol.kind === 'object' && start.space === 'va') {
+      typeRoots.set(symbol.id, type_id);
+      symbolTypes.set(start.value, type_id);
+    }
     if (name) {
       sourceNames.set(
         `${addressKey(symbol.address)}:${name}`,
@@ -939,6 +947,19 @@ function sourceAddresses(
     }
     return { ...symbol, original_name: name ?? null, display_name: null };
   });
+  // Data entities (globals) whose annotations name or type storage a candidate may lie in.
+  const entities = annotatedDataEntities(
+    scope,
+    revision,
+    image,
+    [...candidates.values()].flatMap((address) =>
+      address.image_id === image.id && address.space === 'va' ? [address.value] : [],
+    ),
+    symbolBases,
+  );
+  for (const entity of entities.values())
+    if (entity.type_id !== undefined) typeRoots.set(entity.id, entity.type_id);
+  const globalTypes = resolveGlobalTypes(scope, revision, typeRoots);
   // Entries of the image's functions: a constant equal to one names the function.
   // A symbol's name (above) wins; otherwise the function's own name, under the
   // same annotation rules, and nothing when annotations leave it unresolved.
@@ -1018,6 +1039,7 @@ function sourceAddresses(
         ...slot,
         object: {
           address,
+          entity_id: globalDataIdentity(image.selected_slice_id, address),
           byte_length: BigInt(image.target.address_bits / 8),
           offset: 0n,
           mutable: object?.mutable ?? true,
@@ -1068,25 +1090,33 @@ function sourceAddresses(
       symbolName({ id: relative.symbol_id, display_name: null, original_name: relative.name });
     const initial = initialImports.get(key);
     if (recovered)
-      result.push({
-        ...plain,
-        ...(relative && relativeName?.name
-          ? {
-              symbol_relative: {
-                ...relative,
-                name: relativeName.name,
-                source_name: relativeName.annotated
-                  ? relativeName.name
-                  : cSourceName(image.target.format, relativeName.name),
-              },
-            }
-          : {}),
-        ...(initial === undefined ? {} : { initial_import: initial }),
-        ...(constantBytes === undefined ? {} : { constant_bytes: constantBytes }),
-        ...(objectBytes === undefined ? {} : { object_bytes: objectBytes }),
-        ...(name === undefined ? {} : { name }),
-        ...(spelling === undefined ? {} : { source_name: spelling }),
-      });
+      result.push(
+        annotatedDataAddress(
+          address,
+          {
+            ...plain,
+            ...(relative && relativeName?.name
+              ? {
+                  symbol_relative: {
+                    ...relative,
+                    name: relativeName.name,
+                    source_name: relativeName.annotated
+                      ? relativeName.name
+                      : cSourceName(image.target.format, relativeName.name),
+                  },
+                }
+              : {}),
+            ...(initial === undefined ? {} : { initial_import: initial }),
+            ...(constantBytes === undefined ? {} : { constant_bytes: constantBytes }),
+            ...(objectBytes === undefined ? {} : { object_bytes: objectBytes }),
+            ...(name === undefined ? {} : { name }),
+            ...(spelling === undefined ? {} : { source_name: spelling }),
+          },
+          entities,
+          globalTypes,
+          recovered.object && symbolTypes.get(recovered.object.address.value),
+        ),
+      );
     else if (entry !== undefined || name !== undefined) {
       const functionSpelling = name === undefined ? undefined : sourceNames.get(`${key}:${name}`);
       result.push({
@@ -1097,7 +1127,7 @@ function sourceAddresses(
       });
     }
   }
-  return result;
+  return { addresses: result, global_types: globalTypes.records };
 }
 
 /** Prepared callee units (local SSA/type evidence, never a completed transitive
@@ -2489,6 +2519,10 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
     return found ?? undefined;
   };
   const ruleCalls = variadicRuleCalls(input.ir, input.types.calls, input.library, context);
+  const sourceData = sourceAddresses(
+    input,
+    ruleCalls.flatMap((call) => (call.kind === 'open_flags' ? [] : call.values)),
+  );
   const objc = objcSourceFacts({
     ir: input.ir,
     image,
@@ -2498,10 +2532,7 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
     abi,
     context,
     callees,
-    addresses: sourceAddresses(
-      input,
-      ruleCalls.flatMap((call) => (call.kind === 'open_flags' ? [] : call.values)),
-    ),
+    addresses: sourceData.addresses,
   });
   for (const callee of objc.callees) sourceCallees.set(callee.call_id, callee);
   evidence.push(...objc.evidence);
@@ -2519,6 +2550,7 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
       .map((mapping) => ({ start: mapping.va, end: mapping.va + mapping.memory_size })),
     ...(objc.facts ? { objc: objc.facts } : {}),
     memory_transfers,
+    ...(sourceData.global_types.length ? { global_types: sourceData.global_types } : {}),
     function_return_demands: [...functionReturnDemands.values()],
     caller_result_demands: callerDemands,
     function_result_use: functionResultUse,

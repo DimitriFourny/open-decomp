@@ -23,6 +23,7 @@ import {
 import type { SuppliedTypeRecord } from '../../analysis/types/index.js';
 import {
   TrustedSemanticCatalog,
+  resolveDataAddressSubject,
   resolveDurableSubject,
   typeReferences,
   type AnnotationSubject,
@@ -30,6 +31,7 @@ import {
 export {
   TrustedSemanticCatalog,
   createTrustedSemanticCatalog,
+  resolveDataAddressSubject,
   resolveDurableSubject,
   type AnnotationSubject,
 } from './subjects.js';
@@ -140,7 +142,8 @@ export class AnnotationService {
       const prospective = new Map(active.map((annotation) => [annotation.id, annotation]));
       const prepared: Annotation[] = [],
         removed: string[] = [],
-        evidence: Evidence[] = [];
+        evidence: Evidence[] = [],
+        subjectCache = new Map<string, AnnotationSubject | null>();
       for (const edit of edits) {
         context.checkpoint(1);
         if (edit.operation !== 'set') {
@@ -158,12 +161,19 @@ export class AnnotationService {
             });
           continue;
         }
+        // An address names the data subject there; the annotation stores its entity id.
+        let entityId = edit.entity_id;
+        if (entityId === undefined) {
+          const subject = resolveDataAddressSubject(this.store, edit.address!, current, context);
+          subjectCache.set(subject.id, subject);
+          entityId = subject.id;
+        }
         const history = this.store.queryAnnotationHistory({
           id: edit.id,
           revision: current,
           limit: 1,
         }).items[0];
-        if (history && history.entity_id !== edit.entity_id)
+        if (history && history.entity_id !== entityId)
           reject(
             'conflicting_evidence',
             'Annotation identity cannot move to another subject, including after removal or lineage changes',
@@ -178,7 +188,7 @@ export class AnnotationService {
               agent: batch.origin,
               status: edit.status,
             },
-            claim: `Annotation ${edit.id} on ${edit.entity_id}`,
+            claim: `Annotation ${edit.id} on ${entityId}`,
             derived_from:
               edit.value.kind === 'signature' ? [...new Set(edit.value.value.evidence_ids)] : [],
             conflicts_with: [],
@@ -189,7 +199,7 @@ export class AnnotationService {
         }
         const annotation: Annotation = {
           id: edit.id,
-          entity_id: edit.entity_id,
+          entity_id: entityId,
           value: edit.value,
           status: edit.status,
           evidence_ids: evidenceIds,
@@ -210,8 +220,7 @@ export class AnnotationService {
         }
       const generated = new Set(evidence.map((proof) => proof.id));
       const checkedEvidence = new Set<string>(),
-        checkedTypes = new Set<string>(),
-        subjectCache = new Map<string, AnnotationSubject | null>();
+        checkedTypes = new Set<string>();
       const validateEvidence = (references: readonly string[]): void => {
         const pending = [...references];
         while (pending.length) {
@@ -277,9 +286,15 @@ export class AnnotationService {
         if (annotation.status === 'retracted') continue;
         let subject = subjectCache.get(annotation.entity_id);
         if (subject === undefined) {
+          const semantic = catalog?.subject(annotation.entity_id);
+          // A data subject a decompile names is still validated as data storage here.
           subject =
-            catalog?.subject(annotation.entity_id) ??
-            resolveDurableSubject(this.store, annotation.entity_id, current, context);
+            semantic?.kind === 'data' && semantic.address
+              ? resolveDataAddressSubject(this.store, semantic.address, current, context)
+              : (semantic ??
+                resolveDurableSubject(this.store, annotation.entity_id, current, context));
+          if (subject && subject.id !== annotation.entity_id)
+            reject('invalid_input', 'Data subject identity does not match its address');
           subjectCache.set(annotation.entity_id, subject);
         }
         if (!subject)
@@ -318,6 +333,19 @@ export class AnnotationService {
         for (const annotation of prepared) {
           context.checkpoint(1);
           tx.setAnnotation(annotation);
+        }
+        // Every data subject an annotation names stays resolvable at later revisions.
+        for (const annotation of prepared) {
+          const subject = subjectCache.get(annotation.entity_id);
+          if (annotation.status === 'retracted' || subject?.kind !== 'data' || !subject.address)
+            continue;
+          context.checkpoint(1);
+          tx.registerDataEntity({
+            id: subject.id,
+            image_id: subject.image_id,
+            slice_id: subject.slice_id,
+            address: subject.address,
+          });
         }
         for (const id of removed) {
           context.checkpoint(1);

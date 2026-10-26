@@ -80,22 +80,33 @@ export function encodeAnnotation(value: Annotation): z.output<typeof annotationS
   );
 }
 export function decodeAnnotationEdit(input: z.input<typeof annotationEditSchema>): AnnotationEdit {
-  const edit = annotationEditSchema.parse(input);
-  if (edit.operation !== 'set') return edit;
-  const value = edit.value;
-  if (value.kind === 'type')
-    return { ...edit, value: { ...value, definition: decodeTypeDefinition(value.definition) } };
-  return { ...edit, value };
+  const parsed = annotationEditSchema.parse(input);
+  if (parsed.operation !== 'set') return parsed;
+  const { address, value, ...edit } = parsed;
+  return {
+    ...edit,
+    ...(address === undefined
+      ? {}
+      : { address: { ...address, value: parseHexU64(address.value) } }),
+    value:
+      value.kind === 'type'
+        ? { ...value, definition: decodeTypeDefinition(value.definition) }
+        : value,
+  };
 }
 export function encodeAnnotationEdit(edit: AnnotationEdit): z.output<typeof annotationEditSchema> {
-  return annotationEditSchema.parse(
-    edit.operation === 'set' && edit.value.kind === 'type'
-      ? {
-          ...edit,
-          value: { ...edit.value, definition: encodeTypeDefinition(edit.value.definition) },
-        }
-      : edit,
-  );
+  if (edit.operation !== 'set') return annotationEditSchema.parse(edit);
+  const { address, value, ...rest } = edit;
+  return annotationEditSchema.parse({
+    ...rest,
+    ...(address === undefined
+      ? {}
+      : { address: { ...address, value: formatHexU64(address.value) } }),
+    value:
+      value.kind === 'type'
+        ? { ...value, definition: encodeTypeDefinition(value.definition) }
+        : value,
+  });
 }
 export function encodeArtifact(value: Artifact): WireArtifact {
   return artifactSchema.parse({ ...value, size: formatHexU64(value.size) });

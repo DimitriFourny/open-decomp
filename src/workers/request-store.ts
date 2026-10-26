@@ -75,6 +75,10 @@ export class RequestStore implements ProjectStore {
     fail('invalid_input', 'A request worker cannot mutate the project');
   readAnnotations: ProjectStore['readAnnotations'] = (entityId, revision) =>
     this.#base.readAnnotations(entityId, revision);
+  readDataEntity: ProjectStore['readDataEntity'] = (id, revision) =>
+    this.#base.readDataEntity(id, revision);
+  readDataEntities: ProjectStore['readDataEntities'] = (query) =>
+    this.#base.readDataEntities(query);
   queryAnnotations: ProjectStore['queryAnnotations'] = (query) =>
     this.#base.queryAnnotations(query);
   queryAnnotationHistory: ProjectStore['queryAnnotationHistory'] = (query) =>

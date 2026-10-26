@@ -3,12 +3,15 @@ import { z } from 'zod';
 import {
   OperationError,
   SCHEMA_VERSION,
+  addressSchema,
   cacheIdentityKey,
   cacheIdentitySchema,
   contentHash,
   type CanonicalValue,
+  decodeAddress,
   decodeEvidence,
   decodeTypeDefinition,
+  encodeAddress,
   encodeArtifact,
   EMISSION_METADATA_SHED_ORDER,
   encodeEvidence,
@@ -59,28 +62,39 @@ import {
 export * from './model.js';
 export * from './dependencies.js';
 
-const subjectSchema = z.strictObject({
-  id: entityIdSchema,
-  kind: z.enum([
-    'function',
-    'call',
-    'value',
-    'stack',
-    'field',
-    'type',
-    'string',
-    'reference',
-    'symbol',
-    'import',
-    'export',
-    'section',
-    'mapping',
-    'relocation',
-  ]),
-  image_id: imageIdSchema,
-  slice_id: sliceIdSchema,
-  abi: targetSchema.shape.abi,
-});
+const subjectSchema = z
+  .strictObject({
+    id: entityIdSchema,
+    kind: z.enum([
+      'function',
+      'call',
+      'value',
+      'stack',
+      'field',
+      'type',
+      'string',
+      'reference',
+      'symbol',
+      'import',
+      'export',
+      'section',
+      'mapping',
+      'relocation',
+      'data',
+    ]),
+    image_id: imageIdSchema,
+    slice_id: sliceIdSchema,
+    abi: targetSchema.shape.abi,
+    address: addressSchema.optional(),
+  })
+  .superRefine((subject, context) => {
+    if ((subject.kind === 'data') !== (subject.address !== undefined))
+      context.addIssue({ code: 'custom', message: 'Exactly data subjects carry an address' });
+  });
+const encodeSubject = ({ address, ...subject }: AnnotationSubject) =>
+  address === undefined ? subject : { ...subject, address: encodeAddress(address) };
+const decodeSubject = ({ address, ...subject }: z.output<typeof subjectSchema>): AnnotationSubject =>
+  address === undefined ? subject : { ...subject, address: decodeAddress(address) };
 const catalogSchema = z.strictObject({
   subjects: z.array(subjectSchema).max(100000),
   types: z
@@ -205,7 +219,7 @@ function validateComputation(
   if (parsed) catalog = computation.catalog;
   else {
     const wireCatalog = catalogSchema.parse({
-      subjects: computation.catalog.subjects,
+      subjects: computation.catalog.subjects.map(encodeSubject),
       types: computation.catalog.types.map((record) => ({
         id: record.id,
         definition: encodeTypeDefinition(record.definition),
@@ -216,7 +230,7 @@ function validateComputation(
       evidence: computation.catalog.evidence.map(encodeEvidence),
     });
     catalog = {
-      subjects: wireCatalog.subjects,
+      subjects: wireCatalog.subjects.map(decodeSubject),
       types: wireCatalog.types.map((record) => ({
         ...record,
         definition: decodeTypeDefinition(record.definition),
@@ -336,7 +350,7 @@ function parsePayload(sha256: string, bytes: Uint8Array): ParsedPayload {
     size: bytes.length,
     wire,
     catalog: {
-      subjects: wire.catalog.subjects,
+      subjects: wire.catalog.subjects.map(decodeSubject),
       types: wire.catalog.types.map((record) => ({
         ...record,
         definition: decodeTypeDefinition(record.definition),
@@ -537,7 +551,7 @@ export async function runCachedDecompilation(
         result: value.result,
         ...(value.dependencies === undefined ? {} : { dependencies: value.dependencies }),
         catalog: {
-          subjects: value.catalog.subjects,
+          subjects: value.catalog.subjects.map(encodeSubject),
           types: value.catalog.types.map((record) => ({
             ...record,
             definition: encodeTypeDefinition(record.definition),

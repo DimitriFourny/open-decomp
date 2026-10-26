@@ -6,12 +6,17 @@ import {
   decodeAddress,
   encodeAddress,
   fingerprint,
+  formatHexU64,
+  hexU64Schema,
   LedgerHasher,
+  parseHexU64,
+  U64_LIMIT,
   type Address,
   type Annotation,
   type AnnotationQuery,
   type CacheIdentity,
   type CanonicalValue,
+  type DataEntityQuery,
   type Evidence,
   type FunctionRecord,
   type OperationContext,
@@ -43,6 +48,13 @@ const selectorSchema = z.discriminatedUnion('kind', [
     kind: z.literal('function_address'),
     image_id: z.string(),
     address: addressSchema,
+  }),
+  /** Registered data entities of an image VA window `[start, end)` (`end` = 2^64 is `null`). */
+  z.strictObject({
+    kind: z.literal('data_entities'),
+    image_id: z.string(),
+    start: hexU64Schema,
+    end: hexU64Schema.nullable(),
   }),
 ]);
 export const analysisReadsetSchema = z.strictObject({
@@ -169,6 +181,13 @@ function readSelector(
         exhausted('Analysis function frontier dependency bound exceeded');
       return page.items;
     }
+    case 'data_entities':
+      return store.readDataEntities({
+        image_id: selector.image_id,
+        revision,
+        start: parseHexU64(selector.start),
+        end: selector.end === null ? U64_LIMIT : parseHexU64(selector.end),
+      });
   }
 }
 
@@ -244,6 +263,21 @@ export class AnalysisDependencyCollector {
               const result = target.queryAnnotations(query);
               if (query.revision === revision && this.#annotationDepth === 0)
                 this.recordAnnotationScope(null, []);
+              return result;
+            };
+          case 'readDataEntities':
+            return (query: DataEntityQuery) => {
+              const result = target.readDataEntities(query);
+              if (query.revision === revision)
+                this.capture(
+                  {
+                    kind: 'data_entities',
+                    image_id: query.image_id,
+                    start: hexU64Schema.parse(formatHexU64(query.start)),
+                    end: query.end === U64_LIMIT ? null : hexU64Schema.parse(formatHexU64(query.end)),
+                  },
+                  result,
+                );
               return result;
             };
           case 'queryRecords':

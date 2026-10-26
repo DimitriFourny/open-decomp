@@ -369,15 +369,33 @@ export const annotationSchema = z.strictObject({
   evidence_ids: evidenceRefsSchema,
   revision: revisionSchema,
 });
+/** Image storage named by its virtual address: the data subject (a global) at that address. */
+export const dataAddressSchema = z.strictObject({
+  image_id: imageIdSchema,
+  space: z.literal('va'),
+  value: hexU64Schema,
+});
 export const annotationEditSchema = z.discriminatedUnion('operation', [
-  z.strictObject({
-    operation: z.literal('set'),
-    id: annotationIdSchema,
-    entity_id: entityIdSchema,
-    value: annotationValueSchema,
-    status: z.enum(['hypothesis', 'asserted']),
-    evidence_ids: evidenceRefsSchema,
-  }),
+  z
+    .strictObject({
+      operation: z.literal('set'),
+      id: annotationIdSchema,
+      /** Exactly one of `entity_id` and `address`; an address names the data entity there
+       * (`globalDataIdentity`), and the committed annotation stores that entity id. */
+      entity_id: entityIdSchema.optional(),
+      address: dataAddressSchema.optional(),
+      value: annotationValueSchema,
+      status: z.enum(['hypothesis', 'asserted']),
+      evidence_ids: evidenceRefsSchema,
+    })
+    .superRefine((edit, context) => {
+      if ((edit.entity_id === undefined) === (edit.address === undefined))
+        context.addIssue({
+          code: 'custom',
+          path: ['entity_id'],
+          message: 'A set edit names exactly one of entity_id or address',
+        });
+    }),
   z.strictObject({ operation: z.literal('retract'), id: annotationIdSchema }),
   z.strictObject({ operation: z.literal('remove'), id: annotationIdSchema }),
 ]);

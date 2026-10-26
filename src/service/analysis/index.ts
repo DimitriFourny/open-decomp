@@ -42,6 +42,7 @@ import { emitPythonLike } from '../../emitters/python-like/index.js';
 import {
   AnnotationService,
   createTrustedSemanticCatalog,
+  type AnnotationSubject,
 } from '../../project/annotations/index.js';
 import { typeReferences } from '../../project/annotations/subjects.js';
 import {
@@ -753,7 +754,26 @@ export async function executeDecompilation(
         required: [uniqueDiagnostics, active.annotations, signature],
         emission: emitted.emission,
       });
-      const catalog = { ...semanticTypes, types: bounded.types };
+      // Every image global the function names is a data subject an LLM may annotate by the
+      // entity id the output carries (import-bound slots are named by their import).
+      const dataSubjects = new Map<string, AnnotationSubject>();
+      for (const item of source.addresses) {
+        context.checkpoint(1);
+        if (!item.object || item.import || item.object.address.space !== 'va') continue;
+        dataSubjects.set(item.object.entity_id, {
+          id: item.object.entity_id,
+          kind: 'data',
+          image_id: image.id,
+          slice_id: image.selected_slice_id,
+          abi: image.target.abi,
+          address: item.object.address,
+        });
+      }
+      const catalog = {
+        ...semanticTypes,
+        subjects: [...semanticTypes.subjects, ...dataSubjects.values()],
+        types: bounded.types,
+      };
       const evidence = bounded.evidence;
       const encoded = encodeEmission(emitted.emission);
       const shed = bounded.emission

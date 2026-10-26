@@ -1,4 +1,4 @@
-import { buildOnce, useBuilt } from '../../core/index.js';
+import { buildOnce, globalDataIdentity, useBuilt } from '../../core/index.js';
 import type {
   Address,
   LoadedImage,
@@ -441,6 +441,7 @@ export function recoverDataAddress(
       : undefined;
   const object = {
     address: base,
+    entity_id: globalDataIdentity(image.selected_slice_id, base),
     byte_length: size,
     ...(spanBound === undefined ? {} : { span_bound: spanBound }),
     offset: va.value - base.value,

@@ -52,7 +52,8 @@ export async function executeAnnotations(
   for (const edit of edits) {
     context.checkpoint(1);
     if (edit.operation !== 'set') continue;
-    ids.add(edit.entity_id);
+    // An address edit names a data subject validated from the image, not from a catalog.
+    if (edit.entity_id !== undefined) ids.add(edit.entity_id);
     for (const id of edit.evidence_ids) ids.add(id);
     if (edit.value.kind === 'type') {
       ids.add(edit.value.type_id);

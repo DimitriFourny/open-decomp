@@ -9,6 +9,7 @@ import {
   entityIdSchema,
 } from './primitives.js';
 import { formatHexU64 } from './integers.js';
+import type { Address } from './addresses.js';
 
 export type CanonicalValue =
   | null
@@ -119,6 +120,12 @@ export function sliceIdentity(
 export function entityIdentity(sliceId: string, kind: string, birth: CanonicalValue): string {
   sliceIdSchema.parse(sliceId);
   return entityIdSchema.parse(`entity_${fingerprint([sliceId, kind, birth])}`);
+}
+/** Data entity of image storage at `address` (a global): the subject of its name and type
+ * annotations, a pure function of the slice and the address, so the same storage has one
+ * identity in every function, revision and analysis. */
+export function globalDataIdentity(sliceId: string, address: Address): string {
+  return entityIdentity(sliceId, 'global-data', [address.space, address.value]);
 }
 export function newIdentity(
   kind: 'project' | 'job' | 'annotation' | 'evidence' | 'artifact',
