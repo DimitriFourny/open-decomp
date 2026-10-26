@@ -7,11 +7,14 @@ import {
   encodeDiagnostic,
   encodeEvidence,
   toolSchemas,
+  type AnnotationEdit,
+  type Diagnostic,
   type Evidence,
+  type MutationResult,
   type ToolArgs,
   type ToolResult,
 } from '../../core/index.js';
-import { AnnotationService } from '../../project/annotations/index.js';
+import { AnnotationService, type TrustedSemanticCatalog } from '../../project/annotations/index.js';
 import { typeReferences } from '../../project/annotations/subjects.js';
 import { readAnnotationCatalog } from '../../project/cache/index.js';
 import { MAX_FRAME_BYTES } from '../../workers/protocol.js';
@@ -20,12 +23,29 @@ import type { AnalysisScope } from './index.js';
 import { reviewedSourceBase } from './reviewed-source.js';
 import { acceptsAnalysisIdentity } from './versions.js';
 
+/** Tools that commit one atomic annotation batch as a durable job. */
+export type AnnotationOperation = 'annotations_apply' | 'types_declare';
+type CommittedData<K extends AnnotationOperation> =
+  ToolResult<K> extends infer R ? (R extends { data: infer D } ? D : never) : never;
+export type CommittedAnnotations = Extract<MutationResult, { state: 'committed' }>;
+
+/** The batch an annotation job commits, or the diagnostics that reject it before any write. */
+export type PreparedAnnotationJob<K extends AnnotationOperation> =
+  | {
+      readonly edits: readonly AnnotationEdit[];
+      readonly catalog?: TrustedSemanticCatalog;
+      readonly data: (result: CommittedAnnotations) => CommittedData<K>;
+    }
+  | { readonly rejected: readonly Diagnostic[] };
+
 /** Wire validation and terminal job save are part of the same rollback boundary
  * as the domain mutation. In particular no serialization happens after commit. */
-export async function executeAnnotations(
-  args: ToolArgs<'annotations_apply'>,
+export async function runAnnotationJob<K extends AnnotationOperation>(
+  operation: K,
+  args: ToolArgs<K>,
   scope: AnalysisScope,
-): Promise<ToolResult<'annotations_apply'>> {
+  prepare: () => Promise<PreparedAnnotationJob<K>>,
+): Promise<ToolResult<K>> {
   const { store, context, job_id } = scope;
   if (args.project_id !== store.project_id)
     throw new OperationError({
@@ -37,7 +57,7 @@ export async function executeAnnotations(
   const job = store.readJob(job_id);
   if (
     !job ||
-    job.operation !== 'annotations_apply' ||
+    job.operation !== operation ||
     job.input_revision !== args.expected_revision ||
     job.state !== 'running'
   )
@@ -48,32 +68,7 @@ export async function executeAnnotations(
       evidence_ids: [],
     });
   context.progress('annotations', 0, 1);
-  const edits = args.edits.map(decodeAnnotationEdit),
-    ids = new Set<string>();
-  for (const edit of edits) {
-    context.checkpoint(1);
-    if (edit.operation !== 'set') continue;
-    ids.add(edit.entity_id);
-    for (const id of edit.evidence_ids) ids.add(id);
-    if (edit.value.kind === 'type') {
-      ids.add(edit.value.type_id);
-      for (const id of typeReferences(edit.value.definition)) ids.add(id);
-    } else if (edit.value.kind === 'signature') {
-      ids.add(edit.value.value.return_type);
-      for (const parameter of edit.value.value.parameters) ids.add(parameter.type_id);
-      for (const id of edit.value.value.evidence_ids) ids.add(id);
-    }
-  }
-  const catalog =
-    store.snapshot().revision === args.expected_revision
-      ? await readAnnotationCatalog(
-          store,
-          args.expected_revision,
-          [...ids],
-          context,
-          acceptsAnalysisIdentity,
-        )
-      : undefined;
+  const prepared = await prepare();
   const envelope = {
     schema_version: SCHEMA_VERSION,
     project_id: store.project_id,
@@ -94,8 +89,8 @@ export async function executeAnnotations(
     evidence: [],
     artifacts: [],
   };
-  const validate = (result: ToolResult<'annotations_apply'>): ToolResult<'annotations_apply'> => {
-    const parsed = toolSchemas.annotations_apply.output.parse(result);
+  const validate = (result: unknown): ToolResult<K> => {
+    const parsed = toolSchemas[operation].output.parse(result) as ToolResult<K>;
     if (
       Buffer.byteLength(JSON.stringify(parsed)) >
       Math.min(
@@ -113,60 +108,59 @@ export async function executeAnnotations(
       });
     return parsed;
   };
-  let committed: ToolResult<'annotations_apply'> | undefined;
-  const mutation = new AnnotationService(store).apply(
-    { expected_revision: args.expected_revision, author: args.author, origin: args.origin, edits },
-    context,
-    catalog,
-    (_transaction, result, preparedEvidence: readonly Evidence[]) => {
-      context.checkpoint(0);
-      const currentJob = store.readJob(job_id);
-      if (currentJob?.state !== 'running')
-        throw new OperationError({
-          code: currentJob?.state === 'cancelled' ? 'cancelled' : 'invalid_input',
-          severity: 'error',
-          message: 'Annotation job stopped before commit',
-          evidence_ids: [],
-        });
-      const proofIds = evidenceReferences(result.annotations, context);
-      // New evidence is available from the domain's prepared transaction, not from
-      // a fabricated assertion or an uncommitted future-snapshot store read.
-      const evidence = closeEvidence(
-        store,
-        result.revision,
-        proofIds,
-        preparedEvidence,
-        context,
-        args.expected_revision,
-      );
-      committed = validate({
-        ...envelope,
-        revision: result.revision,
-        evidence: evidence.map(encodeEvidence),
-        state: 'complete',
-        data: {
-          previous_revision: result.previous_revision,
-          revision: result.revision,
-          applied: result.annotations.map(encodeAnnotation),
-          removed: [...result.removed],
-          invalidation: {
-            scope: 'project',
-            derived_before_revision: result.invalidate_before_revision,
+  let committed: ToolResult<K> | undefined;
+  const mutation: MutationResult =
+    'rejected' in prepared
+      ? { state: 'rejected', diagnostics: prepared.rejected }
+      : new AnnotationService(store).apply(
+          {
+            expected_revision: args.expected_revision,
+            author: args.author,
+            origin: args.origin,
+            edits: prepared.edits,
           },
-        },
-      });
-      context.checkpoint(0);
-      store.saveJob({
-        ...currentJob,
-        state: 'completed',
-        progress: { phase: 'complete', completed: 1, total: 1 },
-        artifacts: [],
-        diagnostics: [],
-        published_revision: null,
-      });
-    },
-    reviewedSourceBase(store, args.expected_revision, context),
-  );
+          context,
+          prepared.catalog,
+          (_transaction, result, preparedEvidence: readonly Evidence[]) => {
+            context.checkpoint(0);
+            const currentJob = store.readJob(job_id);
+            if (currentJob?.state !== 'running')
+              throw new OperationError({
+                code: currentJob?.state === 'cancelled' ? 'cancelled' : 'invalid_input',
+                severity: 'error',
+                message: 'Annotation job stopped before commit',
+                evidence_ids: [],
+              });
+            const proofIds = evidenceReferences(result.annotations, context);
+            // New evidence is available from the domain's prepared transaction, not from
+            // a fabricated assertion or an uncommitted future-snapshot store read.
+            const evidence = closeEvidence(
+              store,
+              result.revision,
+              proofIds,
+              preparedEvidence,
+              context,
+              args.expected_revision,
+            );
+            committed = validate({
+              ...envelope,
+              revision: result.revision,
+              evidence: evidence.map(encodeEvidence),
+              state: 'complete',
+              data: prepared.data(result),
+            });
+            context.checkpoint(0);
+            store.saveJob({
+              ...currentJob,
+              state: 'completed',
+              progress: { phase: 'complete', completed: 1, total: 1 },
+              artifacts: [],
+              diagnostics: [],
+              published_revision: null,
+            });
+          },
+          reviewedSourceBase(store, args.expected_revision, context),
+        );
   if (mutation.state === 'committed') {
     if (!committed)
       throw new OperationError({
@@ -218,4 +212,54 @@ export async function executeAnnotations(
       published_revision: null,
     });
   return result;
+}
+
+export async function executeAnnotations(
+  args: ToolArgs<'annotations_apply'>,
+  scope: AnalysisScope,
+): Promise<ToolResult<'annotations_apply'>> {
+  const { store, context } = scope;
+  return runAnnotationJob('annotations_apply', args, scope, async () => {
+    const edits = args.edits.map(decodeAnnotationEdit),
+      ids = new Set<string>();
+    for (const edit of edits) {
+      context.checkpoint(1);
+      if (edit.operation !== 'set') continue;
+      ids.add(edit.entity_id);
+      for (const id of edit.evidence_ids) ids.add(id);
+      if (edit.value.kind === 'type') {
+        ids.add(edit.value.type_id);
+        if (edit.value.definition)
+          for (const id of typeReferences(edit.value.definition)) ids.add(id);
+      } else if (edit.value.kind === 'signature') {
+        ids.add(edit.value.value.return_type);
+        for (const parameter of edit.value.value.parameters) ids.add(parameter.type_id);
+        for (const id of edit.value.value.evidence_ids) ids.add(id);
+      }
+    }
+    const catalog =
+      store.snapshot().revision === args.expected_revision
+        ? await readAnnotationCatalog(
+            store,
+            args.expected_revision,
+            [...ids],
+            context,
+            acceptsAnalysisIdentity,
+          )
+        : undefined;
+    return {
+      edits,
+      ...(catalog === undefined ? {} : { catalog }),
+      data: (result) => ({
+        previous_revision: result.previous_revision,
+        revision: result.revision,
+        applied: result.annotations.map(encodeAnnotation),
+        removed: [...result.removed],
+        invalidation: {
+          scope: 'project' as const,
+          derived_before_revision: result.invalidate_before_revision,
+        },
+      }),
+    };
+  });
 }

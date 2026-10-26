@@ -303,19 +303,20 @@ export async function startHttpServer(
                     'source' in args &&
                     typeof args.source === 'object'
                   ) {
-                    if (!isAbsolute(args.source.project_path))
+                    const source = args.source;
+                    if (!isAbsolute(source.project_path))
                       throw new Error('Project paths must be absolute');
                     const project = await authorizePath(
                       [principal.config.project_root],
-                      args.source.project_path,
-                      args.source.kind === 'import' && args.source.mode === 'create',
+                      source.project_path,
+                      source.kind === 'import' && source.mode === 'create',
                     );
                     if (project === principal.config.project_root)
                       throw new Error('Use a project directory below the provisioned root');
-                    if (args.source.kind === 'import') {
-                      if (!isAbsolute(args.source.input_path))
+                    if (source.kind === 'import') {
+                      if (!isAbsolute(source.input_path))
                         throw new Error('Input paths must be absolute');
-                      await authorizePath(principal.config.input_roots, args.source.input_path);
+                      await authorizePath(principal.config.input_roots, source.input_path);
                     }
                   }
                   if (closing || context.requestInfo?.signal.aborted)

@@ -352,13 +352,21 @@ export type ReferenceRecord = Internal<z.infer<typeof referenceSchema>>;
 export const NATIVE_SYMBOL_TABLES_FEATURE = 'Native symbol and export tables';
 /** Longest reviewed source text, in characters. */
 export const MAX_REVIEWED_SOURCE_CHARS = 262_144;
+/** A C identifier (type name / struct tag) of a user-declared type. */
+export const cIdentifierSchema = z
+  .string()
+  .max(1024)
+  .regex(/^[A-Za-z_][A-Za-z0-9_]*$/);
 const annotationKindSchemas = [
   z.strictObject({ kind: z.literal('name'), value: z.string().min(1).max(1024) }),
   z.strictObject({ kind: z.literal('note'), value: z.string().min(1).max(65536) }),
   z.strictObject({
     kind: z.literal('type'),
     type_id: entityIdSchema,
-    definition: typeDefinitionSchema,
+    /** Absent: binding only; `type_id` must resolve to a declared, library, durable or catalog type. */
+    definition: typeDefinitionSchema.optional(),
+    /** C spelling/tag: a named structure prints `struct <name>` with its declared field names. */
+    name: cIdentifierSchema.optional(),
   }),
   z.strictObject({ kind: z.literal('signature'), value: signatureSchema }),
 ] as const;

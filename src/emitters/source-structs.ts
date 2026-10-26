@@ -254,6 +254,22 @@ export class SourceStructs {
     return name;
   }
 
+  /** C spelling of a user-declared named structure (`struct Node`, `union Value`): a
+   * complete type name that needs no typedef. Undefined for every other structure. */
+  tag(id: string): string | undefined {
+    const record = this.records.get(id);
+    if (
+      (record?.source !== 'user' && record?.source !== 'llm') ||
+      record.definition.kind !== 'structure' ||
+      record.spelling === undefined ||
+      this.name(id) !== record.spelling
+    )
+      return undefined;
+    const { fields } = record.definition;
+    const union = fields.length > 1 && fields.every((field) => field.offset === 0n);
+    return `${union ? 'union' : 'struct'} ${record.spelling}`;
+  }
+
   private storage(id: string): { size: bigint; bits: number } | null {
     const record = this.records.get(id),
       type = record?.definition;

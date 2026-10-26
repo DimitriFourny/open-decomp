@@ -353,21 +353,29 @@ export function recoverTypes(
         status: annotation.status,
       });
       if (annotation.value.kind === 'type') {
-        const record: SuppliedTypeRecord = {
+        const definition = annotation.value.definition;
+        const record: SuppliedTypeRecord | undefined = definition && {
           id: annotation.value.type_id,
-          definition: annotation.value.definition,
+          definition,
           source: annotation.origin,
           status: annotation.status,
           evidence_ids: [proof],
+          ...(annotation.value.name === undefined
+            ? {}
+            : { spelling: annotation.value.name, member_names: true as const }),
         };
         // A function anchor declares a source type in scope; it does not give the
         // function itself a scalar machine type.
         if (annotation.entity_id === input.id) {
-          addType(record);
+          if (record) addType(record);
           continue;
         }
-        if (typeSubjects.has(annotation.entity_id)) addType(record);
-        else deferredTypes.push({ record, subject_id: annotation.entity_id });
+        // Without a definition the annotation only binds its subject to a type
+        // supplied elsewhere (a library, shared or durable declaration).
+        if (record) {
+          if (typeSubjects.has(annotation.entity_id)) addType(record);
+          else deferredTypes.push({ record, subject_id: annotation.entity_id });
+        }
         bindings.push({
           subject_id: annotation.entity_id,
           type_id: annotation.value.type_id,

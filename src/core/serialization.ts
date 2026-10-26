@@ -62,16 +62,19 @@ export function encodeTypeDefinition(value: RecoveredType): z.output<typeof type
 }
 export function decodeAnnotation(input: z.input<typeof annotationSchema>): Annotation {
   const value = annotationSchema.parse(input);
-  if (value.value.kind === 'type')
-    return {
-      ...value,
-      value: { ...value.value, definition: decodeTypeDefinition(value.value.definition) },
-    };
-  return { ...value, value: value.value };
+  if (value.value.kind !== 'type') return { ...value, value: value.value };
+  const { definition, ...binding } = value.value;
+  return {
+    ...value,
+    value:
+      definition === undefined
+        ? binding
+        : { ...binding, definition: decodeTypeDefinition(definition) },
+  };
 }
 export function encodeAnnotation(value: Annotation): z.output<typeof annotationSchema> {
   return annotationSchema.parse(
-    value.value.kind === 'type'
+    value.value.kind === 'type' && value.value.definition !== undefined
       ? {
           ...value,
           value: { ...value.value, definition: encodeTypeDefinition(value.value.definition) },
@@ -82,14 +85,19 @@ export function encodeAnnotation(value: Annotation): z.output<typeof annotationS
 export function decodeAnnotationEdit(input: z.input<typeof annotationEditSchema>): AnnotationEdit {
   const edit = annotationEditSchema.parse(input);
   if (edit.operation !== 'set') return edit;
-  const value = edit.value;
-  if (value.kind === 'type')
-    return { ...edit, value: { ...value, definition: decodeTypeDefinition(value.definition) } };
-  return { ...edit, value };
+  if (edit.value.kind !== 'type') return { ...edit, value: edit.value };
+  const { definition, ...binding } = edit.value;
+  return {
+    ...edit,
+    value:
+      definition === undefined
+        ? binding
+        : { ...binding, definition: decodeTypeDefinition(definition) },
+  };
 }
 export function encodeAnnotationEdit(edit: AnnotationEdit): z.output<typeof annotationEditSchema> {
   return annotationEditSchema.parse(
-    edit.operation === 'set' && edit.value.kind === 'type'
+    edit.operation === 'set' && edit.value.kind === 'type' && edit.value.definition !== undefined
       ? {
           ...edit,
           value: { ...edit.value, definition: encodeTypeDefinition(edit.value.definition) },

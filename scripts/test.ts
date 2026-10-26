@@ -27,6 +27,7 @@ const INTEGRATION = [
   'test/service/analysis/caller-result-use.test.ts',
   'test/service/analysis/native-summary.test.ts',
   'test/service/analysis/request-determinism.test.ts',
+  'test/service/analysis/type-library.test.ts',
   'test/service/likely-inference.test.ts',
   'test/workers/protocol.test.ts',
 ];
