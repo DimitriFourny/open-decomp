@@ -191,8 +191,12 @@ test(
     assert.match(sum, /total_t node_sum\(struct Node\* list\)/);
     assert.match(sum, /list->value/);
     assert.match(sum, /list = list->next;/);
+    // A declared structure is one C type: a function using one member prints all of them.
     const twice = (await decompile('node_twice')).emission.text;
-    assert.match(twice, /struct Node \{ int32_t value; \};/);
+    assert.match(
+      twice,
+      /struct Node \{ int32_t value; uint8_t pad_0x4\[4\]; struct Node\* next; \};/,
+    );
     assert.match(twice, /node_twice\(struct Node\* \w+\)/);
     assert.match(twice, /\w+->value/);
     assert.match((await decompile('node_sum', 'python-like')).emission.text, /pointer\[Node\]/);

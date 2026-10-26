@@ -3609,21 +3609,29 @@ export class Renderer {
 
   /** The declarations of the structures the finished text accesses, one entry per
    * structure: only the members it prints, never the image-wide layout, which stays
-   * in the types view / types.h. A structure the text never indexes stays an
-   * incomplete type. External text (`compact` false) keeps every offset as byte
-   * gaps (`uint8_t pad_0xN[K];`); compact (inline) text omits the gaps before members
-   * whose name states their offset (`field_0x14`), returning them in `gaps`: only a
-   * declared member name (an Objective-C ivar) keeps its pad, as the name does not
-   * carry the offset. The access stride comment states what a trailing pad would. */
+   * in the types view / types.h. A user-declared named structure (`types_declare`, a
+   * named type annotation, a bound image type) is one C type: every function that
+   * mentions it prints its whole declaration, the same text everywhere. A structure
+   * the text never indexes otherwise stays an incomplete type. External text
+   * (`compact` false) keeps every offset as byte gaps (`uint8_t pad_0xN[K];`); compact
+   * (inline) text omits the gaps before members whose name states their offset
+   * (`field_0x14`), returning them in `gaps`: a declared member name (an Objective-C
+   * ivar, a user declaration) keeps its pad, as the name does not carry the offset.
+   * The access stride comment states what a trailing pad would. */
   private structureBodies(compact: boolean): StructureBody[] {
     const bodies: StructureBody[] = [];
     for (const id of this.structureSlot?.ids ?? []) {
       this.context.checkpoint(1);
       const members = this.partialLayout(id);
       if (!members) continue;
+      const record = this.typeRecords.get(id);
+      const tag =
+        record?.source === 'user' || record?.source === 'llm'
+          ? this.sourceStructs.tag(id)
+          : undefined;
       const name = this.sourceStructs.name(id),
         used = this.usedMembers.get(name);
-      if (!used) continue;
+      if (!used && !tag) continue;
       const parts: string[] = [],
         lines: string[] = [],
         gaps: StructureBody['gaps'][number][] = [];
@@ -3650,8 +3658,8 @@ export class Renderer {
         // both print as one anonymous union only when the text uses both.
         const partner = member.overlaid && !member.float ? members[index + 1] : undefined;
         if (partner) index++;
-        const printed = [member, ...(partner ? [partner] : [])].filter((item) =>
-          used.has(usedMemberKey(item)),
+        const printed = [member, ...(partner ? [partner] : [])].filter(
+          (item) => tag !== undefined || used?.has(usedMemberKey(item)),
         );
         if (!printed.length) continue;
         // A member named by its offset states where it is: compact text omits the gap.
@@ -3685,7 +3693,7 @@ export class Renderer {
       else if (image?.conflicts.length)
         lines.push(`/* conflicts with ${image.conflicts.join(', ')} */`);
       lines.push(
-        `struct ${name} { ${parts.join(' ')} }${packed ? ' __attribute__((packed))' : ''};`,
+        `${tag ?? `struct ${name}`} { ${parts.join(' ')} }${packed ? ' __attribute__((packed))' : ''};`,
       );
       bodies.push({ name, lines, gaps });
     }

@@ -145,16 +145,24 @@ test(
     const recSignature = newIdentity('annotation');
     await apply([signature(recSignature, 'rec_id', typeOf('Rec*'), typeOf('int32_t'))]);
 
-    // rec_kind carries no annotation: the binding through the shared class names it.
+    // rec_kind carries no annotation: the binding through the shared class names it. The
+    // declared structure is one C type: every function prints the whole declaration.
+    const declaration = 'struct Rec { int32_t id; int32_t kind; int64_t size; double weight; };';
+    const declarations = (text: string) =>
+      text.split('\n').filter((line) => line.startsWith('struct Rec '));
     const bound = await decompile('rec_kind');
     assert.equal(bound.cache, 'computed');
-    assert.match(bound.text, /struct Rec \{ uint8_t pad_0x0\[4\]; int32_t kind; \};/);
+    assert.deepEqual(declarations(bound.text), [declaration], bound.text);
     assert.match(bound.text, /rec_kind\(struct Rec\* (\w+)\)/);
     assert.match(bound.text, /\w+->kind/);
     assert.doesNotMatch(bound.text, label);
     const size = await decompile('rec_size');
+    assert.deepEqual(declarations(size.text), [declaration], size.text);
     assert.match(size.text, /rec_size\(struct Rec\* \w+\)/);
     assert.match(size.text, /return \w+->size;/);
+    const own = await decompile('rec_id');
+    assert.deepEqual(declarations(own.text), [declaration], own.text);
+    assert.match(own.text, /rec_id\(struct Rec\* record\)/);
     const types = await service.execute('binary_info', {
       project_id,
       revision,
@@ -212,6 +220,7 @@ test(
     const mismatched = await decompile('rec_kind');
     assert.equal(mismatched.cache, 'computed');
     assert.match(mismatched.text, /rec_kind\(struct Rec\* (\w+)\)/);
+    assert.deepEqual(declarations(mismatched.text), ['struct Rec { int64_t id; int64_t size; };']);
     assert.match(mismatched.text, /\*\(uint32_t \*\)\(\(uintptr_t\)\w+ \+ 4\)/);
     assert.doesNotMatch(mismatched.text, /->kind/);
     assert.ok(

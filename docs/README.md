@@ -234,7 +234,7 @@ Private, nonoverlapping, definitely initialized stack slots permit spill forward
 
 The development root API exports neutral `EmissionInput` / `EmissionResult` from `src/emitters/model.ts`, `CEmitter` / `emitC` / `C_EMITTER_VERSION`, and `PythonLikeEmitter` / `emitPythonLike` / `PYTHON_LIKE_EMITTER_VERSION`. Both entrypoints invoke the same reconstruction and renderer. Cache identities bind the full selected `Target` (format, ISA, ABI, endian, address width and features), image/slice, component versions, revisions, function, options and budgets, including selected emitter/version; mismatched payload language/version is rejected.
 
-Current emitter identities are `reconstructed-c-109` and `reconstructed-python-like-103`; the composed analysis version (`src/service/analysis/versions.ts`) includes `pipeline/28` and `reconstruction/98`, invalidating earlier artifacts for new requests. Versioned cache invalidation is not automatic native-image reparsing.
+Current emitter identities are `reconstructed-c-110` and `reconstructed-python-like-103`; the composed analysis version (`src/service/analysis/versions.ts`) includes `pipeline/28` and `reconstruction/98`, invalidating earlier artifacts for new requests. Versioned cache invalidation is not automatic native-image reparsing.
 
 HTTP embedding exposes `startHttpServer` / `HttpServerHandle` and `loadHttpConfig` / `HttpConfig`; these are transport entry points, not a new public analysis protocol. `HttpServerHandle` reports the bound `url` and an idempotent asynchronous `close()`; trusted embedding-only worker options are never network configuration.
 
