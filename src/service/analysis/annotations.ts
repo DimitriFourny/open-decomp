@@ -17,6 +17,7 @@ import { readAnnotationCatalog } from '../../project/cache/index.js';
 import { MAX_FRAME_BYTES } from '../../workers/protocol.js';
 import { closeEvidence, evidenceReferences } from './catalog.js';
 import type { AnalysisScope } from './index.js';
+import { reviewedSourceBase } from './reviewed-source.js';
 import { acceptsAnalysisIdentity } from './versions.js';
 
 /** Wire validation and terminal job save are part of the same rollback boundary
@@ -164,6 +165,7 @@ export async function executeAnnotations(
         published_revision: null,
       });
     },
+    reviewedSourceBase(store, args.expected_revision, context),
   );
   if (mutation.state === 'committed') {
     if (!committed)

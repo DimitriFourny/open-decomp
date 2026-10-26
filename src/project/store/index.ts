@@ -1066,7 +1066,9 @@ export class SqliteProjectStore implements ProjectStore {
     return this.transaction(batch.expected_revision, (tx) => {
       const revision = nextRevision(batch.expected_revision);
       for (const edit of batch.edits) {
-        if (edit.operation === 'set')
+        if (edit.operation === 'set') {
+          if (edit.value.kind === 'source')
+            fail('invalid_input', 'Reviewed source requires a validated base artifact');
           tx.setAnnotation({
             id: edit.id,
             entity_id: edit.entity_id,
@@ -1077,7 +1079,7 @@ export class SqliteProjectStore implements ProjectStore {
             origin: batch.origin,
             revision,
           });
-        else if (edit.operation === 'remove')
+        } else if (edit.operation === 'remove')
           tx.removeAnnotation(edit.id, { author: batch.author, origin: batch.origin });
         else {
           const row = this.#latest('annotations', edit.id, batch.expected_revision);

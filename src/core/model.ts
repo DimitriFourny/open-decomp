@@ -11,6 +11,7 @@ import {
   capabilitySchema,
   digestSchema,
   annotationIdSchema,
+  artifactIdSchema,
   revisionSchema,
   type Target,
   type Evidence,
@@ -349,7 +350,9 @@ export type ReferenceRecord = Internal<z.infer<typeof referenceSchema>>;
 /** A loader that emits this format capability reports the completeness of its native symbol and
  * export tables independently of unrelated metadata (unwind, CFI, relocations). */
 export const NATIVE_SYMBOL_TABLES_FEATURE = 'Native symbol and export tables';
-export const annotationValueSchema = z.discriminatedUnion('kind', [
+/** Longest reviewed source text, in characters. */
+export const MAX_REVIEWED_SOURCE_CHARS = 262_144;
+const annotationKindSchemas = [
   z.strictObject({ kind: z.literal('name'), value: z.string().min(1).max(1024) }),
   z.strictObject({ kind: z.literal('note'), value: z.string().min(1).max(65536) }),
   z.strictObject({
@@ -358,6 +361,34 @@ export const annotationValueSchema = z.discriminatedUnion('kind', [
     definition: typeDefinitionSchema,
   }),
   z.strictObject({ kind: z.literal('signature'), value: signatureSchema }),
+] as const;
+const sha256HexSchema = z.string().regex(/^[0-9a-f]{64}$/);
+const reviewedSourceFields = {
+  kind: z.literal('source'),
+  language: z.enum(['c-like', 'python-like']),
+  text: z.string().min(1).max(MAX_REVIEWED_SOURCE_CHARS),
+};
+/** Reviewed (cleaned) source of one function, kept next to the decompiler output and never an
+ * analysis input. The client names the artifact it cleaned (a full ID or a unique prefix of at
+ * least 12 hex digits); the server resolves it and records the artifact's text digest. */
+const sourceEditValueSchema = z.strictObject({
+  ...reviewedSourceFields,
+  base_artifact_id: z.string().regex(/^artifact_[0-9a-f]{12,64}$/),
+});
+const sourceStoredValueSchema = z.strictObject({
+  ...reviewedSourceFields,
+  base_artifact_id: artifactIdSchema,
+  /** SHA-256 of the base artifact's emission text, computed by the server at apply time. */
+  base_text_sha256: sha256HexSchema,
+});
+export const annotationValueSchema = z.discriminatedUnion('kind', [
+  ...annotationKindSchemas,
+  sourceStoredValueSchema,
+]);
+/** What a client may submit: `base_text_sha256` is server-computed and cannot be forged. */
+export const annotationEditValueSchema = z.discriminatedUnion('kind', [
+  ...annotationKindSchemas,
+  sourceEditValueSchema,
 ]);
 export const annotationSchema = z.strictObject({
   id: annotationIdSchema,
@@ -374,13 +405,15 @@ export const annotationEditSchema = z.discriminatedUnion('operation', [
     operation: z.literal('set'),
     id: annotationIdSchema,
     entity_id: entityIdSchema,
-    value: annotationValueSchema,
+    value: annotationEditValueSchema,
     status: z.enum(['hypothesis', 'asserted']),
     evidence_ids: evidenceRefsSchema,
   }),
   z.strictObject({ operation: z.literal('retract'), id: annotationIdSchema }),
   z.strictObject({ operation: z.literal('remove'), id: annotationIdSchema }),
 ]);
+/** The client form of a reviewed source (before the server resolves its base artifact). */
+export type ReviewedSourceEdit = z.infer<typeof sourceEditValueSchema>;
 export type Annotation = Internal<z.infer<typeof annotationSchema>>;
 export type AnnotationEdit = Internal<z.infer<typeof annotationEditSchema>>;
 export type RecoveredType = Internal<z.infer<typeof typeDefinitionSchema>>;

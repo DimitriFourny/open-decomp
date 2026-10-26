@@ -1,4 +1,4 @@
-import { caveats } from '../core/index.js';
+import { REVIEWED_SOURCE_NOTICE, caveats } from '../core/index.js';
 import type { ToolResult, WireArtifact } from '../core/index.js';
 import { shortIds } from './listing.js';
 
@@ -54,9 +54,18 @@ export function decompileText(
         ]),
     ...caveats(result.diagnostics).map((item) => item.text),
   ];
+  const reviewed = data.reviewed_source;
+  // Reviewed source requested but not delivered: say so beside the decompiler's own caveats.
+  if (reviewed === null)
+    notes.push(
+      result.diagnostics
+        .find((item) => item.message.startsWith(REVIEWED_SOURCE_NOTICE))
+        ?.message.slice(REVIEWED_SOURCE_NOTICE.length) ??
+        'no reviewed source saved for this function',
+    );
   const head = [
     `${comment} ${name}${entry === null ? '' : ` @ ${entry}`} | ${state}${reason === undefined ? '' : `(${reason})`}`,
-    ...(withheld === undefined
+    ...(withheld === undefined || reviewed
       ? []
       : [
           `pseudocode not inlined (${withheld === 'requested' ? 'delivery:artifact requested' : 'exceeds the MCP delivery bound'})`,
@@ -64,6 +73,15 @@ export function decompileText(
     ...(artifact ? [shortArtifactId(artifact.id)] : []),
   ].join(' | ');
   const lines = [head];
+  if (reviewed) {
+    // The reviewed text replaces the pseudocode; the decompiler's caveats describe the latter.
+    const marker = reviewed.language === 'python-like' ? '#' : '//';
+    lines.push(
+      `${marker} reviewed: ${reviewed.author} (${reviewed.origin}) | ${reviewed.stale ? `stale vs ${shortArtifactId(reviewed.base_artifact_id)}` : 'current'}`,
+      reviewed.text,
+    );
+    return lines.join('\n');
+  }
   if (notes.length) lines.push(`${comment} caveats: ${notes.join('; ')}`);
   if (pseudocode !== undefined) lines.push(pseudocode);
   return lines.join('\n');

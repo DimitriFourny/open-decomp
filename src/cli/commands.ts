@@ -27,6 +27,7 @@ interface Arguments {
   inference?: 'proven' | 'likely';
   out?: string;
   jobs?: number;
+  source?: 'decompiled' | 'reviewed';
 }
 type ParsedArguments = Arguments | { help: Command };
 type FunctionsResult = ToolResult<'functions_find'>;
@@ -43,7 +44,7 @@ const cacheOptions =
 const usage = {
   functions: `open-decomp functions BINARY [--name TEXT] [--json] ${cacheOptions} ${settingsOption}`,
   decompile: `open-decomp decompile BINARY (--function NAME | --id ID | --address va:0x.../rva:0x.../file:0x...) [--language c-like|python-like] [--view source|checked] [--inference proven|likely] [--json] ${cacheOptions} ${settingsOption}`,
-  export: `open-decomp export BINARY --out DIR [--language c-like|python-like] [--inference proven|likely] [--jobs N] [--name SUBSTRING] ${cacheOptions} ${settingsOption}`,
+  export: `open-decomp export BINARY --out DIR [--language c-like|python-like] [--inference proven|likely] [--source decompiled|reviewed] [--jobs N] [--name SUBSTRING] ${cacheOptions} ${settingsOption}`,
   types: `open-decomp types BINARY [--json] ${cacheOptions} ${settingsOption}`,
 } as const;
 
@@ -133,7 +134,7 @@ function parse(args: readonly string[]): ParsedArguments {
     ...(command === 'functions'
       ? ['--name']
       : command === 'export'
-        ? ['--name', '--out', '--language', '--inference', '--jobs']
+        ? ['--name', '--out', '--language', '--inference', '--source', '--jobs']
         : command === 'decompile'
           ? ['--function', '--id', '--address', '--language', '--view', '--inference']
           : []),
@@ -216,6 +217,12 @@ function parse(args: readonly string[]): ParsedArguments {
     if (language !== undefined) result.emitter = emitterOption(language);
     const inference = values.get('--inference');
     if (inference !== undefined) result.inference = inferenceOption(inference);
+    const source = values.get('--source');
+    if (source !== undefined) {
+      if (source !== 'decompiled' && source !== 'reviewed')
+        throw new UsageError('--source must be decompiled or reviewed');
+      result.source = source;
+    }
     const jobs = values.get('--jobs');
     if (jobs !== undefined) {
       if (!/^[1-9][0-9]{0,2}$/.test(jobs) || Number(jobs) > 32)
@@ -262,7 +269,7 @@ function help(command: Command): void {
       command === 'functions'
         ? 'List every matching function; --name performs a case-insensitive substring search.\nJSON result is {pages:[...]} with the original schema envelope for each page.'
         : command === 'export'
-          ? 'Decompile every function in one process into a directory an agent can grep:\n  OUT/functions/NAME@0xADDR.c|.py  header comment + the pseudocode `decompile` prints\n  OUT/functions/NAME@0xADDR.asm    compact disassembly where decompilation failed (reason in header)\n  OUT/index.tsv  OUT/strings.tsv  OUT/imports.tsv  OUT/exports.tsv  OUT/README.txt\n--out DIR      Output directory (created; generated files are overwritten on re-run).\n--language     c-like (default) or python-like.\n--inference    proven (default) or likely: likely also closes open argument lists by gated heuristics; each guess is marked `likely_arity(...)` and recorded as a guess inference.\n--jobs N       Request workers decompiling in parallel over one shared read-only snapshot of the project (default min(4, CPUs/2)); the files are identical for every N.\n--name TEXT    Only functions whose name contains TEXT (case-insensitive).\nPartial and failed functions are recorded in index.tsv and do not change the exit status.'
+          ? 'Decompile every function in one process into a directory an agent can grep:\n  OUT/functions/NAME@0xADDR.c|.py  header comment + the pseudocode `decompile` prints\n  OUT/functions/NAME@0xADDR.asm    compact disassembly where decompilation failed (reason in header)\n  OUT/index.tsv  OUT/strings.tsv  OUT/imports.tsv  OUT/exports.tsv  OUT/README.txt\n--out DIR      Output directory (created; generated files are overwritten on re-run).\n--language     c-like (default) or python-like.\n--inference    proven (default) or likely: likely also closes open argument lists by gated heuristics; each guess is marked `likely_arity(...)` and recorded as a guess inference.\n--source       decompiled (default): the decompiler output for every function. reviewed: a function with a saved reviewed source (annotations_apply kind "source") is written from it, with a header comment naming its author, origin, base artifact and whether it is current or stale; other functions keep the decompiler output.\n--jobs N       Request workers decompiling in parallel over one shared read-only snapshot of the project (default min(4, CPUs/2)); the files are identical for every N.\n--name TEXT    Only functions whose name contains TEXT (case-insensitive).\nPartial and failed functions are recorded in index.tsv and do not change the exit status.'
           : command === 'decompile'
             ? 'Decompile one exact, unambiguous function name, entity ID or address.\nText stdout contains only pseudocode; JSON preserves the result envelope.\n--inference proven|likely  proven (default) closes only established interfaces; likely also closes open argument lists by gated heuristics (each guess is marked `likely_arity(...)` and recorded as a guess inference; may be wrong).'
             : 'Print the image-wide merged structure types as C declarations (the names decompile uses).\nAnalyzes function bodies within the default budget; a partial result exits 2.'
@@ -428,12 +435,13 @@ export async function runAnalysisCli(args: readonly string[]): Promise<void> {
           inference: parsed.inference ?? settings.decompile.inference,
           jobs: exportWorkers,
           name: parsed.name,
+          source: parsed.source,
         },
         controller.signal,
         (message) => process.stderr.write(`${terminal(message)}\n`),
       );
       process.stderr.write(
-        `export: wrote ${summary.files} files, ${summary.bytes} bytes to ${terminal(parsed.out!)}: ${summary.functions} functions (${summary.complete} complete, ${summary.partial} partial, ${summary.failed} failed)${summary.incompleteIndexes.length === 0 ? '' : `; incomplete indexes (lists are lower bounds): ${summary.incompleteIndexes.join(', ')}`}\n`,
+        `export: wrote ${summary.files} files, ${summary.bytes} bytes to ${terminal(parsed.out!)}: ${summary.functions} functions (${summary.complete} complete, ${summary.partial} partial, ${summary.failed} failed)${parsed.source === 'reviewed' ? `, ${summary.reviewed} from reviewed source` : ''}${summary.incompleteIndexes.length === 0 ? '' : `; incomplete indexes (lists are lower bounds): ${summary.incompleteIndexes.join(', ')}`}\n`,
       );
     } else {
       const result = await session.decompile(parsed.selector!, {

@@ -113,6 +113,7 @@ export class QueryService {
       const asynchronous =
         (operation === 'project_open' &&
           'source' in args &&
+          typeof args.source === 'object' &&
           args.source.kind === 'import' &&
           !args.wait) ||
         (operation === 'function_decompile' && 'wait' in args && args.wait === false);

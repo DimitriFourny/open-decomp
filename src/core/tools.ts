@@ -34,6 +34,7 @@ import {
   DEFAULT_ANALYSIS_OPTIONS,
   pageRequestSchema,
   artifactSchema,
+  annotationIdSchema,
 } from './primitives.js';
 import {
   imageSummarySchema,
@@ -52,6 +53,7 @@ import {
   annotationEditSchema,
   annotationSchema,
   lineageSchema,
+  MAX_REVIEWED_SOURCE_CHARS,
 } from './model.js';
 import { instructionSchema, cfgBlockSchema } from './decoder.js';
 import type { Internal } from './primitives.js';
@@ -429,6 +431,14 @@ export const functionDecompileArgsSchema = z.strictObject({
    * short bounded time and otherwise returns the job. */
   wait: z.union([z.boolean(), z.literal('auto')]).default(false),
   delivery: z.enum(['auto', 'artifact']).default('auto'),
+  /** Which text a caller wants: the decompiler output, or the function's reviewed source
+   * delivered beside it (`reviewed_source`). Delivery only; never part of cache identity. */
+  source: z
+    .enum(['decompiled', 'reviewed'])
+    .default('decompiled')
+    .describe(
+      "reviewed: also deliver the function's unique asserted reviewed source for options.emitter (reviewed_source, null when none) and show it instead of the pseudocode; decompiled (default): the decompiler output only",
+    ),
   options: analysisOptionsSchema.default(DEFAULT_ANALYSIS_OPTIONS),
 });
 export const xrefsGetArgsSchema = z.strictObject({
@@ -1090,6 +1100,22 @@ export const functionsFindResultSchema = resultSchema(
   z.strictObject({ items: z.array(functionSchema).max(1000), page: pageInfoSchema }),
 );
 export const functionGetResultSchema = resultSchema(functionGetDataSchema);
+/** Info diagnostics explaining why no reviewed source is delivered start with this prefix. */
+export const REVIEWED_SOURCE_NOTICE = 'Reviewed source not delivered: ';
+/** The reviewed (cleaned) source of a function, delivered beside its decompilation when the request
+ * asks `source: 'reviewed'`. `stale`: the current emission text is not the text the reviewer cleaned. */
+export const reviewedSourceSchema = z.strictObject({
+  annotation_id: annotationIdSchema,
+  language: z.enum(['c-like', 'python-like']),
+  text: z.string().min(1).max(MAX_REVIEWED_SOURCE_CHARS),
+  author: z.string().min(1).max(1024),
+  origin: z.enum(['user', 'llm']),
+  status: z.literal('asserted'),
+  revision: revisionSchema,
+  base_artifact_id: artifactSchema.shape.id,
+  stale: z.boolean(),
+});
+export type ReviewedSource = z.infer<typeof reviewedSourceSchema>;
 export const functionDecompileResultSchema = resultSchema(
   z.discriminatedUnion('delivery', [
     z.strictObject({
@@ -1103,6 +1129,7 @@ export const functionDecompileResultSchema = resultSchema(
        * `hit` reports the cost of serving the stored result, not of the run that computed it.
        * Absent from stored analyses; never part of cache identity or the emission. */
       work: z.number().int().nonnegative().optional(),
+      reviewed_source: reviewedSourceSchema.nullable().optional(),
     }),
     z.strictObject({
       delivery: z.literal('artifact'),
@@ -1114,6 +1141,7 @@ export const functionDecompileResultSchema = resultSchema(
        * `hit` reports the cost of serving the stored result, not of the run that computed it.
        * Absent from stored analyses; never part of cache identity or the emission. */
       work: z.number().int().nonnegative().optional(),
+      reviewed_source: reviewedSourceSchema.nullable().optional(),
     }),
   ]),
 ).superRefine((result, context) => {
@@ -1163,6 +1191,9 @@ export function projectDecompilationArtifactResult(
         artifact_id: artifact.id,
         cache: result.data.cache,
         ...(result.data.work === undefined ? {} : { work: result.data.work }),
+        ...(result.data.reviewed_source === undefined
+          ? {}
+          : { reviewed_source: result.data.reviewed_source }),
       },
     });
   return functionDecompileResultSchema.parse({
@@ -1194,6 +1225,9 @@ export function projectDecompilationArtifactResult(
       artifact_id: artifact.id,
       cache: result.data.cache,
       ...(result.data.work === undefined ? {} : { work: result.data.work }),
+      ...(result.data.reviewed_source === undefined
+        ? {}
+        : { reviewed_source: result.data.reviewed_source }),
     },
   });
 }

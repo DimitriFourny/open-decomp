@@ -10,6 +10,8 @@ import { fileURLToPath } from 'node:url';
 import { openBinary } from '../../src/api/index.js';
 import type { BinarySession } from '../../src/api/index.js';
 import { exportBinary } from '../../src/cli/export.js';
+import { newIdentity } from '../../src/core/index.js';
+import { QueryService } from '../../src/service/queries/index.js';
 
 interface CommandOutput {
   code: number | null;
@@ -342,5 +344,108 @@ test(
       { name: 'AbortError' },
     );
     assert.ok(!(await readdir(out)).includes('index.tsv'));
+  },
+);
+
+test(
+  'export --source reviewed writes the saved reviewed source of the annotated function only',
+  { timeout: 300_000 },
+  async (t) => {
+    const root = await directory(t),
+      cache = join(root, 'cache');
+    const session = await openBinary(fixture, { cachePath: cache });
+    const page = await session.findFunctions({
+      query: { text: 'fixture_stack', match: 'exact', case_sensitive: true },
+    });
+    assert.ok('data' in page && page.data.items.length === 1);
+    const target = page.data.items[0]!;
+    const decompiled = await session.decompileFunction(target.id);
+    assert.ok('data' in decompiled && decompiled.data.delivery === 'inline');
+    const original = decompiled.data.emission.text;
+    const base = decompiled.artifacts[0]!.id;
+    const { projectPath, revision } = {
+      projectPath: session.projectPath,
+      revision: session.revision,
+    };
+    await session.close();
+
+    // The application API does not annotate; a service on the same project does.
+    const service = await QueryService.create({
+      authorized_roots: [root, resolve('fixtures/bin')],
+      max_workers: 1,
+      max_queued: 2,
+    });
+    t.after(() => service.close('cancel'));
+    const opened = await service.execute('project_open', {
+      wait: true,
+      source: { kind: 'resume', project_path: projectPath },
+    });
+    assert.ok('data' in opened && opened.revision === revision, JSON.stringify(opened));
+    const reviewed = 'uint32_t stack_plus_seven(uint32_t value) { return value + 7; }';
+    const applied = await service.execute('annotations_apply', {
+      project_id: opened.project_id!,
+      expected_revision: revision,
+      author: 'export-reviewer',
+      origin: 'llm',
+      edits: [
+        {
+          operation: 'set',
+          id: newIdentity('annotation'),
+          entity_id: target.id,
+          value: { kind: 'source', language: 'c-like', text: reviewed, base_artifact_id: base },
+          status: 'asserted',
+          evidence_ids: [],
+        },
+      ],
+    });
+    assert.ok('data' in applied, JSON.stringify(applied));
+    await service.close('cancel');
+
+    const out = join(root, 'out'),
+      plain = join(root, 'plain');
+    const result = await run([
+      'export',
+      fixture,
+      '--out',
+      out,
+      '--cache',
+      cache,
+      '--source',
+      'reviewed',
+    ]);
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stderr, /, 1 from reviewed source/);
+    const defaulted = await run(['export', fixture, '--out', plain, '--cache', cache]);
+    assert.equal(defaulted.code, 0, defaulted.stderr);
+
+    const rows = await indexRows(out);
+    const row = rows.find((candidate) => candidate.name === 'fixture_stack')!;
+    const text = await readFile(join(out, row.file), 'utf8');
+    const lines = text.split('\n');
+    assert.match(lines[0]!, /^\/\* fixture_stack @ 0x[0-9a-f]+ \| complete \|/);
+    assert.equal(
+      lines[1],
+      `/* reviewed source by export-reviewer (llm) | base artifact ${base} | current */`,
+    );
+    assert.equal(lines.slice(2).join('\n'), `${reviewed}\n`);
+    // Every other function, and the default export, hold the decompiler output.
+    const plainText = await readFile(join(plain, row.file), 'utf8');
+    assert.ok(plainText.includes(original));
+    assert.ok(!plainText.includes('reviewed source'));
+    const others = rows.filter((candidate) => candidate !== row);
+    assert.ok(others.length > 3);
+    for (const other of others)
+      assert.equal(
+        await readFile(join(out, other.file), 'utf8'),
+        await readFile(join(plain, other.file), 'utf8'),
+        other.name,
+      );
+    assert.match(
+      await readFile(join(out, 'README.txt'), 'utf8'),
+      /--source reviewed: 1 function file/,
+    );
+    const bogus = await run(['export', fixture, '--out', out, '--source', 'bogus']);
+    assert.equal(bogus.code, 1);
+    assert.match(bogus.stderr, /--source must be decompiled or reviewed/);
   },
 );
