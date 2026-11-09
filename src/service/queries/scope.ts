@@ -8,6 +8,8 @@ import type {
   StoredRecordKinds,
 } from '../../core/index.js';
 import { reconstructFunctionGraph, type QueryFunctionGraph } from './graphs.js';
+import { matchedNoreturn } from '../../metadata/library-signatures/contracts.js';
+import { libraryMatches } from '../../project/annotations/naming.js';
 import { queryFailure } from './shared.js';
 
 export type IndexState = 'complete' | 'partial' | 'not_started';
@@ -186,9 +188,38 @@ export function loadFunctionGraph(
       function: loaded.function,
       functions: indexed.functions,
       formatting,
+      noreturn_lookup: matchedNoreturnLookup(scope, revision, indexed.image, indexed.functions),
     },
     scope.context,
   );
+}
+
+const entriesOf = new WeakMap<readonly FunctionRecord[], Map<bigint, FunctionRecord>>();
+
+/** Whether a call target is a function a library signature match declares noreturn (`exit`,
+ * `abort`): reads that function's annotations only, so a graph depends on the annotations of
+ * the functions it calls, not on every annotation of the project. */
+function matchedNoreturnLookup(
+  scope: ReadScope,
+  revision: number,
+  image: LoadedImage,
+  functions: readonly FunctionRecord[],
+): (address: bigint) => readonly string[] | undefined {
+  let entries = entriesOf.get(functions);
+  if (!entries) {
+    entries = new Map(functions.map((fn) => [fn.entry.value, fn]));
+    entriesOf.set(functions, entries);
+  }
+  const byEntry = entries;
+  return (address) => {
+    const fn = byEntry.get(address);
+    if (!fn) return undefined;
+    const [match] = libraryMatches(
+      scope.store.readAnnotations(fn.id, revision),
+      new Map([[fn.id, fn.entry]]),
+    );
+    return match && matchedNoreturn(match, image.target.format);
+  };
 }
 
 /** Reuse the immutable native function/reference arrays already materialized for

@@ -46,6 +46,8 @@ const cache = new Map<
     readonly work: number;
     /** Per-process structures its discovery used, whose payments a reuse makes too. */
     readonly builds: readonly BuildUse[];
+    /** Call targets its traversal asked `noreturn_lookup` about: a reuse asks them again. */
+    readonly asked: readonly bigint[];
   }
 >();
 let cachedUnits = 0;
@@ -59,6 +61,7 @@ function retain(
   characters: number,
   work: number,
   builds: readonly BuildUse[],
+  asked: readonly bigint[],
 ): void {
   if (units > 8192 || characters > 1_048_576) return;
   const prior = cache.get(key);
@@ -78,7 +81,7 @@ function retain(
     cachedUnits -= removed.units;
     cachedCharacters -= removed.characters;
   }
-  cache.set(key, { graph, units, characters, work, builds });
+  cache.set(key, { graph, units, characters, work, builds, asked });
   cachedUnits += units;
   cachedCharacters += characters;
 }
@@ -97,6 +100,10 @@ export function reconstructFunctionGraph(
     readonly function: FunctionRecord;
     readonly functions: readonly FunctionRecord[];
     readonly formatting?: boolean;
+    /** Noreturn call targets beyond library imports (library signature matches at
+     * `revision`); asked per call target, and asked again for a cached graph so that the reads
+     * it makes are the same. */
+    readonly noreturn_lookup?: (address: bigint) => readonly string[] | undefined;
   },
   context: OperationContext,
 ): QueryFunctionGraph {
@@ -133,6 +140,7 @@ export function reconstructFunctionGraph(
   ) {
     replayBuilds(context, cached.builds);
     context.checkpoint(cached.work);
+    for (const address of cached.asked) input.noreturn_lookup?.(address);
     // Refresh the bounded graph LRU without retaining its image bytes.
     cache.delete(key);
     cache.set(key, cached);
@@ -156,6 +164,14 @@ export function reconstructFunctionGraph(
     ? new Map<string, { mnemonic: string; operands: string }>()
     : undefined;
   let presentationCharacters = 0;
+  const asked = new Set<bigint>();
+  const lookup = input.noreturn_lookup;
+  const noreturn_calls = lookup
+    ? new NoreturnCalls(prepared.noreturn_calls, (address) => {
+        asked.add(address);
+        return lookup(address);
+      })
+    : prepared.noreturn_calls;
   try {
     ({ value: discovery, builds } = recordBuilds(context, () =>
       discoverFunctions(
@@ -165,7 +181,7 @@ export function reconstructFunctionGraph(
           revision,
           index: prepared.index,
           selected_entry: fn.entry,
-          noreturn_calls: prepared.noreturn_calls,
+          noreturn_calls,
           preserved_registers: targetAbi(image.target)?.preserved ?? [],
         },
         measured,
@@ -261,7 +277,7 @@ export function reconstructFunctionGraph(
     // A structured request of the same function (a CFG after its listing) reuses the
     // traversal, charging what building it structured charges.
     const { presentations: _presentations, ...structured } = graph;
-    retain(keyOf(false), structured, units, characters, structuredWork, builds);
+    retain(keyOf(false), structured, units, characters, structuredWork, builds, [...asked]);
   }
   retain(
     key,
@@ -270,6 +286,26 @@ export function reconstructFunctionGraph(
     characters + presentationCharacters,
     work,
     builds,
+    [...asked],
   );
   return graph;
+}
+
+/** Noreturn call targets: the library imports', then whatever `lookup` adds (only `get` and
+ * `has` are asked by the traversal). */
+class NoreturnCalls extends Map<bigint, readonly string[]> {
+  constructor(
+    readonly base: ReadonlyMap<bigint, readonly string[]>,
+    readonly lookup: (address: bigint) => readonly string[] | undefined,
+  ) {
+    super();
+  }
+
+  override get(address: bigint): readonly string[] | undefined {
+    return this.base.get(address) ?? this.lookup(address);
+  }
+
+  override has(address: bigint): boolean {
+    return this.get(address) !== undefined;
+  }
 }

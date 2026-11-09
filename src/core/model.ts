@@ -395,6 +395,21 @@ const annotationKindSchemas = [
     name: cIdentifierSchema.optional(),
   }),
   z.strictObject({ kind: z.literal('signature'), value: signatureSchema }),
+  /** The function's body equals a library function's (a signature match): `library` names the
+   * signature library, `name` the function. It names the function unless a `name` annotation
+   * does; `contract` is the library declaration it implements, looked up as an import of
+   * `contract.name` from `contract.library` would be, and supplies its callers' contract. */
+  z.strictObject({
+    kind: z.literal('library_match'),
+    library: z.string().min(1).max(256),
+    name: z.string().min(1).max(1024),
+    contract: z
+      .strictObject({
+        library: z.string().min(1).max(1024),
+        name: z.string().min(1).max(1024),
+      })
+      .nullable(),
+  }),
 ] as const;
 const sha256HexSchema = z.string().regex(/^[0-9a-f]{64}$/);
 const reviewedSourceFields = {

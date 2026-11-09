@@ -79,6 +79,22 @@ export {
 } from './metadata/library-contracts/constant-names.js';
 export { CONSTANT_SETS, type ConstantSet } from './metadata/library-contracts/constants.js';
 export {
+  archiveMembers,
+  buildSignatureLibrary,
+  decodeSignatureLibrary,
+  encodeSignatureLibrary,
+  matchSignatures,
+  objectFunctions,
+  ObjectFormatError,
+  SignatureFormatError,
+  type LibraryMatch,
+  type MatchReport,
+  type MatchTarget,
+  type SignatureLibrary,
+  type SignatureSource,
+  type MatchedLibraryFunction,
+} from './metadata/library-signatures/index.js';
+export {
   recoverRuntimeMetadata,
   type RuntimeRecord,
   type RuntimeMetadata,
