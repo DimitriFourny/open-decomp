@@ -30,6 +30,7 @@ import {
 import { MachOLoader } from '../loaders/macho/index.js';
 import { peLoader } from '../loaders/pe/index.js';
 import { elfLoader } from '../loaders/elf/index.js';
+import { companionSymbols, recoverDebugInfo } from '../metadata/debug/index.js';
 import { SqliteProjectStore } from '../project/store/index.js';
 import {
   commandSchema,
@@ -98,6 +99,27 @@ export function workerDiagnostic(error: unknown): Diagnostic {
 }
 function fail(code: Diagnostic['code'], message: string): never {
   throw new OperationError({ code, severity: 'error', message, evidence_ids: [] });
+}
+/** Bounded read of an authorized, canonical regular file (no symlink follow). */
+function readAuthorizedInput(path: string, context: OperationContext): Buffer {
+  if (realpathSync(path) !== path)
+    fail('permission_denied', 'Authorized source path changed before child read');
+  const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.size > 512 * 1024 * 1024)
+      fail('resource_limit', 'Input must be a regular file of at most 512 MiB');
+    const raw = Buffer.allocUnsafe(stat.size);
+    for (let offset = 0; offset < raw.length;) {
+      context.checkpoint(1);
+      const count = readSync(fd, raw, offset, Math.min(1_048_576, raw.length - offset), offset);
+      if (!count) fail('invalid_input', 'Input changed while being read');
+      offset += count;
+    }
+    return raw;
+  } finally {
+    closeSync(fd);
+  }
 }
 const terminal = (job: Job): boolean => !['queued', 'running'].includes(job.state);
 
@@ -543,33 +565,7 @@ export function runProjectWorker(handler?: WorkerHandler, observer?: WorkerRunti
           }
           if (db.snapshot().images.length >= MAX_IMAGES)
             fail('resource_limit', 'Project image limit reached');
-          if (realpathSync(work.request.source_path) !== work.request.source_path)
-            fail('permission_denied', 'Authorized source path changed before child read');
-          const fd = openSync(
-            work.request.source_path,
-            constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
-          );
-          let raw: Buffer;
-          try {
-            const stat = fstatSync(fd);
-            if (!stat.isFile() || stat.size > 512 * 1024 * 1024)
-              fail('resource_limit', 'Input must be a regular file of at most 512 MiB');
-            raw = Buffer.allocUnsafe(stat.size);
-            for (let offset = 0; offset < raw.length;) {
-              context.checkpoint(1);
-              const count = readSync(
-                fd,
-                raw,
-                offset,
-                Math.min(1_048_576, raw.length - offset),
-                offset,
-              );
-              if (!count) fail('invalid_input', 'Input changed while being read');
-              offset += count;
-            }
-          } finally {
-            closeSync(fd);
-          }
+          const raw = readAuthorizedInput(work.request.source_path, context);
           const sha256 = contentHash(raw),
             bytes = new ImmutableBytes(raw),
             image_id = imageIdentity(sha256);
@@ -579,10 +575,34 @@ export function runProjectWorker(handler?: WorkerHandler, observer?: WorkerRunti
               : raw[0] === 0x7f && raw[1] === 0x45 && raw[2] === 0x4c && raw[3] === 0x46
                 ? elfLoader
                 : new MachOLoader();
-          const image = loader.load(
+          const loaded = loader.load(
             { bytes, sha256, image_id, slice_id: work.request.slice_id },
             context,
           );
+          let image: LoadedImage = loaded;
+          if (work.request.debug_path !== undefined) {
+            // The companion must match the image (UUID / build ID / debuglink CRC) now;
+            // every later recovery matches it again from the stored bytes.
+            const debugRaw = readAuthorizedInput(work.request.debug_path, context);
+            const companion = {
+              sha256: contentHash(debugRaw),
+              bytes: new ImmutableBytes(debugRaw),
+            };
+            const recovery = recoverDebugInfo(loaded, context, {
+              bytes: debugRaw,
+              artifact_id: `artifact_${companion.sha256}`,
+              expectedSha256: companion.sha256,
+            });
+            db.importCompanion(companion.bytes, companion.sha256);
+            // A stripped image gets the debug file's function and global names as symbols.
+            const declared = companionSymbols(loaded, recovery, context);
+            image = {
+              ...loaded,
+              companion,
+              symbols: [...loaded.symbols, ...declared.symbols],
+              evidence: [...loaded.evidence, ...declared.evidence],
+            };
+          }
           if (
             work.request.resume_only &&
             before.images.some(

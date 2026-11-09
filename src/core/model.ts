@@ -142,7 +142,23 @@ export const hintSchema = z.discriminatedUnion('kind', [
     evidence_ids: evidenceRefsSchema,
   }),
 ]);
+/** What debug recovery found for the image: embedded DWARF, a companion debug file imported
+ * with it (and how it matched), or none; counts of decoded records and leading diagnostics. */
+export const debugSummarySchema = z.strictObject({
+  source: z.enum(['none', 'embedded', 'companion']),
+  status: z.enum(['absent', 'complete', 'partial']),
+  matched_by: z.enum(['uuid', 'build-id', 'debuglink']).nullable(),
+  uuid: z.string().max(64).nullable(),
+  build_id: z.string().max(128).nullable(),
+  companion_sha256: digestSchema.nullable(),
+  functions: z.int().min(0),
+  types: z.int().min(0),
+  variables: z.int().min(0),
+  lines: z.int().min(0),
+  diagnostics: z.array(z.string().max(1024)).max(16),
+});
 export const imageSummarySchema = z.strictObject({
+  debug: debugSummarySchema.optional(),
   id: imageIdSchema,
   sha256: digestSchema,
   byte_length: hexU64Schema,
@@ -250,6 +266,14 @@ export interface LoadedImage {
   readonly evidence: readonly Evidence[];
   readonly diagnostics: readonly Diagnostic[];
   readonly capabilities: readonly z.infer<typeof capabilitySchema>[];
+  /** Separate debug file imported with the image (the DWARF file of a dSYM, an ELF
+   * `--only-keep-debug` file): part of the project's identity, matched to the image
+   * again by every debug recovery. Never a path; never looked up. */
+  readonly companion?: DebugCompanion;
+}
+export interface DebugCompanion {
+  readonly sha256: string;
+  readonly bytes: ImmutableBytes;
 }
 
 /** Recovered source types reference stable type IDs; these are not semantic IR value types. */

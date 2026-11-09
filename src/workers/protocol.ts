@@ -21,6 +21,8 @@ const pathSchema = z.string().min(1).max(32768);
 export const importRequestSchema = z.strictObject({
   kind: z.literal('import'),
   source_path: pathSchema,
+  /** Separate debug file imported with the image (dSYM DWARF file, ELF debug file). */
+  debug_path: pathSchema.optional(),
   slice_id: sliceIdSchema.nullable().default(null),
   resume_only: z.boolean().optional(),
   budget: budgetSchema,

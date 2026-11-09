@@ -81,6 +81,19 @@ interface Transfer {
   conditional: boolean;
 }
 
+/** Whether this function calls an import whose library declaration was withheld (a weak
+ * `__cxa_finalize` in every GCC PIE, for one). Other functions miss no declaration. */
+function libraryWithheld(options: TypeRecoveryOptions): boolean {
+  const library = options.library;
+  if (library?.state !== 'partial') return false;
+  if (library.withheld_imports === undefined) return true;
+  const withheld = new Set(library.withheld_imports);
+  return (options.resolutions ?? []).some(
+    (resolution) =>
+      resolution.target.kind === 'import' && withheld.has(resolution.target.import_id),
+  );
+}
+
 /** Bounded, nonrewriting source constraints over typed SSA. Supplied inputs are
  * the entire current revision, not deltas: retraction/removal therefore cannot
  * leave stale assertions in a cache. Names/notes/casts never create declarations.
@@ -324,6 +337,7 @@ export function recoverTypes(
     };
     const suppliedSignatures: SuppliedSignature[] = [...(options.signatures ?? [])];
     const bindings: TypeBinding[] = [...(options.bindings ?? [])];
+    let undeclaredEntry = false;
     for (const record of options.types ?? []) addType(record);
     for (const record of options.debug?.types ?? [])
       addType({ ...record, source: 'debug', status: 'established' });
@@ -346,7 +360,10 @@ export function recoverTypes(
     ) {
       for (const fn of options.debug?.functions ?? []) {
         budget.charge();
-        if (fn.dwarf.address === options.entry_address.value && fn.signature)
+        if (fn.dwarf.address !== options.entry_address.value) continue;
+        // Debug info declares this function but its contract was not decoded.
+        if (!fn.signature && !fn.conflicting) undeclaredEntry = true;
+        if (fn.signature)
           suppliedSignatures.push({
             id: fn.id,
             subject_id: input.id,
@@ -1561,6 +1578,27 @@ export function recoverTypes(
         list.push(signature);
       signatureGroups.set(signature.subject_id, list);
     }
+    // Signatures agree when their types do: scalars, pointers to and arrays of them compare
+    // by definition (a debug `uint32_t` and an asserted one are distinct IDs, one type);
+    // structures, unknowns and ambiguous IDs compare by identity.
+    const structural = (id: string, depth = 0): string => {
+      budget.charge();
+      const definitions = new Map(
+        (records.get(id) ?? []).map((record) => [typeKey(record.definition), record.definition]),
+      );
+      const definition = definitions.size === 1 ? [...definitions.values()][0]! : undefined;
+      if (!definition || depth > 8) return id;
+      if (definition.kind === 'pointer') return `pointer(${structural(definition.to, depth + 1)})`;
+      if (definition.kind === 'array')
+        return `array(${structural(definition.element, depth + 1)},${definition.count ?? '?'})`;
+      if (
+        definition.kind === 'integer' ||
+        definition.kind === 'float' ||
+        definition.kind === 'void'
+      )
+        return typeKey(definition);
+      return id;
+    };
     for (const list of signatureGroups.values()) {
       const keys = new Set(
         list
@@ -1568,8 +1606,8 @@ export function recoverTypes(
           .map((item) =>
             fingerprint([
               item.signature.abi,
-              item.signature.return_type,
-              item.signature.parameters.map((parameter) => parameter.type_id),
+              structural(item.signature.return_type),
+              item.signature.parameters.map((parameter) => structural(parameter.type_id)),
               item.signature.variadic,
               item.signature.noreturn,
             ]),
@@ -1627,9 +1665,13 @@ export function recoverTypes(
     }
     return {
       // Undecoded debug declarations could contradict local inference; a debug
-      // capability that is missing for an image without debug data hides nothing.
+      // capability that is missing for an image without debug data hides nothing. So
+      // do a debug record of this function whose contract was not decoded and a call
+      // to an import whose library declaration was withheld.
       state:
-        options.debug?.undecoded || options.library?.state === 'partial' ? 'partial' : 'complete',
+        options.debug?.undecoded || undeclaredEntry || libraryWithheld(options)
+          ? 'partial'
+          : 'complete',
       work: budget.work,
       subjects: [...subjects].sort(),
       types: [...records.values()]

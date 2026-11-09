@@ -132,7 +132,7 @@ export function variableLocationsAt(
             offset: displacement,
           });
           resolved = true;
-        } else if (location.kind === 'register-offset') {
+        } else if (location.kind === 'register-offset' || location.kind === 'cfa-offset') {
           const offset = location.offset + displacement;
           if (offset >= -(1n << 63n) && offset < 1n << 63n) {
             locations.push({ ...location, offset });
@@ -166,4 +166,45 @@ export function variableLocationsAt(
       evidence_ids: [],
     });
   return { variable, locations, conflicting, diagnostics };
+}
+
+/** Names of a concrete function's variables that live in one fixed stack home for their
+ * whole scope (unoptimized code): entry-SP-relative offset -> declared name. A variable
+ * qualifies with a single frame-relative storage claim through a DW_OP_call_frame_cfa
+ * frame base (or a CFA-relative location); `cfaFromEntry` is the ABI's CFA minus the
+ * entry stack pointer (8 on x86-64, where the call pushed the return address). A home
+ * that two variables claim (disjoint lexical blocks) names neither. Parameters are named
+ * by the signature, not here. */
+export function frameVariableNames(
+  data: DwarfData | null,
+  functionAddress: bigint,
+  cfaFromEntry: bigint,
+  context: OperationContext,
+): Map<bigint, string> {
+  context.checkpoint(0);
+  const names = new Map<bigint, string>(),
+    ambiguous = new Set<bigint>();
+  const fn = data?.functions.find((candidate) => candidate.address === functionAddress);
+  if (!data || !fn) return names;
+  const frameBase = fn.frameBase ?? [];
+  const cfaBase =
+    frameBase.length > 0 &&
+    frameBase.every(
+      (entry) => entry.location.kind === 'cfa-offset' && entry.location.offset === 0n,
+    );
+  for (const variable of data.variables ?? []) {
+    context.checkpoint(1);
+    if (variable.functionAddress !== functionAddress || variable.parameter) continue;
+    if (variable.locations.length !== 1 || !/^[A-Za-z_]\w{0,254}$/.test(variable.name)) continue;
+    const location = variable.locations[0]!.location;
+    let offset: bigint;
+    if (location.kind === 'cfa-offset') offset = location.offset + cfaFromEntry;
+    else if (location.kind === 'frame-offset' && cfaBase) offset = location.offset + cfaFromEntry;
+    else continue;
+    if (offset >= 0n) continue;
+    if (names.has(offset) && names.get(offset) !== variable.name) ambiguous.add(offset);
+    names.set(offset, variable.name);
+  }
+  for (const offset of ambiguous) names.delete(offset);
+  return names;
 }

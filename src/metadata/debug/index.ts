@@ -1,15 +1,20 @@
+import type { z } from 'zod';
 import {
   artifactIdSchema,
+  buildOnce,
   contentHash,
   entityIdentity,
   fingerprint,
   OperationError,
+  type debugSummarySchema,
   type Diagnostic,
   type Evidence,
   type LoadedImage,
   type OperationContext,
   type RecoveredType,
   type Signature,
+  type SymbolRecord,
+  useBuilt,
 } from '../../core/index.js';
 import {
   boundDebugOutput,
@@ -19,12 +24,17 @@ import {
   type DebugSignatureType,
   type DebugType,
   type DwarfData,
+  type DwarfSections,
 } from '../dwarf/index.js';
-import { selectDebugSections, type ImageHeaders } from './macho.js';
+import { selectElfDebugSections } from './elf.js';
+import { selectDebugSections } from './macho.js';
+export { debuglinkCrc, selectElfDebugSections } from './elf.js';
 export { selectDebugSections } from './macho.js';
-export { debugContextAt, variableLocationsAt } from './queries.js';
+export { debugContextAt, frameVariableNames, variableLocationsAt } from './queries.js';
 
-/** The host authorizes and stores this artifact before calling recovery. No path is accepted. */
+/** The host authorizes and stores this artifact before calling recovery. No path is accepted.
+ * Mach-O: the DWARF file of a dSYM (thin or universal). ELF: a separate debug file such as
+ * `objcopy --only-keep-debug` output. */
 export interface ExternalDebugInput {
   readonly bytes: Uint8Array;
   readonly artifact_id: string;
@@ -37,6 +47,38 @@ export interface DebugTypeRecord {
   readonly display_name: string;
   readonly definition: RecoveredType;
   readonly evidence_ids: readonly string[];
+  /** Declared tag or typedef name of a structure, or `union tag` / typedef name of a
+   * union (an `unknown` definition): printed names only, never structural keys. */
+  readonly spelling?: string;
+  /** Structure field names are the declared member names. */
+  readonly member_names?: true;
+}
+
+/** Source names a declaration gives its type: a struct's tag (or the typedef naming it,
+ * as the source spelled it at that use) with its member names; a union's tag. A
+ * qualifier (`const struct shape`) spells as what it qualifies. */
+function declaredSpelling(
+  type: DebugType,
+  recovered: RecoveredType,
+  raw: ReadonlyMap<string, DebugType>,
+): Pick<DebugTypeRecord, 'spelling' | 'member_names'> {
+  for (
+    let depth = 0;
+    depth < 16 && ['const', 'volatile', 'restrict', 'atomic'].includes(type.kind);
+    depth++
+  ) {
+    const target = type.targetTypeId === undefined ? undefined : raw.get(type.targetTypeId);
+    if (!target) return {};
+    type = target;
+  }
+  if (!/^[A-Za-z_]\w{0,254}$/.test(type.name)) return {};
+  if (recovered.kind === 'structure' && (type.kind === 'struct' || type.kind === 'class'))
+    return { spelling: type.name, member_names: true };
+  if (recovered.kind === 'structure' && type.kind === 'typedef')
+    return { spelling: type.name, member_names: true };
+  if (recovered.kind === 'unknown' && type.kind === 'union')
+    return { spelling: `union ${type.name}` };
+  return {};
 }
 export interface DebugFunctionRecord {
   readonly id: string;
@@ -48,11 +90,17 @@ export interface DebugFunctionRecord {
 export interface DebugRecovery {
   readonly status: 'absent' | 'complete' | 'partial';
   /** Debug data exists in the image or supplied artifact that this recovery did not
-   * decode. Its declarations are unknown, so local type inference cannot be checked
-   * against them. A partial status without undecoded data (an ELF image that has no
-   * DWARF sections) reports the missing capability without hiding any declaration. */
+   * decode (an unreadable unit, an unsupported compression, a malformed section table).
+   * Its declarations are unknown, so local type inference cannot be checked against them.
+   * Records that were decoded but have no structural representation (a union, a
+   * function type) are `unknown` types with diagnostics: status `partial`, not undecoded. */
   readonly undecoded: boolean;
+  /** Mach-O LC_UUID of the image (or matched dSYM). */
   readonly uuid: string | null;
+  /** ELF GNU build ID (lowercase hex) of the image or matched debug file. */
+  readonly build_id: string | null;
+  /** How a supplied debug artifact was matched; null for embedded debug data. */
+  readonly matched_by: 'uuid' | 'build-id' | 'debuglink' | null;
   readonly content_sha256: string;
   readonly data: DwarfData | null;
   readonly types: readonly DebugTypeRecord[];
@@ -60,66 +108,88 @@ export interface DebugRecovery {
   readonly evidence: readonly Evidence[];
   readonly diagnostics: readonly Diagnostic[];
 }
+interface DebugHeaders {
+  readonly little: boolean;
+  readonly sections: DwarfSections;
+  readonly diagnostics: readonly string[];
+  readonly uuid: string | null;
+  readonly build_id: string | null;
+  readonly matched_by: DebugRecovery['matched_by'];
+}
 
-/** Recover only supplied/embedded bytes. External UUID and exact CPU/subtype must match;
- * an optional host content pin must also match. Missing debug info is explicit absence.
+function emptyRecovery(
+  hash: string,
+  identity: Pick<DebugRecovery, 'uuid' | 'build_id' | 'matched_by'>,
+  diagnostics: Diagnostic[],
+  undecoded: boolean,
+): DebugRecovery {
+  return {
+    status: diagnostics.length ? 'partial' : 'absent',
+    undecoded,
+    ...identity,
+    content_sha256: hash,
+    data: null,
+    types: [],
+    functions: [],
+    evidence: [],
+    diagnostics,
+  };
+}
+
+/** Recover only supplied/embedded bytes. External identity must match exactly (Mach-O:
+ * UUID and CPU/subtype; ELF: GNU build ID, else the `.gnu_debuglink` CRC-32); an optional
+ * host content pin must also match. Missing debug info is explicit absence.
  * No filesystem traversal, source-file access, symbol servers or target execution.
  * Returned raw DIE IDs are local to data; core entity IDs include slice/content identity.
  * Display declarations never drive structural types or ABI contracts. Structures
  * retain known size/member offsets with null alignment when DW_AT_alignment is absent;
  * ABI consumers must not replace that missing fact with guessed natural alignment.
  * Bitfields/unions and subroutine types retain raw evidence with explicit diagnostics.
- * Overlapping concrete definitions have null core signatures and linked conflicts. */
+ * Overlapping concrete definitions have null core signatures and linked conflicts.
+ * The image's own recovery (embedded DWARF or its imported companion) is built once per
+ * loaded image (`buildOnce`): every operation pays its recorded cost, cached or not. */
 export function recoverDebugInfo(
   image: LoadedImage,
   context: OperationContext,
   external?: ExternalDebugInput,
 ): DebugRecovery {
+  if (external) return computeDebugInfo(image, context, external);
+  const cached = recoveries.get(image);
+  const result = cached
+    ? useBuilt(context, cached)
+    : buildOnce(context, 'debug-recovery', (quiet) => computeDebugInfo(image, quiet));
+  recoveries.set(image, result);
+  // The output bound is the caller's own; checking it again costs nothing extra.
+  if (cached) boundDebugOutput(result, { ...context, checkpoint: () => context.checkpoint(0) });
+  return result;
+}
+const recoveries = new WeakMap<LoadedImage, DebugRecovery>();
+
+function computeDebugInfo(
+  image: LoadedImage,
+  context: OperationContext,
+  external?: ExternalDebugInput,
+): DebugRecovery {
   context.checkpoint(0);
-  if (image.target.format === 'elf') {
-    const diagnostic: Diagnostic = {
-      code: 'unavailable_semantics',
-      severity: 'warning',
-      message:
-        'ELF DWARF recovery is unavailable; native symbols remain usable, but debug types, signatures and source locations are not recovered.',
-      evidence_ids: [],
+  // A companion imported with the image is the supplied artifact unless the caller passes one.
+  const companion = image.companion;
+  if (!external && companion)
+    external = {
+      bytes: companion.bytes.read(0n, companion.bytes.length),
+      artifact_id: `artifact_${companion.sha256}`,
+      expectedSha256: companion.sha256,
     };
-    if (external)
-      throw new OperationError({ ...diagnostic, code: 'unsupported_target', severity: 'error' });
-    return {
-      status: 'partial',
-      // Only embedded DWARF sections hold declarations this recovery leaves unread.
-      undecoded: image.sections.some(
-        (section) => section.kind === 'section' && /^\.z?debug_/.test(section.name),
-      ),
-      uuid: null,
-      content_sha256: image.sha256,
-      data: null,
-      types: [],
-      functions: [],
-      evidence: [],
-      diagnostics: [diagnostic],
-    };
-  }
-  if (image.target.format !== 'macho') {
+  const none = { uuid: null, build_id: null, matched_by: null } as const;
+  if (image.target.format !== 'macho' && image.target.format !== 'elf') {
     if (external)
       throw new OperationError({
         code: 'unsupported_target',
         severity: 'error',
-        message: 'External DWARF recovery requires a Mach-O image; PDB parsing is not implemented',
+        message:
+          'External debug recovery requires a Mach-O or ELF image; PDB parsing is not implemented',
         evidence_ids: [],
       });
-    return {
-      status: 'absent',
-      undecoded: false,
-      uuid: null,
-      content_sha256: image.sha256,
-      data: null,
-      types: [],
-      functions: [],
-      evidence: [],
-      diagnostics: [],
-    };
+    return emptyRecovery(image.sha256, none, [], false);
   }
   const slice = image.slices.find((candidate) => candidate.id === image.selected_slice_id);
   if (!slice)
@@ -152,27 +222,44 @@ export function recoverDebugInfo(
       evidence_ids: [],
     });
   const targetBytes = image.bytes.read(slice.offset, Number(slice.size));
-  let header: ImageHeaders;
+  let header: DebugHeaders;
   try {
-    header = selectDebugSections(targetBytes, context, external?.bytes);
+    if (image.target.format === 'macho') {
+      const macho = selectDebugSections(targetBytes, context, external?.bytes);
+      header = {
+        ...macho,
+        uuid: macho.uuid || null,
+        build_id: null,
+        matched_by: external ? 'uuid' : null,
+      };
+    } else {
+      const elf = selectElfDebugSections(targetBytes, context, external?.bytes);
+      header = {
+        little: true,
+        sections: elf.sections,
+        diagnostics: elf.diagnostics,
+        uuid: null,
+        build_id: elf.buildId,
+        matched_by: elf.matched_by,
+      };
+      if (!external && !elf.present) return emptyRecovery(hash, header, [], false);
+    }
   } catch (error) {
     if (error instanceof OperationError) throw error;
+    // Embedded ELF debug data is optional evidence: a malformed table hides its
+    // declarations but never fails an image the loader accepted.
+    if (image.target.format === 'elf' && !external)
+      return emptyRecovery(hash, none, [dwarfDiagnostic(`ELF debug data: ${String(error)}`)], true);
     throw new OperationError({ ...dwarfDiagnostic(String(error)), severity: 'error' });
   }
+  const identity = {
+    uuid: header.uuid,
+    build_id: header.build_id,
+    matched_by: header.matched_by,
+  };
   const diagnostics = header.diagnostics.map(dwarfDiagnostic);
-  if (!header.sections.get('__debug_info')?.length) {
-    return {
-      status: diagnostics.length ? 'partial' : 'absent',
-      undecoded: diagnostics.length > 0,
-      uuid: header.uuid || null,
-      content_sha256: hash,
-      data: null,
-      types: [],
-      functions: [],
-      evidence: [],
-      diagnostics,
-    };
-  }
+  if (!header.sections.get('__debug_info')?.length)
+    return emptyRecovery(hash, identity, diagnostics, diagnostics.length > 0);
   const parsed = parseDwarfSections(header.sections, context, { littleEndian: header.little });
   diagnostics.push(...parsed.diagnostics);
   const data = parsed.data;
@@ -180,7 +267,7 @@ export function recoverDebugInfo(
     return {
       status: parsed.status,
       undecoded: parsed.status === 'partial',
-      uuid: header.uuid || null,
+      ...identity,
       content_sha256: hash,
       data,
       types: [],
@@ -264,9 +351,15 @@ export function recoverDebugInfo(
     active.add(type.id);
     let result: RecoveredType = unknown;
     const target = type.targetTypeId ? raw.get(type.targetTypeId) : undefined;
-    if (['typedef', 'const', 'volatile', 'restrict', 'atomic'].includes(type.kind) && target)
-      result = definition(target, active);
-    else if (type.kind === 'base') {
+    if (['typedef', 'const', 'volatile', 'restrict', 'atomic'].includes(type.kind)) {
+      // A qualifier or typedef without DW_AT_type qualifies void (`const void`).
+      if (target) result = definition(target, active);
+      else if (type.targetTypeId === undefined) result = { kind: 'void' };
+    } else if (type.kind === 'enum' && target) {
+      // An enumeration is stored as its underlying integer type (DW_AT_type, DWARF 3+).
+      const underlying = definition(target, active);
+      if (underlying.kind === 'integer') result = underlying;
+    } else if (type.kind === 'base') {
       const bits = (type.byteSize ?? 0) * 8;
       if ([2, 5, 6, 7, 8].includes(type.encoding ?? 0) && bits > 0 && bits <= 512)
         result = { kind: 'integer', bits, signed: type.encoding === 5 || type.encoding === 6 };
@@ -327,7 +420,8 @@ export function recoverDebugInfo(
         };
       }
     }
-    if (result.kind === 'unknown')
+    // A typedef or qualifier of an unknown type repeats its target's diagnostic.
+    if (result.kind === 'unknown' && !(target && definitions.get(target.id)?.kind === 'unknown'))
       diagnostic(
         type.id,
         `Unsupported or incomplete structural DWARF ${type.kind} type; raw size/fields retained without inference from its name`,
@@ -335,14 +429,17 @@ export function recoverDebugInfo(
     definitions.set(type.id, result);
     return result;
   }
-  for (const type of data.types)
+  for (const type of data.types) {
+    const recovered = definition(type);
     types.push({
       id: ids(type.id),
       dwarf_id: type.id,
       display_name: type.name,
-      definition: definition(type),
+      definition: recovered,
       evidence_ids: [evidenceFor(type.id, 'Structural type recorded by DWARF')],
+      ...declaredSpelling(type, recovered, raw),
     });
+  }
   const signatureTypeId = (type: DebugSignatureType): string =>
     type.typeId && raw.has(type.typeId)
       ? ids(type.typeId)
@@ -467,8 +564,11 @@ export function recoverDebugInfo(
     evidenceFor('line-tables', 'Half-open source address intervals recorded by DWARF');
   const result: DebugRecovery = {
     status: diagnostics.length ? 'partial' : 'complete',
-    undecoded: diagnostics.length > 0,
-    uuid: header.uuid || null,
+    // Sections left unread (compression, relocations) or skipped units/DIEs hide
+    // declarations; unrepresentable types and functions without a supported contract
+    // are diagnosed records (see recoverTypes for the per-function consequence).
+    undecoded: header.diagnostics.length > 0 || data.undecoded === true,
+    ...identity,
     content_sha256: hash,
     data,
     types,
@@ -478,4 +578,155 @@ export function recoverDebugInfo(
   };
   boundDebugOutput(result, context);
   return result;
+}
+
+/** Function and global symbols a companion debug file declares where the image has none (a
+ * stripped image): functions at their DWARF entry, sized by a single contiguous range, and
+ * globals at their static DW_OP_addr. Each carries the debug record's evidence. Seeds and
+ * names discovery like any symbol; never replaces an image symbol. */
+export function companionSymbols(
+  image: LoadedImage,
+  recovery: DebugRecovery,
+  context: OperationContext,
+): { readonly symbols: SymbolRecord[]; readonly evidence: Evidence[] } {
+  const taken = new Set<bigint>();
+  for (const symbol of image.symbols)
+    if (symbol.address?.space === 'va' && (symbol.kind === 'function' || symbol.kind === 'object'))
+      taken.add(symbol.address.value);
+  const evidence = new Map(recovery.evidence.map((record) => [record.id, record]));
+  const symbols: SymbolRecord[] = [],
+    used = new Map<string, Evidence>();
+  const limit = Math.max(0, 100_000 - image.symbols.length);
+  const add = (
+    record: string,
+    name: string,
+    kind: 'function' | 'object',
+    address: bigint,
+    size: bigint | null,
+    proof: readonly string[],
+  ) => {
+    context.checkpoint(1);
+    if (symbols.length >= limit || taken.has(address) || !/^[\x21-\x7e]{1,4096}$/.test(name))
+      return;
+    const translated = image.address_map.translate(
+      { image_id: image.id, space: 'va', value: address },
+      'va',
+    );
+    // Code must be file-backed; a global may live in zero-fill storage (.bss).
+    if (translated.kind === 'unmapped' || (kind === 'function' && translated.kind !== 'mapped'))
+      return;
+    taken.add(address);
+    for (const id of proof) {
+      const item = evidence.get(id);
+      if (item) used.set(id, item);
+    }
+    symbols.push({
+      id: entityIdentity(image.selected_slice_id, 'debug-symbol', [
+        recovery.content_sha256,
+        record,
+      ]),
+      original_name: name,
+      display_name: null,
+      evidence_ids: [...proof],
+      kind,
+      address: { image_id: image.id, space: 'va', value: address },
+      size,
+      binding: 'unknown',
+    });
+  };
+  const typesById = new Map(recovery.types.map((record) => [record.id, record.definition]));
+  const typesByDwarf = new Map(
+    recovery.types.flatMap((record) => (record.dwarf_id ? [[record.dwarf_id, record.id]] : [])),
+  );
+  // Byte size of a debug type, when every part of it is established.
+  const extent = (id: string, depth = 0): bigint | null => {
+    const definition = typesById.get(id);
+    if (!definition || depth > 32) return null;
+    switch (definition.kind) {
+      case 'integer':
+      case 'float':
+      case 'pointer':
+        return definition.bits % 8 ? null : BigInt(definition.bits / 8);
+      case 'structure':
+      case 'unknown':
+        return definition.size;
+      case 'array': {
+        const element = extent(definition.element, depth + 1);
+        return element === null || definition.count === null ? null : element * definition.count;
+      }
+      default:
+        return null;
+    }
+  };
+  for (const fn of recovery.functions) {
+    if (fn.conflicting) continue;
+    const ranges = fn.dwarf.ranges ?? [];
+    add(
+      fn.dwarf.id,
+      fn.dwarf.name,
+      'function',
+      fn.dwarf.address,
+      ranges.length === 1 ? ranges[0]!.end - ranges[0]!.start : null,
+      fn.evidence_ids,
+    );
+  }
+  for (const variable of recovery.data?.variables ?? []) {
+    const location = variable.locations.length === 1 ? variable.locations[0]!.location : null;
+    if (variable.functionAddress !== undefined || location?.kind !== 'address') continue;
+    // The evidence id recoverDebugInfo gave this variable's record.
+    const proof = `evidence_${fingerprint([image.selected_slice_id, recovery.content_sha256, variable.id])}`;
+    const type = variable.typeId === undefined ? undefined : typesByDwarf.get(variable.typeId);
+    add(variable.id, variable.name, 'object', location.address, type ? extent(type) : null, [
+      proof,
+    ]);
+  }
+  return { symbols, evidence: [...used.values()] };
+}
+
+/** The `binary_info` summary of the image's debug information. Cancellation and budget
+ * limits fail it; any other recovery error is reported as a partial summary. */
+export function debugSummary(
+  image: LoadedImage,
+  context: OperationContext,
+): z.infer<typeof debugSummarySchema> {
+  const source = image.companion ? 'companion' : 'embedded';
+  let recovery: DebugRecovery;
+  try {
+    recovery = recoverDebugInfo(image, context);
+  } catch (error) {
+    if (
+      !(error instanceof OperationError) ||
+      error.code === 'cancelled' ||
+      error.code === 'resource_limit'
+    )
+      throw error;
+    return {
+      source,
+      status: 'partial',
+      matched_by: null,
+      uuid: null,
+      build_id: null,
+      companion_sha256: image.companion?.sha256 ?? null,
+      functions: 0,
+      types: 0,
+      variables: 0,
+      lines: 0,
+      diagnostics: [error.diagnostic.message.slice(0, 1024)],
+    };
+  }
+  return {
+    source: recovery.status === 'absent' && !image.companion ? 'none' : source,
+    status: recovery.status,
+    matched_by: recovery.matched_by,
+    uuid: recovery.uuid,
+    build_id: recovery.build_id,
+    companion_sha256: image.companion?.sha256 ?? null,
+    functions: recovery.functions.length,
+    types: recovery.data?.types.length ?? 0,
+    variables: recovery.data?.variables?.length ?? 0,
+    lines: recovery.data?.lines.length ?? 0,
+    diagnostics: recovery.diagnostics
+      .slice(0, 16)
+      .map((diagnostic) => diagnostic.message.slice(0, 1024)),
+  };
 }

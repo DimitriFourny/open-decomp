@@ -5,9 +5,11 @@ import {
   type Annotation,
   type CanonicalValue,
   type LoadedImage,
+  type OperationContext,
   type RecoveredType,
 } from '../../core/index.js';
 import type { SuppliedTypeRecord } from '../../analysis/types/index.js';
+import type { DebugRecovery } from '../../metadata/debug/index.js';
 import { AnnotationService } from '../../project/annotations/index.js';
 import type { SourceAddress } from '../../reconstruction/source-model.js';
 import type { AnalysisScope } from './index.js';
@@ -59,21 +61,27 @@ export interface GlobalTypes {
 /** Records of every type the `roots` (subject id -> asserted type id) reach, through the same
  * scoped `type` annotation view decompilation uses (local declarations first, then shared
  * ones), with every subject and type read recorded by the dependency ledger. A type id with
- * conflicting definitions has no record; structures declared by users print their field names. */
+ * conflicting definitions has no record; structures declared by users print their field names.
+ * `declared` adds the debug records of the globals' debug-declared types (debugTypeClosure). */
 export function resolveGlobalTypes(
   scope: AnalysisScope,
   revision: number,
   roots: ReadonlyMap<string, string>,
+  declared: readonly SuppliedTypeRecord[] = [],
 ): GlobalTypes {
-  if (!roots.size) return { records: [], extent: () => null };
+  if (!roots.size && !declared.length) return { records: [], extent: () => null };
   const read = () =>
     new AnnotationService(scope.store).active(revision, scope.context, {
       entity_ids: [...roots.keys()],
       ...(scope.dependencies ? { on_dependencies: scope.dependencies.recordAnnotationScope } : {}),
     });
-  const view = scope.dependencies ? scope.dependencies.annotationView(read) : read();
+  const view = roots.size
+    ? scope.dependencies
+      ? scope.dependencies.annotationView(read)
+      : read()
+    : { types: [] };
   const grouped = new Map<string, SuppliedTypeRecord[]>();
-  for (const record of view.types) {
+  for (const record of [...view.types, ...declared]) {
     scope.context.checkpoint(1);
     const group = grouped.get(record.id) ?? [];
     group.push(record);
@@ -272,4 +280,63 @@ export function annotatedDataAddress(
           ...(typeId === undefined ? {} : { type_id: typeId }),
         },
   };
+}
+
+/** Globals the debug info declares at a fixed static address (DW_OP_addr): base VA ->
+ * declared name and debug type id. Two declarations at one address declare neither. */
+export function debugGlobalVariables(
+  debug: DebugRecovery,
+  context: OperationContext,
+): ReadonlyMap<bigint, { readonly name: string; readonly type_id: string }> {
+  const result = new Map<bigint, { readonly name: string; readonly type_id: string }>();
+  if (!debug.data?.variables?.length) return result;
+  const typeIds = new Map<string, string>();
+  for (const record of debug.types) if (record.dwarf_id) typeIds.set(record.dwarf_id, record.id);
+  const ambiguous = new Set<bigint>();
+  for (const variable of debug.data.variables) {
+    context.checkpoint(1);
+    if (variable.functionAddress !== undefined || variable.parameter) continue;
+    const location = variable.locations.length === 1 ? variable.locations[0]!.location : null;
+    const typeId = variable.typeId === undefined ? undefined : typeIds.get(variable.typeId);
+    if (location?.kind !== 'address' || !typeId || !/^[A-Za-z_]\w{0,254}$/.test(variable.name))
+      continue;
+    const previous = result.get(location.address);
+    if (previous && (previous.name !== variable.name || previous.type_id !== typeId))
+      ambiguous.add(location.address);
+    result.set(location.address, { name: variable.name, type_id: typeId });
+  }
+  for (const address of ambiguous) result.delete(address);
+  return result;
+}
+
+/** The debug type records `roots` reach (pointees, elements, fields), bounded. */
+export function debugTypeClosure(
+  debug: DebugRecovery,
+  roots: ReadonlySet<string>,
+  context: OperationContext,
+): SuppliedTypeRecord[] {
+  const byId = new Map(debug.types.map((record) => [record.id, record]));
+  const result: SuppliedTypeRecord[] = [],
+    pending = [...roots].filter((id) => byId.has(id)),
+    seen = new Set(pending);
+  while (pending.length && result.length < 4096) {
+    context.checkpoint(1);
+    const record = byId.get(pending.pop()!)!;
+    result.push({ ...record, source: 'debug', status: 'established' });
+    const definition = record.definition;
+    const next =
+      definition.kind === 'pointer'
+        ? [definition.to]
+        : definition.kind === 'array' || definition.kind === 'vector'
+          ? [definition.element]
+          : definition.kind === 'structure'
+            ? definition.fields.map((field) => field.type_id)
+            : [];
+    for (const id of next)
+      if (!seen.has(id) && byId.has(id)) {
+        seen.add(id);
+        pending.push(id);
+      }
+  }
+  return result;
 }

@@ -11,7 +11,10 @@ import {
 } from '../../core/index.js';
 import { MAX_RECORD_BYTES, decodeStored, encodeStored } from './encoding.js';
 
-export type ImageMetadata = Omit<LoadedImage, 'bytes' | 'address_map'>;
+/** A companion debug file is stored by content identity; its bytes are attached on load. */
+export type ImageMetadata = Omit<LoadedImage, 'bytes' | 'address_map' | 'companion'> & {
+  readonly companion_sha256?: string;
+};
 const COLLECTIONS = [
   'slices',
   'mappings',
@@ -36,6 +39,7 @@ const headerSchema = z.strictObject({
   selected_slice_id: sliceIdSchema,
   image_base: z.bigint().min(0n).max(0xffffffffffffffffn),
   target: targetSchema,
+  companion_sha256: digestSchema.optional(),
   collections: z.record(z.enum(COLLECTIONS), z.int().min(0).max(MAX_METADATA_RECORDS)),
 });
 
@@ -65,9 +69,17 @@ export function writeImageMetadata(
   }
   if (records > MAX_METADATA_RECORDS)
     fail('resource_limit', 'Image metadata exceeds aggregate record budget');
-  const { id, sha256, selected_slice_id, image_base, target } = metadata;
+  const { id, sha256, selected_slice_id, image_base, target, companion_sha256 } = metadata;
   const header = encodeStored(
-    headerSchema.parse({ id, sha256, selected_slice_id, image_base, target, collections }),
+    headerSchema.parse({
+      id,
+      sha256,
+      selected_slice_id,
+      image_base,
+      target,
+      ...(companion_sha256 === undefined ? {} : { companion_sha256 }),
+      collections,
+    }),
   );
   let bytes = header.length;
   db.prepare('INSERT OR REPLACE INTO loaded_images VALUES (?,?,?,?)').run(

@@ -33,7 +33,10 @@ export type DebugLocation =
   | { kind: 'address'; address: bigint }
   | { kind: 'register'; register: number }
   | { kind: 'register-offset'; register: number; offset: bigint }
-  | { kind: 'frame-offset'; offset: bigint };
+  | { kind: 'frame-offset'; offset: bigint }
+  /** Canonical frame address plus offset. DW_OP_call_frame_cfa is the stack pointer
+   * before the call instruction; on SysV x86-64 that is the entry stack pointer + 8. */
+  | { kind: 'cfa-offset'; offset: bigint };
 export interface DebugLocationEntry {
   ranges: DebugRange[];
   location: DebugLocation;
@@ -107,6 +110,9 @@ export interface DebugSymbols {
   types: DebugType[];
   lines: DebugLine[];
   diagnostics: string[];
+  /** A unit, DIE or reference was skipped, so declarations may be missing. Unsupported
+   * locations, line rows and unrepresentable types are diagnosed without setting it. */
+  undecoded?: boolean | undefined;
   variables?: DebugVariable[] | undefined;
   inlineScopes?: DebugInlineScope[] | undefined;
 }

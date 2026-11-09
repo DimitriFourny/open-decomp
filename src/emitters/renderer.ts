@@ -4446,7 +4446,7 @@ export class Renderer {
         member: (member) =>
           member.independent
             ? this.frameLocal(member, member.independent)
-            : `${name()}.local_${(-member.offset).toString(16)}`,
+            : `${name()}.${this.stackName(member.offset)}`,
       };
     }
     return undefined;
@@ -4454,7 +4454,16 @@ export class Renderer {
 
   /** Source view (A3): the name of an independent frame local. */
   private frameLocal(member: FrameMember, local: { readonly id: string }): string {
-    return this.sourceIdentifier(local.id, `local_${(-member.offset).toString(16)}`);
+    return this.sourceIdentifier(
+      local.id,
+      this.names.get(local.id) ?? this.stackName(member.offset),
+    );
+  }
+
+  /** Default name of the stack home at entry-SP `offset`: the debug-declared variable
+   * that alone occupies it, else its offset. */
+  private stackName(offset: bigint): string {
+    return this.input.frame_names?.get(offset) ?? `local_${(-offset).toString(16)}`;
   }
 
   /** The member of a stack object holding entry-SP byte `offset` and the offset within it. */
@@ -4940,6 +4949,9 @@ export class Renderer {
         this.sourceIdentifier(
           local.id,
           this.names.get(local.id) ??
+            (local.stack_offset === undefined
+              ? undefined
+              : this.input.frame_names?.get(local.stack_offset)) ??
             this.sourceRoleNames.get(local.id) ??
             (local.stack_offset !== undefined
               ? `local_${(-local.stack_offset).toString(16)}`
@@ -10321,7 +10333,7 @@ export class Renderer {
         w.line(1, `_Alignas(${stack.alignment}) struct {`);
         for (const member of kept) {
           this.context.checkpoint(1);
-          const field = `local_${(-member.offset).toString(16)}`;
+          const field = this.stackName(member.offset);
           if (member.offset > end)
             w.statement(2, `uint8_t pad_${(-end).toString(16)}[${member.offset - end}]`);
           w.statement(
@@ -10381,6 +10393,9 @@ export class Renderer {
       const name = this.sourceIdentifier(
           local.id,
           this.names.get(local.id) ??
+            (local.stack_offset === undefined
+              ? undefined
+              : this.input.frame_names?.get(local.stack_offset)) ??
             this.sourceRoleNames.get(local.id) ??
             (local.stack_offset !== undefined
               ? `local_${(-local.stack_offset).toString(16)}`
