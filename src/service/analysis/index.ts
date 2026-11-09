@@ -240,7 +240,10 @@ export async function executeDecompilation(
         new Map(functions.map((fn) => [fn.id, fn.entry])),
       );
       const library = withMatchedContracts(
-        recoverLibraryContracts({ image, abi: components.abi, revision: args.revision }, fullContext),
+        recoverLibraryContracts(
+          { image, abi: components.abi, revision: args.revision },
+          fullContext,
+        ),
         recoverMatchedContracts(
           { image, abi: components.abi, revision: args.revision, matches },
           fullContext,

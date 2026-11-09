@@ -6,10 +6,7 @@ import type {
   OperationContext,
 } from '../../core/index.js';
 import { findDeclaration } from '../library-contracts/catalog.js';
-import {
-  recoverLibraryContracts,
-  type LibraryContracts,
-} from '../library-contracts/index.js';
+import { recoverLibraryContracts, type LibraryContracts } from '../library-contracts/index.js';
 import { libraryLookupName } from '../symbols/c-names.js';
 
 /** A function whose body a library signature matched (an asserted `library_match` annotation
