@@ -1,6 +1,7 @@
 import type { z } from 'zod';
 import {
   artifactIdSchema,
+  buildOnce,
   contentHash,
   entityIdentity,
   fingerprint,
@@ -13,6 +14,7 @@ import {
   type RecoveredType,
   type Signature,
   type SymbolRecord,
+  useBuilt,
 } from '../../core/index.js';
 import {
   boundDebugOutput,
@@ -143,8 +145,27 @@ function emptyRecovery(
  * retain known size/member offsets with null alignment when DW_AT_alignment is absent;
  * ABI consumers must not replace that missing fact with guessed natural alignment.
  * Bitfields/unions and subroutine types retain raw evidence with explicit diagnostics.
- * Overlapping concrete definitions have null core signatures and linked conflicts. */
+ * Overlapping concrete definitions have null core signatures and linked conflicts.
+ * The image's own recovery (embedded DWARF or its imported companion) is built once per
+ * loaded image (`buildOnce`): every operation pays its recorded cost, cached or not. */
 export function recoverDebugInfo(
+  image: LoadedImage,
+  context: OperationContext,
+  external?: ExternalDebugInput,
+): DebugRecovery {
+  if (external) return computeDebugInfo(image, context, external);
+  const cached = recoveries.get(image);
+  const result = cached
+    ? useBuilt(context, cached)
+    : buildOnce(context, 'debug-recovery', (quiet) => computeDebugInfo(image, quiet));
+  recoveries.set(image, result);
+  // The output bound is the caller's own; checking it again costs nothing extra.
+  if (cached) boundDebugOutput(result, { ...context, checkpoint: () => context.checkpoint(0) });
+  return result;
+}
+const recoveries = new WeakMap<LoadedImage, DebugRecovery>();
+
+function computeDebugInfo(
   image: LoadedImage,
   context: OperationContext,
   external?: ExternalDebugInput,
