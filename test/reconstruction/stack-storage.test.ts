@@ -252,23 +252,12 @@ for (const fixture of [
       const result: StoredDecompilation = p.payload(
         (await p.decompile(fn.id, { options: { emitter } })).result,
       ).result;
-      assert.equal(result.state, fixture.elf ? 'partial' : 'complete');
+      // An ELF image without .debug_* sections hides no declaration: recovery is complete.
+      assert.equal(result.state, 'complete');
       assert.equal(
         result.coverage.find((coverage) => coverage.layer === 'reconstruction')?.state,
         'complete',
       );
-      if (fixture.elf) {
-        assert.equal(
-          result.coverage.find((coverage) => coverage.layer === 'analysis')?.state,
-          'partial',
-        );
-        assert.ok(
-          result.diagnostics.every(
-            (diagnostic) =>
-              diagnostic.code === 'unavailable_semantics' && diagnostic.severity === 'warning',
-          ),
-        );
-      }
       const emission: StoredEmission = result.data.emission;
       const formals: readonly EmittedFormal[] = emittedFormals(emission).filter(
         (formal) => formal.name !== 'entry_sp',
@@ -362,16 +351,11 @@ test('source-built SysV red-zone and dynamic framed locals preserve definite ini
       const result: StoredDecompilation = p.payload(
         (await p.decompile(fn.id, { options: { emitter } })).result,
       ).result;
-      assert.equal(result.state, 'partial');
-      assert.ok(
-        result.diagnostics.every(
-          (diagnostic) =>
-            diagnostic.code === 'unavailable_semantics' && diagnostic.severity === 'warning',
-        ),
-      );
+      // No .debug_* sections: nothing undecoded, so type recovery and the result are complete.
+      assert.equal(result.state, 'complete');
       assert.equal(
         result.coverage.find((coverage) => coverage.layer === 'analysis')?.state,
-        'partial',
+        'complete',
       );
       assert.equal(
         result.coverage.find((coverage) => coverage.layer === 'reconstruction')?.state,

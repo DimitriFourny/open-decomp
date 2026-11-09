@@ -400,7 +400,7 @@ test('ELF library contracts require explicit ELF library attribution and cannot 
   assert.equal(identifiesLibrary('unknown.so', catalog.printf!, 'elf'), false);
 });
 
-test('ELF debug capability is explicitly unavailable, not silently absent or Mach-O/PDB decoding', () => {
+test('ELF debug recovery: absent without .debug_*, decoded when embedded, no unmatched companion', () => {
   const bytes = readFileSync(new URL('./fixtures/abi.so', import.meta.url)),
     sha256 = contentHash(bytes);
   const loaded = new ELFLoader().load(
@@ -408,19 +408,13 @@ test('ELF debug capability is explicitly unavailable, not silently absent or Mac
     createOperationContext(),
   );
   const result = recoverDebugInfo(loaded, createOperationContext());
-  assert.equal(result.status, 'partial');
-  // No `.debug_*` section: the missing capability hides no declaration, so
-  // local type inference stays usable (only embedded DWARF would be undecoded).
+  // No `.debug_*` section: explicit absence that hides no declaration.
+  assert.equal(result.status, 'absent');
   assert.equal(result.undecoded, false);
   assert.equal(result.data, null);
   assert.deepEqual(result.types, []);
   assert.deepEqual(result.functions, []);
-  assert.ok(
-    result.diagnostics.some(
-      (diagnostic) =>
-        diagnostic.code === 'unavailable_semantics' && diagnostic.message.includes('ELF DWARF'),
-    ),
-  );
+  // Built without a build ID or debuglink: no supplied file can be matched to it.
   assert.throws(
     () =>
       recoverDebugInfo(loaded, createOperationContext(), {
@@ -429,10 +423,10 @@ test('ELF debug capability is explicitly unavailable, not silently absent or Mac
       }),
     (error: unknown) =>
       error instanceof OperationError &&
-      error.code === 'unsupported_target' &&
-      error.message.includes('ELF DWARF'),
+      error.code === 'conflicting_evidence' &&
+      error.message.includes('neither a GNU build ID nor a .gnu_debuglink'),
   );
-  // Embedded DWARF that stays unread is undecoded: its declarations are unknown.
+  // Embedded DWARF is decoded; unrepresentable records keep it partial, not undecoded.
   const dwarfBytes = readFileSync('fixtures/bin/elf-x86_64-symbols'),
     dwarfSha = contentHash(dwarfBytes);
   const withDwarf = recoverDebugInfo(
@@ -448,7 +442,8 @@ test('ELF debug capability is explicitly unavailable, not silently absent or Mac
     createOperationContext(),
   );
   assert.equal(withDwarf.status, 'partial');
-  assert.equal(withDwarf.undecoded, true);
+  assert.equal(withDwarf.undecoded, false);
+  assert.ok(withDwarf.functions.some((fn) => fn.dwarf.name === 'fixture_maximum' && fn.signature));
 });
 
 test('call-local signatures retain AL slice observations without creating target-global contracts', () => {
