@@ -1,4 +1,10 @@
-import type { Address, Emission, OperationContext, RecoveredType } from '../core/index.js';
+import {
+  isEntityId,
+  type Address,
+  type Emission,
+  type OperationContext,
+  type RecoveredType,
+} from '../core/index.js';
 import type { Inference, InferenceStatus } from '../core/inference.js';
 import type { MemoryShape, ObservedField, TypeStatus } from '../analysis/types/model.js';
 import { bitWidth, expressionOperands, type Origin, type Value } from '../ir/index.js';
@@ -938,7 +944,13 @@ function gatherInferences(
       [conflict.subject_id],
       'conflicting',
       'Incompatible alternatives remain visible; no alternative is promoted to an established fact.',
-      { kind: 'conflict', alternatives: conflict.alternatives, reason: conflict.reason },
+      {
+        kind: 'conflict',
+        // Entity alternatives only: an annotation's ID or a type's definition key is not one
+        // (the conflicting records stay cited through their evidence).
+        alternatives: conflict.alternatives.filter(isEntityId),
+        reason: conflict.reason,
+      },
       [conflict.evidence_ids],
     );
   }

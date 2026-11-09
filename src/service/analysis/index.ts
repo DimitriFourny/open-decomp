@@ -734,12 +734,16 @@ export async function executeDecompilation(
         },
       ];
       let signature: Signature | null = null;
-      const signatures = types.signatures.filter(
+      const supported = types.signatures.filter(
         (item) =>
           item.subject_id === ir.id &&
           item.abi_state === 'complete' &&
           (item.status === 'established' || item.status === 'asserted'),
       );
+      // Without a conflict, every signature agrees with an assertion (recoverTypes compares
+      // their types structurally): the assertion's own type IDs describe the function.
+      const assertions = supported.filter((item) => item.status === 'asserted');
+      const signatures = assertions.length ? assertions : supported;
       if (!types.conflicts.some((conflict) => conflict.subject_id === ir.id) && signatures.length) {
         const keys = new Set(
           signatures.map((item) =>

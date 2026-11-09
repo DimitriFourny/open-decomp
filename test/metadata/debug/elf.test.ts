@@ -144,7 +144,7 @@ test('a separate debug file matches by GNU build ID, else by .gnu_debuglink CRC-
   mismatch('shapes-stripped', companion('shapes-gz'), /build ID .* does not match/);
   mismatch('shapes-stripped', companion('shapes-nobuildid.debug'), /has no GNU build ID/);
   const corrupt = Buffer.from(fixture('shapes-nobuildid.debug'));
-  corrupt[corrupt.length - 1] ^= 1;
+  corrupt[corrupt.length - 1]! ^= 1;
   mismatch(
     'shapes-nobuildid',
     { bytes: corrupt, artifact_id: `artifact_${contentHash(corrupt)}` },
@@ -206,7 +206,7 @@ test('the debug CRC is zlib crc32 and the inflater is exact and bounded', () => 
   );
   assert.throws(() => inflateZlib(compressed, text.length + 1, () => {}), /shorter than/);
   const damaged = Buffer.from(compressed);
-  damaged[damaged.length - 1] ^= 0xff;
+  damaged[damaged.length - 1]! ^= 0xff;
   assert.throws(() => inflateZlib(damaged, text.length, () => {}), /Adler-32/);
   assert.throws(() => inflateZlib(Buffer.from([0x78, 0x9c, 0xff]), 1, () => {}), /Truncated/);
 });

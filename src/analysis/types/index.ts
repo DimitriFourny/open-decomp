@@ -1577,6 +1577,27 @@ export function recoverTypes(
         list.push(signature);
       signatureGroups.set(signature.subject_id, list);
     }
+    // Signatures agree when their types do: scalars, pointers to and arrays of them compare
+    // by definition (a debug `uint32_t` and an asserted one are distinct IDs, one type);
+    // structures, unknowns and ambiguous IDs compare by identity.
+    const structural = (id: string, depth = 0): string => {
+      budget.charge();
+      const definitions = new Map(
+        (records.get(id) ?? []).map((record) => [typeKey(record.definition), record.definition]),
+      );
+      const definition = definitions.size === 1 ? [...definitions.values()][0]! : undefined;
+      if (!definition || depth > 8) return id;
+      if (definition.kind === 'pointer') return `pointer(${structural(definition.to, depth + 1)})`;
+      if (definition.kind === 'array')
+        return `array(${structural(definition.element, depth + 1)},${definition.count ?? '?'})`;
+      if (
+        definition.kind === 'integer' ||
+        definition.kind === 'float' ||
+        definition.kind === 'void'
+      )
+        return typeKey(definition);
+      return id;
+    };
     for (const list of signatureGroups.values()) {
       const keys = new Set(
         list
@@ -1584,8 +1605,8 @@ export function recoverTypes(
           .map((item) =>
             fingerprint([
               item.signature.abi,
-              item.signature.return_type,
-              item.signature.parameters.map((parameter) => parameter.type_id),
+              structural(item.signature.return_type),
+              item.signature.parameters.map((parameter) => structural(parameter.type_id)),
               item.signature.variadic,
               item.signature.noreturn,
             ]),

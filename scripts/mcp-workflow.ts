@@ -646,9 +646,17 @@ export async function runMcpWorkflows(options: McpWorkflowOptions): Promise<McpW
         );
         const baselineData = resultData(baseline.result);
         assert.ok(baselineData.delivery === 'inline');
-        assert.equal(
-          baselineData.signature,
-          null,
+        // Only debug information (the ELF corpus embeds DWARF) declares a signature.
+        const declaredBy = (baselineData.signature?.evidence_ids ?? []).map((id) =>
+          baseline.result.evidence.find((proof) => proof.id === id),
+        );
+        assert.ok(
+          declaredBy.every(
+            (proof) =>
+              proof?.origin.kind === 'debug' ||
+              (proof?.origin.kind === 'binary' &&
+                proof.origin.description.startsWith('Embedded DWARF')),
+          ),
           'Native register usage must not invent a source signature',
         );
         const proofIds = new Set(baseline.result.evidence.map((proof) => proof.id));
@@ -939,7 +947,7 @@ export async function runMcpWorkflows(options: McpWorkflowOptions): Promise<McpW
         const restoredPayload = await readAnalysis(client, restored.artifacts[0]!);
         const restoredData = resultData(restoredPayload.result);
         assert.ok(restoredData.delivery === 'inline');
-        assert.equal(restoredData.signature, null);
+        assert.deepEqual(restoredData.signature, baselineData.signature);
         assert.equal(restoredData.emission.text, baselineData.emission.text);
         const restoredPython = await callMcpTool(client, 'function_decompile', {
           ...scope(),
@@ -951,7 +959,7 @@ export async function runMcpWorkflows(options: McpWorkflowOptions): Promise<McpW
           (await readAnalysis(client, restoredPython.artifacts[0]!)).result,
         );
         assert.ok(restoredPythonData.delivery === 'inline');
-        assert.equal(restoredPythonData.signature, null);
+        assert.deepEqual(restoredPythonData.signature, baselineData.signature);
         const small = await callMcpTool(client, 'function_decompile', {
           ...scope(),
           function_id: fn.id,
