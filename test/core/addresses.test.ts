@@ -171,3 +171,21 @@ test('immutable byte view does not leak ownership or permit out-of-bounds reads'
   assert.throws(() => bytes.read(7n, 2));
   assert.throws(() => bytes.u64(1n));
 });
+
+test('immutable bytes compare equal only to the same contents, at any alignment', () => {
+  const contents = Uint8Array.from({ length: 23 }, (_, index) => index * 7);
+  const bytes = new ImmutableBytes(contents);
+  for (const offset of [0, 1, 4]) {
+    const backing = new Uint8Array(offset + contents.length);
+    const view = backing.subarray(offset);
+    view.set(contents);
+    assert.equal(bytes.equals(view), true);
+    for (const index of [0, 5, 22]) {
+      view[index]! ^= 1;
+      assert.equal(bytes.equals(view), false);
+      view[index]! ^= 1;
+    }
+  }
+  assert.equal(bytes.equals(contents.subarray(1)), false);
+  assert.equal(new ImmutableBytes(new Uint8Array()).equals(new Uint8Array()), true);
+});

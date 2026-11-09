@@ -50,6 +50,34 @@ const cache = new Map<
 >();
 let cachedUnits = 0;
 let cachedCharacters = 0;
+/** Keep a graph in the bounded LRU; one operation can still analyze a larger graph without
+ * retaining it globally. */
+function retain(
+  key: string,
+  graph: QueryFunctionGraph,
+  units: number,
+  characters: number,
+  work: number,
+  builds: readonly BuildUse[],
+): void {
+  if (units > 8192 || characters > 1_048_576) return;
+  const prior = cache.get(key);
+  if (prior) {
+    cache.delete(key);
+    cachedUnits -= prior.units;
+    cachedCharacters -= prior.characters;
+  }
+  while (cache.size >= 32 || cachedUnits + units > 8192 || cachedCharacters + characters > 1_048_576) {
+    const oldest = cache.keys().next().value!;
+    const removed = cache.get(oldest)!;
+    cache.delete(oldest);
+    cachedUnits -= removed.units;
+    cachedCharacters -= removed.characters;
+  }
+  cache.set(key, { graph, units, characters, work, builds });
+  cachedUnits += units;
+  cachedCharacters += characters;
+}
 
 /** Selected-local analysis is grounded in immutable native/published roots and
  * executable/data indexes, not an image-wide traversal or a claimed envelope.
@@ -71,7 +99,9 @@ export function reconstructFunctionGraph(
   context.checkpoint(0);
   const { image, revision } = input,
     fn = input.function;
-  const key = `${input.project_id}:${revision}:${image.selected_slice_id}:${fn.id}:${context.budget.instructions}:${context.budget.blocks}:${input.formatting ? 'formatted' : 'structured'}`;
+  const keyOf = (formatting: boolean): string =>
+    `${input.project_id}:${revision}:${image.selected_slice_id}:${fn.id}:${context.budget.instructions}:${context.budget.blocks}:${formatting ? 'formatted' : 'structured'}`;
+  const key = keyOf(input.formatting === true);
   // The discovery index is per image: every operation pays its recorded build cost once,
   // before and apart from the graph's own work, whether or not the graph is cached.
   let prepared = indexes.get(image);
@@ -117,6 +147,7 @@ export function reconstructFunctionGraph(
       ? new Arm64Decoder()
       : new X86Decoder({ formatting: input.formatting === true });
   let discovery, builds: readonly BuildUse[];
+  let structuredWork = 0;
   const presentations = input.formatting
     ? new Map<string, { mnemonic: string; operands: string }>()
     : undefined;
@@ -136,6 +167,9 @@ export function reconstructFunctionGraph(
         measured,
       ),
     ));
+    // Formatting only adds presentations after the traversal: the structured graph is this
+    // graph without them, at the work charged so far.
+    structuredWork = work;
     if (presentations) {
       for (const instruction of discovery.graphs[0]?.instructions ?? []) {
         measured.checkpoint(1);
@@ -209,12 +243,6 @@ export function reconstructFunctionGraph(
         : []),
     ],
   };
-  const units =
-    graph.instructions.length +
-    graph.gaps.length +
-    graph.blocks.length +
-    graph.evidence!.length +
-    (presentations?.size ?? 0);
   const characters =
     (fn.original_name?.length ?? 0) +
     (fn.display_name?.length ?? 0) +
@@ -222,24 +250,22 @@ export function reconstructFunctionGraph(
     graph.evidence!.reduce(
       (n, item) => n + item.claim.length + item.derived_from.reduce((m, id) => m + id.length, 0),
       0,
-    ) +
-    presentationCharacters;
-  // One operation can still analyze a larger graph without retaining it globally.
-  if (units <= 8192 && characters <= 1_048_576) {
-    while (
-      cache.size >= 32 ||
-      cachedUnits + units > 8192 ||
-      cachedCharacters + characters > 1_048_576
-    ) {
-      const oldest = cache.keys().next().value!;
-      const removed = cache.get(oldest)!;
-      cache.delete(oldest);
-      cachedUnits -= removed.units;
-      cachedCharacters -= removed.characters;
-    }
-    cache.set(key, { graph, units, characters, work, builds });
-    cachedUnits += units;
-    cachedCharacters += characters;
+    );
+  const units =
+    graph.instructions.length + graph.gaps.length + graph.blocks.length + graph.evidence!.length;
+  if (presentations) {
+    // A structured request of the same function (a CFG after its listing) reuses the
+    // traversal, charging what building it structured charges.
+    const { presentations: _presentations, ...structured } = graph;
+    retain(keyOf(false), structured, units, characters, structuredWork, builds);
   }
+  retain(
+    key,
+    graph,
+    units + (presentations?.size ?? 0),
+    characters + presentationCharacters,
+    work,
+    builds,
+  );
   return graph;
 }

@@ -124,6 +124,23 @@ export class ImmutableBytes {
     return this.#bytes.slice(start, start + length);
   }
 
+  /** Whether `bytes` holds exactly these bytes. */
+  equals(bytes: Uint8Array): boolean {
+    const own = this.#bytes;
+    if (bytes.length !== own.length) return false;
+    let index = 0;
+    // Word compares where both views are 4-byte aligned (this copy always is).
+    if (bytes.byteOffset % 4 === 0) {
+      const words = own.length >>> 2;
+      const a = new Uint32Array(own.buffer, own.byteOffset, words);
+      const b = new Uint32Array(bytes.buffer, bytes.byteOffset, words);
+      for (; index < words; index++) if (a[index] !== b[index]) return false;
+      index = words << 2;
+    }
+    for (; index < own.length; index++) if (own[index] !== bytes[index]) return false;
+    return true;
+  }
+
   u32(offset: bigint, littleEndian = true): number {
     const start = checkedIndex(offset, this.length);
     checkedIndex(offset + 4n, this.length);
