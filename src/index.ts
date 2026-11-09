@@ -69,6 +69,16 @@ export {
   type LibraryType,
 } from './metadata/library-contracts/index.js';
 export {
+  libraryTypeCatalog,
+  libraryTypeDeclaration,
+  type LibraryTypeEntry,
+} from './metadata/library-contracts/declarations.js';
+export {
+  libraryConstantSet,
+  libraryConstantText,
+} from './metadata/library-contracts/constant-names.js';
+export { CONSTANT_SETS, type ConstantSet } from './metadata/library-contracts/constants.js';
+export {
   recoverRuntimeMetadata,
   type RuntimeRecord,
   type RuntimeMetadata,

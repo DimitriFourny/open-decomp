@@ -10,6 +10,7 @@ import { lex, type Token } from './lexer.js';
 import type {
   CDeclarationTarget,
   CDiagnostic,
+  CEnumerator,
   CParsedType,
   CParseResult,
   CStructureField,
@@ -207,6 +208,7 @@ export class CParser {
   private readonly typedefs = new Map<string, Ty>();
   private readonly owners = new Map<string, string>();
   private readonly named = new Map<string, string>();
+  private readonly enumerators = new Map<string, CEnumerator[]>();
   private readonly constants = new Map<string, bigint>();
   private readonly defining = new Set<string>();
   private readonly completed = new Set<string>();
@@ -239,7 +241,12 @@ export class CParser {
       this.dropPlaceholders();
     }
     this.diagnostics.sort((a, b) => a.line - b.line || a.column - b.column);
-    return { types: this.ordered(), named: this.named, diagnostics: this.diagnostics };
+    return {
+      types: this.ordered(),
+      named: this.named,
+      enumerators: this.enumerators,
+      diagnostics: this.diagnostics,
+    };
   }
 
   // ---- token helpers -------------------------------------------------------
@@ -343,6 +350,8 @@ export class CParser {
 
   private dropPlaceholders(): void {
     for (const key of [...this.defs.keys()]) if (key.startsWith('<')) this.defs.delete(key);
+    for (const key of [...this.enumerators.keys()])
+      if (key.startsWith('<')) this.enumerators.delete(key);
   }
 
   private definitionOf(key: string): CTypeDefinition | null {
@@ -374,6 +383,11 @@ export class CParser {
     this.defs.clear();
     for (const [key, entry] of entries)
       this.defs.set(remap(key), { name: entry.name, def: mapReferences(entry.def, remap) });
+    const members = this.enumerators.get(from);
+    if (members) {
+      this.enumerators.delete(from);
+      this.enumerators.set(to, members);
+    }
   }
 
   // ---- layout --------------------------------------------------------------
@@ -897,6 +911,8 @@ export class CParser {
   private enumBody(key: string, name: string | null): void {
     this.expectPunct('{');
     let value = 0n;
+    const members: CEnumerator[] = [];
+    this.enumerators.set(key, members);
     while (!this.isPunct('}')) {
       const token = this.next();
       if (token.kind !== 'ident')
@@ -904,6 +920,7 @@ export class CParser {
       this.noise();
       if (this.acceptPunct('=')) value = this.constant();
       this.constants.set(token.text, value);
+      members.push({ name: token.text, value });
       value = BigInt.asIntN(64, value + 1n);
       if (!this.acceptPunct(',')) break;
     }

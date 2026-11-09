@@ -26,6 +26,11 @@ import {
   libraryRecord,
   libraryRecordNames,
 } from '../../src/metadata/library-contracts/generated/types/index.js';
+import { parseCDeclarations } from '../../src/metadata/c-declarations/index.js';
+import {
+  libraryTypeCatalog,
+  libraryTypeDeclaration,
+} from '../../src/metadata/library-contracts/declarations.js';
 import { recoverLibraryContracts } from '../../src/metadata/library-contracts/index.js';
 import { loadBytes } from './fixture.js';
 
@@ -219,3 +224,33 @@ test(
     }
   },
 );
+
+test('every bundled type renders as C the declaration parser lays out like the header', () => {
+  for (const abi of ['sysv-amd64', 'darwin-arm64', 'windows-x64'] as const) {
+    const catalog = libraryTypeCatalog(abi);
+    assert.ok(catalog.length > 50, abi);
+    for (const entry of catalog) {
+      const source = libraryTypeDeclaration(abi, entry.name)!;
+      const parsed = parseCDeclarations(source, { abi });
+      assert.deepEqual(parsed.diagnostics, [], `${abi} ${entry.name}:\n${source}`);
+      const key = parsed.named.get(entry.name.replace(/^(?:struct|union) /, ''));
+      const type = parsed.types.find((item) => item.key === key)?.definition;
+      assert.ok(type?.kind === 'structure', `${abi} ${entry.name}`);
+      if (entry.size !== null) assert.equal(type.size, BigInt(entry.size), `${abi} ${entry.name}`);
+      const record = libraryRecord(abi, entry.name)!;
+      for (const member of type.fields) {
+        const declared = record.fields.find((item) => item.name === member.name);
+        if (declared)
+          assert.equal(
+            member.offset,
+            BigInt(declared.offset),
+            `${abi} ${entry.name}.${member.name}`,
+          );
+      }
+    }
+  }
+  assert.equal(
+    libraryTypeDeclaration('sysv-amd64', 'struct timespec'),
+    'struct timespec { int64_t tv_sec; int64_t tv_nsec; };',
+  );
+});

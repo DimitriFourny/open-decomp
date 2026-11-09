@@ -94,6 +94,39 @@ variadic tails from literal formats. Header `const` and `char` identity are prin
 extern prototypes (`FILE* fopen(const char*, const char*)`). Regenerate with
 `bun run prototypes`.
 
+Library type layouts: `generated/types/<abi>.ts` (from `scripts/generate-library-types.ts`,
+`bun run library-types`, which runs the clang and the glibc, Darwin libc and mingw-w64
+headers of the `ziglang` wheel) holds per-ABI record layouts of the structures and
+unions the prototypes name (`struct stat`, `FILE`, `pthread_mutex_t`, `OVERLAPPED`,
+`WIN32_FIND_DATAW`; about 100 SysV, 140 Darwin and 500 Windows records plus extra roots
+such as `sockaddr_in`), read from clang's own record layout dump: offsets, size and
+alignment are the compiler's, not recomputed. A record named by a prototype type resolves
+(`libraryRecord`) to a `structure` library type with its declared member names
+(`member_names`): an opaque name the target's headers do not complete (glibc `DIR`)
+stays opaque. Anonymous members are flattened into their parent (overlapping members of
+an anonymous union share an offset); a union is a structure whose members all start at
+offset 0; a member of unnamed record type is its own unsized record; bit-fields are
+gaps. The source view prints a header record by its tag (`struct stat*`, no typedef) or
+typedef name (`typedef struct FILE FILE;`) and never prints its body: members print as
+`entry->d_name`, `tm->tm_hour`. `libraryTypeDeclaration(abi, name)` renders a record and
+what it holds by value as C the declaration parser lays out identically (packed with
+explicit gaps where natural alignment would differ), for importing into an image's type
+library; `libraryTypeCatalog(abi)` lists them.
+
+Library constants (presentation): `constants.ts` maps arguments of about 150 functions
+(`open`, `mmap`, `socket`, `signal`, `kill`, `waitpid`, `dlopen`, `CreateFileW`,
+`VirtualAlloc`, `OpenProcess`, `RegOpenKeyExW`, `MessageBoxW`...) to curated constant
+sets (`values`: one name; `flags`: an OR of names with optional value fields under a mask,
+such as `O_ACCMODE`; `octal`: permission modes); the generator reads each name's value
+from the target's headers, so `O_CREAT` is 0x40 on Linux, 0x200 on Darwin and 0x100 in
+the Windows CRT, and a name a platform lacks is not printed there. A constant argument
+of a call whose library declaration names that function prints as
+`O_WRONLY | O_CREAT | O_TRUNC`, `PROT_READ | PROT_WRITE`, `AF_INET`, `SIGINT`,
+`MEM_COMMIT | MEM_RESERVE` or `0644` (`0o644` in Python-like), presentation record
+`library_constant`; a value without an exact spelling keeps its number, and bits no
+flag covers print as a hexadecimal remainder. The same header values decide when `open`
+reads its mode argument (`O_CREAT`, or Linux `O_TMPFILE`).
+
 Extern data: generated modules also carry `=name|type|flags|header` lines for header
 `extern` objects (`__stderrp`, `optind`, glibc `stderr`/`environ`, `kCF*` constants;
 `findVariable`, lazy like functions). The Mach-O/ELF import binding of such an object
@@ -106,7 +139,10 @@ pointers keep the access-derived type. Windows data imports and Darwin
 `__stack_chk_guard` (an array no public header declares) are not covered.
 
 ELF library contracts require explicit recognized ELF library attribution; a
-needed-library list or Darwin path is not symbol attribution. ELF DWARF recovery
+needed-library list or Darwin path is not symbol attribution. A call to a recognized
+import stub (an ELF lazy-binding PLT entry, a PE thunk) whose address no import names as
+its loader callable entry is a call to the import its established forwarding branch
+reads, so it carries that import's library contract. ELF DWARF recovery
 is explicitly unavailable (partial diagnostic, no recovered debug declarations;
 local types are withheld only when `.debug_*`/`.zdebug_*` sections are present),
 without suppressing native symbols or treating Mach-O section rules as ELF rules.

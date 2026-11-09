@@ -4,6 +4,7 @@ import type { CDeclarationTarget, CParseResult } from './types.js';
 export type {
   CDeclarationTarget,
   CDiagnostic,
+  CEnumerator,
   CParsedType,
   CParseResult,
   CStructureField,
