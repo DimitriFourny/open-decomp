@@ -173,3 +173,7 @@ Result behind the current gate (2026-10-20, all targets):
 | `caller_argument_pointer`, `caller_result_pointer` |                             0 |                          — | disabled        |
 
 The samples are small: zero errors in 43 callees is consistent with a true precision of about 92% or better at 95% confidence, zero in 25 with about 89%. Disabled heuristics still record their guesses (`applied: false`).
+
+## Navigation requests (`scripts/bench/browse.ts`)
+
+What an interactive client pays, through the public API: `node --import tsx scripts/bench/browse.ts BINARY [--limit N]` opens the binary in a fresh cache (or `--cache DIR`), completes discovery under the largest budget (`--discovery-instructions` sets the step's instruction budget), lists the function index, then, per function in address order, reads its compact disassembly (every page), its CFG and its outgoing references, and prints the totals, per-function quantiles, the project database size and the peak resident memory of the process tree. On a stripped `/bin/ls` (428 functions, 105k instructions; 4-core VM): open 6 s, discovery 14 s, then 29 s of disassembly, 8 s of CFGs and 18 s of references for all functions (before record scans were kept, each reference query decoded every reference record again: 3.2 s per function); a 115 MB project database.
