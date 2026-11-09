@@ -407,7 +407,13 @@ export class ProjectWorker {
     try {
       let request = requestSchema.parse(input) as WorkRequest;
       if (request.kind === 'import')
-        request = { ...request, source_path: await this.#pool.authorize(request.source_path) };
+        request = {
+          ...request,
+          source_path: await this.#pool.authorize(request.source_path),
+          ...(request.debug_path === undefined
+            ? {}
+            : { debug_path: await this.#pool.authorize(request.debug_path) }),
+        };
       else {
         const args = request.args;
         if (!('project_id' in args) || args.project_id !== this.snapshot.project_id)

@@ -71,6 +71,11 @@ export interface LibraryContract {
 }
 export interface LibraryContracts {
   readonly state: 'complete' | 'partial';
+  /** Imports whose declaration exists but was not established (weak or adjusted
+   * binding, unsupported calling convention, conflicting contracts): what makes the
+   * state partial. Only a function that calls one of them misses a declaration.
+   * Absent on results built before this field existed: treat every function as affected. */
+  readonly withheld_imports?: readonly string[];
   readonly contracts: readonly LibraryContract[];
   readonly types: readonly LibraryType[];
   readonly evidence: readonly Evidence[];
@@ -186,6 +191,7 @@ export function recoverLibraryContracts(
     semantics: string[] = [];
   const adjustedNames = adjustedImports(image, context);
   let partial = false;
+  const withheld = new Set<string>();
   const integer = (bits: number, signed: boolean, name: string): TypeSpecResolution => ({
     definition: { kind: 'integer', bits, signed },
     abi_type: { kind: 'integer', bits, signed },
@@ -270,6 +276,7 @@ export function recoverLibraryContracts(
       adjustedNames.has(fingerprint([imported.library, imported.original_name]))
     ) {
       partial = true;
+      withheld.add(imported.id);
       if (diagnostics.length < 256)
         diagnostics.push({
           code: 'unavailable_semantics',
@@ -375,6 +382,7 @@ export function recoverLibraryContracts(
     }
     if (unsupported) {
       partial = true;
+      withheld.add(imported.id);
       if (diagnostics.length < 256)
         diagnostics.push({
           code: 'unavailable_semantics',
@@ -401,6 +409,7 @@ export function recoverLibraryContracts(
       }
   for (const [index, peers] of conflicts) {
     partial = true;
+    withheld.add(contracts[index]!.import_id);
     contracts[index] = {
       ...contracts[index]!,
       conflicts_with: [...peers].map((peer) => contracts[peer]!.id).sort(),
@@ -420,6 +429,7 @@ export function recoverLibraryContracts(
   }
   return {
     state: partial ? 'partial' : 'complete',
+    withheld_imports: [...withheld].sort(),
     contracts,
     types: [...types.values()],
     evidence,

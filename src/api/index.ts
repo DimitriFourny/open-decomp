@@ -52,6 +52,11 @@ export interface OpenBinaryOptions {
   /** Cache root, not a project directory. Defaults to <canonical input>.open-decomp. */
   readonly cachePath?: string;
   readonly sliceId?: string;
+  /** Separate debug file of the binary (the DWARF file inside a `.dSYM` bundle, an ELF
+   * `objcopy --only-keep-debug` file), imported with it after its UUID, GNU build ID or
+   * `.gnu_debuglink` CRC matches. Part of the project identity: the same binary with and
+   * without a debug file are two projects. Nothing is looked up by path or ID. */
+  readonly debugPath?: string;
   /** `false` disables analysis caching for this session: no derived analysis (published
    * results, reuse candidates, persisted or in-process callee summaries) is read or written.
    * Project import, indexes and annotations still persist. Default `true`. */
@@ -182,13 +187,21 @@ export class BinarySession {
       options.sliceId === undefined ? undefined : sliceIdSchema.parse(options.sliceId);
     const inputPath = await realpath(resolve(input));
     const sha256 = await hashInput(inputPath, options.signal);
+    const debugPath =
+      options.debugPath === undefined ? undefined : await realpath(resolve(options.debugPath));
+    const debugSha256 =
+      debugPath === undefined ? undefined : await hashInput(debugPath, options.signal);
     const cachePath = await cacheDirectory(
       resolve(options.cachePath ?? `${inputPath}.open-decomp`),
     );
-    const projectPath = join(cachePath, projectDirectoryName(sha256, sliceId));
+    const projectPath = join(cachePath, projectDirectoryName(sha256, sliceId, debugSha256));
     const reused = await exists(projectPath);
     const service = await QueryService.create({
-      authorized_roots: [dirname(inputPath), cachePath],
+      authorized_roots: [
+        dirname(inputPath),
+        cachePath,
+        ...(debugPath === undefined ? [] : [dirname(debugPath)]),
+      ],
       max_workers: 1,
       ...(options.analysisCache === false ? { analysis_cache: false } : {}),
       ...(options.unitStoreBytes === undefined
@@ -206,6 +219,7 @@ export class BinarySession {
             : {
                 kind: 'import',
                 input_path: inputPath,
+                ...(debugPath === undefined ? {} : { debug_path: debugPath }),
                 project_path: projectPath,
                 ...(sliceId === undefined ? {} : { slice_id: sliceId }),
               },

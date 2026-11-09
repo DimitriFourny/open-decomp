@@ -116,6 +116,8 @@ import {
   annotatedDataAddress,
   annotatedDataEntities,
   assertedFacts,
+  debugGlobalVariables,
+  debugTypeClosure,
   resolveGlobalTypes,
   type GlobalTypes,
 } from './global-data.js';
@@ -909,6 +911,7 @@ function sourceAddresses(
   const typeRoots = new Map<string, string>(),
     symbolTypes = new Map<bigint, string>(),
     symbolBases: bigint[] = [];
+  const debugGlobals = debugGlobalVariables(input.debug, context);
   const symbols = records(scope, revision, image.id, 'symbol').items.map((symbol) => {
     context.checkpoint(1);
     if (!symbol.address) return symbol;
@@ -933,6 +936,10 @@ function sourceAddresses(
     if (type_id !== undefined && symbol.kind === 'object' && start.space === 'va') {
       typeRoots.set(symbol.id, type_id);
       symbolTypes.set(start.value, type_id);
+    } else if (symbol.kind === 'object' && start.space === 'va') {
+      // An asserted type wins; otherwise the debug declaration of the global there.
+      const declared = debugGlobals.get(start.value);
+      if (declared) symbolTypes.set(start.value, declared.type_id);
     }
     if (name) {
       sourceNames.set(
@@ -946,6 +953,17 @@ function sourceAddresses(
     }
     return { ...symbol, original_name: name ?? null, display_name: null };
   });
+  // A stripped image with separate debug info: the debug declaration names and types
+  // a global no symbol covers.
+  for (const [base, declared] of debugGlobals) {
+    context.checkpoint(1);
+    const key = addressKey({ image_id: image.id, space: 'va', value: base });
+    if (!candidates.has(key) || names.has(key) || symbolBases.includes(base)) continue;
+    names.set(key, new Set([declared.name]));
+    sourceNames.set(`${key}:${declared.name}`, declared.name);
+    symbolTypes.set(base, declared.type_id);
+    symbolBases.push(base);
+  }
   // Data entities (globals) whose annotations name or type storage a candidate may lie in.
   const entities = annotatedDataEntities(
     scope,
@@ -958,7 +976,12 @@ function sourceAddresses(
   );
   for (const entity of entities.values())
     if (entity.type_id !== undefined) typeRoots.set(entity.id, entity.type_id);
-  const globalTypes = resolveGlobalTypes(scope, revision, typeRoots);
+  const globalTypes = resolveGlobalTypes(
+    scope,
+    revision,
+    typeRoots,
+    debugTypeClosure(input.debug, new Set([...symbolTypes.values()]), context),
+  );
   // Entries of the image's functions: a constant equal to one names the function.
   // A symbol's name (above) wins; otherwise the function's own name, under the
   // same annotation rules, and nothing when annotations leave it unresolved.

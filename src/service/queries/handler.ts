@@ -31,6 +31,7 @@ import type {
   ToolName,
   ToolResult,
 } from '../../core/index.js';
+import { debugSummary } from '../../metadata/debug/index.js';
 import { cSourceName } from '../../metadata/symbols/c-names.js';
 import type { WorkerHandler } from '../../workers/runtime.js';
 import { wireValue } from '../../project/store/encoding.js';
@@ -437,6 +438,7 @@ async function dispatch(
           data: {
             view: 'summary',
             image: wireValue({
+              debug: debugSummary(image, scope.context),
               id: image.id,
               sha256: image.sha256,
               byte_length: BigInt(image.bytes.length),

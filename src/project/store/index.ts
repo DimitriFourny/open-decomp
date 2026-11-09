@@ -604,7 +604,7 @@ export class SqliteProjectStore implements ProjectStore {
     ).get(id, revision);
   }
 
-  #storagePath(kind: 'images' | 'artifacts', filename: string): string {
+  #storagePath(kind: 'images' | 'artifacts' | 'debug', filename: string): string {
     directory(join(this.#path, kind), false);
     return join(this.#path, kind, filename);
   }
@@ -681,6 +681,31 @@ export class SqliteProjectStore implements ProjectStore {
     return new ImmutableBytes(this.#readImageBytes(imageId));
   }
 
+  /** Stores a companion debug file (content-addressed, immutable) before the image that
+   * names it is published; the loaded image carries it from then on. */
+  importCompanion(bytes: ImmutableBytes, sha256: string): void {
+    this.#current();
+    digestSchema.parse(sha256);
+    if (bytes.length > MAX_IMAGE_BYTES)
+      fail('resource_limit', 'Companion debug file exceeds 512 MiB limit');
+    if (hashImage(bytes) !== sha256)
+      fail('invalid_input', 'Companion debug file does not match its claimed hash');
+    directory(join(this.#path, 'debug'), true);
+    const path = this.#storagePath('debug', sha256);
+    if (existsSync(path)) this.#readCompanion(sha256);
+    else writeImmutable(path, bytes);
+  }
+
+  #readCompanion(sha256: string): Uint8Array {
+    const bytes = checkedFile(
+      this.#storagePath('debug', digestSchema.parse(sha256)),
+      MAX_IMAGE_BYTES,
+    );
+    if (contentHash(bytes) !== sha256)
+      fail('invalid_input', 'Stored companion debug file integrity check failed');
+    return bytes;
+  }
+
   readLoadedImage(imageId: string, sliceId: string, revision = this.#current()): LoadedImage {
     this.#revision(revision);
     imageIdSchema.parse(imageId);
@@ -719,11 +744,24 @@ export class SqliteProjectStore implements ProjectStore {
       slice_size: slice.size,
       mappings: metadata.mappings,
     });
-    const image = { ...metadata, bytes, address_map };
+    const { companion_sha256, ...fields } = metadata;
+    const companion =
+      companion_sha256 === undefined
+        ? undefined
+        : {
+            sha256: companion_sha256,
+            bytes: new ImmutableBytes(this.#readCompanion(companion_sha256)),
+          };
+    const image: LoadedImage = {
+      ...fields,
+      bytes,
+      address_map,
+      ...(companion ? { companion } : {}),
+    };
     validateImage(image);
-    freezeMetadata(metadata);
+    freezeMetadata(fields);
     Object.freeze(image);
-    const retainedBytes = bytes.length + byte_length;
+    const retainedBytes = bytes.length + byte_length + (companion?.bytes.length ?? 0);
     if (retainedBytes <= MAX_LOADED_IMAGE_CACHE_BYTES) {
       while (
         this.#loadedImages.size >= MAX_LOADED_IMAGE_CACHE_ENTRIES ||
@@ -909,8 +947,13 @@ export class SqliteProjectStore implements ProjectStore {
           hashImage(image.bytes) !== image.sha256
         )
           fail('invalid_input', 'Loaded image must match an imported immutable snapshot');
-        const { bytes: _bytes, address_map: _map, ...metadata } = image;
-        writeImageMetadata(this.#db, metadata, revision);
+        const { bytes: _bytes, address_map: _map, companion, ...metadata } = image;
+        if (companion) this.#readCompanion(companion.sha256);
+        writeImageMetadata(
+          this.#db,
+          companion ? { ...metadata, companion_sha256: companion.sha256 } : metadata,
+          revision,
+        );
       },
       putEvidence: (evidence) => {
         encodeEvidence(evidence);
@@ -1846,6 +1889,11 @@ export class SqliteProjectStore implements ProjectStore {
       recursive: true,
       mode: constants.COPYFILE_FICLONE,
     });
+    if (existsSync(join(this.#path, 'debug')))
+      cpSync(join(this.#path, 'debug'), join(destination, 'debug'), {
+        recursive: true,
+        mode: constants.COPYFILE_FICLONE,
+      });
     this.#prepare('VACUUM INTO ?').run(join(destination, 'project.sqlite'));
   }
 
