@@ -69,15 +69,6 @@ export interface LibraryContract {
   readonly evidence_ids: readonly string[];
   readonly conflicts_with: readonly string[];
 }
-/** A function whose body a library signature matched (a `library_match` annotation): the
- * declaration of `name` from the nominal import library `library` applies at its entry. */
-export interface MatchedLibraryFunction {
-  readonly function_id: string;
-  readonly entry: Address;
-  readonly library: string;
-  readonly name: string;
-  readonly evidence_ids: readonly string[];
-}
 export interface LibraryContracts {
   readonly state: 'complete' | 'partial';
   /** Imports whose declaration exists but was not established (weak or adjusted
@@ -164,25 +155,6 @@ export function libraryNoreturnCalls(
   );
 }
 
-/** Entries of functions a library signature match declares noreturn (`exit`, `abort`,
- * `__stack_chk_fail`), with the match evidence: calls of them end their block. */
-export function libraryMatchNoreturnCalls(
-  matches: readonly MatchedLibraryFunction[],
-  format: LoadedImage['target']['format'],
-): ReadonlyMap<bigint, readonly string[]> {
-  const result = new Map<bigint, readonly string[]>();
-  for (const matched of matches) {
-    const declaration = findDeclaration(
-      libraryLookupName(format, matched.name),
-      matched.library,
-      format,
-    );
-    if (declaration?.noreturn === true && matched.entry.space === 'va')
-      result.set(matched.entry.value, matched.evidence_ids);
-  }
-  return result;
-}
-
 /** Match exact native import names AND nominal library identity. No local symbol,
  * demangled text, ordinal guess, weak binding or nonzero import addend establishes
  * a contract. The declaration remains conditional on that library implementation;
@@ -194,17 +166,12 @@ export function libraryMatchNoreturnCalls(
  * One contract per declared import: the loader-bounded import table bounds the work,
  * and every import is charged to the operation budget (no separate count cap that
  * would fail images with many declared imports).
- *
- * `matches` add the contracts of functions a library signature identified: the
- * declaration applies at the function entry (calls of it), with the match's evidence;
- * `import_id` then holds the function's entity ID.
  */
 export function recoverLibraryContracts(
   input: {
     readonly image: LoadedImage;
     readonly abi: AbiProfile;
     readonly revision: number;
-    readonly matches?: readonly MatchedLibraryFunction[];
   },
   context: OperationContext,
 ): LibraryContracts {
@@ -321,47 +288,8 @@ export function recoverLibraryContracts(
         });
       continue;
     }
-    addContract(
-      { ...imported, library: imported.library, original_name: imported.original_name },
-      name,
-      declaration,
-      'native import identity',
-    );
-  }
-  for (const matched of input.matches ?? []) {
-    context.checkpoint(1);
-    const name = libraryLookupName(image.target.format, matched.name);
-    const declaration = findDeclaration(name, matched.library, image.target.format);
-    if (!declaration) continue;
-    addContract(
-      {
-        id: matched.function_id,
-        library: matched.library,
-        original_name: matched.name,
-        slot: null,
-        callable_entry: matched.entry,
-        evidence_ids: matched.evidence_ids,
-      },
-      name,
-      declaration,
-      'a library signature match of the function body',
-    );
-  }
-  function addContract(
-    subject: {
-      readonly id: string;
-      readonly library: string;
-      readonly original_name: string;
-      readonly slot: Address | null;
-      readonly callable_entry: Address | null;
-      readonly evidence_ids: readonly string[];
-    },
-    name: string,
-    declaration: CatalogEntry,
-    identity: string,
-  ): void {
     const id = entityIdentity(image.selected_slice_id, 'library-contract', [
-      subject.id,
+      imported.id,
       name,
       '2',
     ]);
@@ -398,11 +326,11 @@ export function recoverLibraryContracts(
         };
     const contract: LibraryContract = {
       id,
-      import_id: subject.id,
-      library: subject.library,
-      linkage_name: subject.original_name,
-      slot: subject.slot,
-      callable_entry: subject.callable_entry,
+      import_id: imported.id,
+      library: imported.library,
+      linkage_name: imported.original_name,
+      slot: imported.slot,
+      callable_entry: imported.callable_entry,
       abi_state: unsupported ? 'unsupported' : 'supported',
       abi_signature,
       signature,
@@ -433,16 +361,16 @@ export function recoverLibraryContracts(
     );
     evidence.push({
       id: proof,
-      origin: { kind: 'library', library: subject.library, contract: name, version: '2' },
+      origin: { kind: 'library', library: imported.library, contract: name, version: '2' },
       claim:
-        `Conditional library declaration from ${identity}; no implementation authentication or argument initialization asserted`,
-      derived_from: [...subject.evidence_ids],
+        'Conditional library declaration from native import identity; no implementation authentication or argument initialization asserted',
+      derived_from: [...imported.evidence_ids],
       conflicts_with: [],
       revision,
     });
     for (const [role, address] of [
-      ['slot', subject.slot],
-      ['callable', subject.callable_entry],
+      ['slot', imported.slot],
+      ['callable', imported.callable_entry],
     ] as const) {
       if (address === null) continue;
       const normalized = image.address_map.translate(address, 'va');
@@ -454,14 +382,14 @@ export function recoverLibraryContracts(
     }
     if (unsupported) {
       partial = true;
-      withheld.add(subject.id);
+      withheld.add(imported.id);
       if (diagnostics.length < 256)
         diagnostics.push({
           code: 'unavailable_semantics',
           severity: 'info',
           message:
             'Swift runtime declaration retained without a supported Swift calling-convention profile',
-          entity_id: subject.id,
+          entity_id: imported.id,
           evidence_ids: [proof],
         });
     }
