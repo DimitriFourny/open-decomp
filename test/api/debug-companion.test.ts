@@ -97,3 +97,52 @@ test(
     assert.match(area, /^int64_t shape_area\(shape\* s\) \{$/m);
   },
 );
+
+test(
+  'a PE opened with its PDB gets names, prototypes, structures, globals and local names',
+  { timeout: 120000 },
+  async (t) => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'open-decomp-pdb-')));
+    const sessions: BinarySession[] = [];
+    t.after(async () => {
+      await Promise.all(sessions.map((session) => session.close()));
+      await rm(root, { recursive: true, force: true });
+    });
+    for (const name of ['shapes-O0.exe', 'shapes-O0.pdb', 'shapes-O2.pdb'])
+      await copyFile(join(FIXTURES, '../pe', name), join(root, name));
+    const options = { analysisCache: false, openJob: false } as const;
+    const bare = await openBinary(join(root, 'shapes-O0.exe'), options);
+    sessions.push(bare);
+    assert.equal(bare.image.debug?.source, 'none');
+    await assert.rejects(bare.decompile({ name: 'registry_visit' }), FunctionSelectionError);
+    const session = await openBinary(join(root, 'shapes-O0.exe'), {
+      ...options,
+      debugPath: join(root, 'shapes-O0.pdb'),
+    });
+    sessions.push(session);
+    const debug = session.image.debug!;
+    assert.equal(debug.source, 'companion');
+    assert.equal(debug.matched_by, 'guid-age');
+    assert.equal(debug.pdb?.age, 1);
+    assert.equal(debug.functions, 10);
+    assert.ok(debug.lines > 0 && debug.variables > 0);
+    const visit = text(await session.decompile({ name: 'registry_visit' }));
+    assert.match(visit, /int32_t registry_visit\(registry\* reg, void\* cookie\)/);
+    assert.match(visit, /uint32_t visited;/);
+    const main = text(await session.decompile({ name: 'shapes_main' }));
+    assert.match(main, /extern registry global_registry;/);
+    await assert.rejects(
+      async () => {
+        sessions.push(
+          await openBinary(join(root, 'shapes-O0.exe'), {
+            ...options,
+            debugPath: join(root, 'shapes-O2.pdb'),
+          }),
+        );
+      },
+      (error: unknown) =>
+        error instanceof BinaryOpenError &&
+        /does not match the image's PDB reference/.test(error.message),
+    );
+  },
+);

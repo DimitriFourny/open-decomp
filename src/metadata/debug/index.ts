@@ -26,8 +26,10 @@ import {
   type DwarfData,
   type DwarfSections,
 } from '../dwarf/index.js';
+import { parsePdb, type PdbResult } from '../pdb/index.js';
 import { selectElfDebugSections } from './elf.js';
 import { selectDebugSections } from './macho.js';
+import { matchPdb, unwindFrames } from './pe.js';
 export { debuglinkCrc, selectElfDebugSections } from './elf.js';
 export { selectDebugSections } from './macho.js';
 export { debugContextAt, frameVariableNames, variableLocationsAt } from './queries.js';
@@ -99,8 +101,11 @@ export interface DebugRecovery {
   readonly uuid: string | null;
   /** ELF GNU build ID (lowercase hex) of the image or matched debug file. */
   readonly build_id: string | null;
-  /** How a supplied debug artifact was matched; null for embedded debug data. */
-  readonly matched_by: 'uuid' | 'build-id' | 'debuglink' | null;
+  /** How a supplied debug artifact was matched; null for embedded debug data. A PDB
+   * matches by the GUID and age of the image's CodeView (RSDS) record. */
+  readonly matched_by: 'uuid' | 'build-id' | 'debuglink' | 'guid-age' | null;
+  /** The matched PDB's identity. */
+  readonly pdb: { readonly guid: string; readonly age: number } | null;
   readonly content_sha256: string;
   readonly data: DwarfData | null;
   readonly types: readonly DebugTypeRecord[];
@@ -119,7 +124,7 @@ interface DebugHeaders {
 
 function emptyRecovery(
   hash: string,
-  identity: Pick<DebugRecovery, 'uuid' | 'build_id' | 'matched_by'>,
+  identity: Pick<DebugRecovery, 'uuid' | 'build_id' | 'matched_by' | 'pdb'>,
   diagnostics: Diagnostic[],
   undecoded: boolean,
 ): DebugRecovery {
@@ -153,15 +158,24 @@ export function recoverDebugInfo(
   context: OperationContext,
   external?: ExternalDebugInput,
 ): DebugRecovery {
-  if (external) return computeDebugInfo(image, context, external);
+  if (external) return computeDebugInfo(image, recoveryContext(context), external);
   const cached = recoveries.get(image);
   const result = cached
     ? useBuilt(context, cached)
-    : buildOnce(context, 'debug-recovery', (quiet) => computeDebugInfo(image, quiet));
+    : buildOnce(context, 'debug-recovery', (quiet) =>
+        computeDebugInfo(image, recoveryContext(quiet)),
+      );
   recoveries.set(image, result);
-  // The output bound is the caller's own; checking it again costs nothing extra.
-  if (cached) boundDebugOutput(result, { ...context, checkpoint: () => context.checkpoint(0) });
   return result;
+}
+/** Conservative wire-size bound (`boundDebugOutput`) of one debug recovery. */
+export const DEBUG_RECOVERY_BYTES = 256 * 1024 * 1024;
+/** A recovery is a per-image structure every request shares, not one request's output: its
+ * size is bounded by DEBUG_RECOVERY_BYTES (with the readers' own count and text limits),
+ * never by the caller's output budget, so one cached recovery serves every caller alike.
+ * Work, deadline and cancellation remain the caller's. */
+function recoveryContext(context: OperationContext): OperationContext {
+  return { ...context, budget: { ...context.budget, output_bytes: DEBUG_RECOVERY_BYTES } };
 }
 const recoveries = new WeakMap<LoadedImage, DebugRecovery>();
 
@@ -179,18 +193,21 @@ function computeDebugInfo(
       artifact_id: `artifact_${companion.sha256}`,
       expectedSha256: companion.sha256,
     };
-  const none = { uuid: null, build_id: null, matched_by: null } as const;
-  if (image.target.format !== 'macho' && image.target.format !== 'elf') {
-    if (external)
-      throw new OperationError({
-        code: 'unsupported_target',
-        severity: 'error',
-        message:
-          'External debug recovery requires a Mach-O or ELF image; PDB parsing is not implemented',
-        evidence_ids: [],
-      });
-    return emptyRecovery(image.sha256, none, [], false);
-  }
+  // A PE image's debug information is a PDB; embedded (MinGW) DWARF is not read.
+  if (image.target.format === 'pe' && !external)
+    return emptyRecovery(
+      image.sha256,
+      { uuid: null, build_id: null, matched_by: null, pdb: null },
+      [],
+      false,
+    );
+  if (!['macho', 'elf', 'pe'].includes(image.target.format))
+    throw new OperationError({
+      code: 'unsupported_target',
+      severity: 'error',
+      message: 'Debug recovery requires a Mach-O, ELF or PE image',
+      evidence_ids: [],
+    });
   const slice = image.slices.find((candidate) => candidate.id === image.selected_slice_id);
   if (!slice)
     throw new OperationError({
@@ -221,60 +238,14 @@ function computeDebugInfo(
       message: 'External debug content SHA256 does not match the authorized identity',
       evidence_ids: [],
     });
-  const targetBytes = image.bytes.read(slice.offset, Number(slice.size));
-  let header: DebugHeaders;
-  try {
-    if (image.target.format === 'macho') {
-      const macho = selectDebugSections(targetBytes, context, external?.bytes);
-      header = {
-        ...macho,
-        uuid: macho.uuid || null,
-        build_id: null,
-        matched_by: external ? 'uuid' : null,
-      };
-    } else {
-      const elf = selectElfDebugSections(targetBytes, context, external?.bytes);
-      header = {
-        little: true,
-        sections: elf.sections,
-        diagnostics: elf.diagnostics,
-        uuid: null,
-        build_id: elf.buildId,
-        matched_by: elf.matched_by,
-      };
-      if (!external && !elf.present) return emptyRecovery(hash, header, [], false);
-    }
-  } catch (error) {
-    if (error instanceof OperationError) throw error;
-    // Embedded ELF debug data is optional evidence: a malformed table hides its
-    // declarations but never fails an image the loader accepted.
-    if (image.target.format === 'elf' && !external)
-      return emptyRecovery(hash, none, [dwarfDiagnostic(`ELF debug data: ${String(error)}`)], true);
-    throw new OperationError({ ...dwarfDiagnostic(String(error)), severity: 'error' });
-  }
-  const identity = {
-    uuid: header.uuid,
-    build_id: header.build_id,
-    matched_by: header.matched_by,
-  };
-  const diagnostics = header.diagnostics.map(dwarfDiagnostic);
-  if (!header.sections.get('__debug_info')?.length)
-    return emptyRecovery(hash, identity, diagnostics, diagnostics.length > 0);
-  const parsed = parseDwarfSections(header.sections, context, { littleEndian: header.little });
-  diagnostics.push(...parsed.diagnostics);
-  const data = parsed.data;
-  if (!data)
-    return {
-      status: parsed.status,
-      undecoded: parsed.status === 'partial',
-      ...identity,
-      content_sha256: hash,
-      data,
-      types: [],
-      functions: [],
-      evidence: [],
-      diagnostics,
-    };
+  const records =
+    image.target.format === 'pe'
+      ? pdbRecords(image, context, external!.bytes)
+      : dwarfRecords(image, context, slice, hash, external);
+  // A recovery here: no debug data, or none that could be decoded.
+  if ('status' in records) return records;
+  const { identity, diagnostics, data, unread } = records;
+  const source = image.target.format === 'pe' ? 'PDB' : 'DWARF';
   const ids = (record: string) => entityIdentity(image.selected_slice_id, 'dwarf', [hash, record]);
   const evidence: Evidence[] = [];
   const evidenceByRecord = new Map<string, string>();
@@ -295,7 +266,7 @@ function computeDebugInfo(
               start: { image_id: image.id, space: 'file', value: slice.offset },
               size: slice.size,
             },
-            description: `Embedded DWARF ${record}`,
+            description: `Embedded ${source} ${record}`,
           },
       claim,
       derived_from: [],
@@ -333,7 +304,9 @@ function computeDebugInfo(
         severity: 'warning',
         message,
         entity_id: ids(record),
-        evidence_ids: [evidenceFor(record, 'DWARF record has an unsupported structural contract')],
+        evidence_ids: [
+          evidenceFor(record, `${source} record has an unsupported structural contract`),
+        ],
       });
   };
   function definition(type: DebugType, active = new Set<string>()): RecoveredType {
@@ -345,7 +318,7 @@ function computeDebugInfo(
       size: type.byteSize === undefined ? null : BigInt(type.byteSize),
     };
     if (active.has(type.id) || active.size >= 128) {
-      diagnostic(type.id, 'Cyclic or excessive DWARF by-value type reference');
+      diagnostic(type.id, `Cyclic or excessive ${source} by-value type reference`);
       return unknown;
     }
     active.add(type.id);
@@ -383,7 +356,7 @@ function computeDebugInfo(
             dwarf_id: null,
             display_name: '',
             definition: result,
-            evidence_ids: [evidenceFor(type.id, 'Array dimensions recorded by DWARF')],
+            evidence_ids: [evidenceFor(type.id, `Array dimensions recorded by ${source}`)],
           });
           element = nestedId;
         }
@@ -424,7 +397,7 @@ function computeDebugInfo(
     if (result.kind === 'unknown' && !(target && definitions.get(target.id)?.kind === 'unknown'))
       diagnostic(
         type.id,
-        `Unsupported or incomplete structural DWARF ${type.kind} type; raw size/fields retained without inference from its name`,
+        `Unsupported or incomplete structural ${source} ${type.kind} type; raw size/fields retained without inference from its name`,
       );
     definitions.set(type.id, result);
     return result;
@@ -436,7 +409,7 @@ function computeDebugInfo(
       dwarf_id: type.id,
       display_name: type.name,
       definition: recovered,
-      evidence_ids: [evidenceFor(type.id, 'Structural type recorded by DWARF')],
+      evidence_ids: [evidenceFor(type.id, `Structural type recorded by ${source}`)],
       ...declaredSpelling(type, recovered, raw),
     });
   }
@@ -449,7 +422,10 @@ function computeDebugInfo(
   const functions: DebugFunctionRecord[] = [];
   for (const fn of data.functions) {
     context.checkpoint(1);
-    const evidenceId = evidenceFor(fn.id, 'Function ranges and source signature recorded by DWARF');
+    const evidenceId = evidenceFor(
+      fn.id,
+      `Function ranges and source signature recorded by ${source}`,
+    );
     const contract = fn.signature;
     let signature: Signature | null = null;
     // C-family concrete empty definitions establish zero arguments even when the
@@ -483,7 +459,7 @@ function computeDebugInfo(
     } else
       diagnostic(
         fn.id,
-        'DWARF function has an unspecified or unsupported calling contract; no core signature was inferred',
+        `${source} function has an unspecified or unsupported calling contract; no core signature was inferred`,
       );
     for (const range of fn.ranges ?? []) {
       context.checkpoint(image.mappings.length + 1);
@@ -497,7 +473,7 @@ function computeDebugInfo(
           diagnostics.push({
             code: 'invalid_address',
             severity: 'warning',
-            message: 'DWARF function range is not fully file-backed in the selected image',
+            message: `${source} function range is not fully file-backed in the selected image`,
             address: { image_id: image.id, space: 'va', value: range.start },
             evidence_ids: [evidenceId],
           });
@@ -541,7 +517,7 @@ function computeDebugInfo(
           throw new OperationError({
             code: 'resource_limit',
             severity: 'error',
-            message: 'DWARF conflict evidence exceeds 1000 references',
+            message: `${source} conflict evidence exceeds 1000 references`,
             evidence_ids: [],
           });
         evidence[index] = { ...record, conflicts_with: [...record.conflicts_with, other] };
@@ -550,24 +526,25 @@ function computeDebugInfo(
         diagnostics.push({
           code: 'conflicting_evidence',
           severity: 'warning',
-          message:
-            'Distinct DWARF function definitions claim overlapping machine code; both claims are retained',
+          message: `Distinct ${source} function definitions claim overlapping machine code; both claims are retained`,
           evidence_ids: [aEvidence, bEvidence],
         });
     }
   }
   for (const variable of data.variables ?? [])
-    evidenceFor(variable.id, 'Scoped symbolic variable location recorded by DWARF');
+    evidenceFor(variable.id, `Scoped symbolic variable location recorded by ${source}`);
   for (const scope of data.inlineScopes ?? [])
-    evidenceFor(scope.id, 'Inline call scope recorded by DWARF');
+    evidenceFor(scope.id, `Inline call scope recorded by ${source}`);
+  for (const symbol of data.publics ?? [])
+    evidenceFor(symbol.id, 'Public symbol name and address recorded by the PDB');
   if (data.lines.length)
-    evidenceFor('line-tables', 'Half-open source address intervals recorded by DWARF');
+    evidenceFor('line-tables', `Half-open source address intervals recorded by ${source}`);
   const result: DebugRecovery = {
     status: diagnostics.length ? 'partial' : 'complete',
     // Sections left unread (compression, relocations) or skipped units/DIEs hide
     // declarations; unrepresentable types and functions without a supported contract
     // are diagnosed records (see recoverTypes for the per-function consequence).
-    undecoded: header.diagnostics.length > 0 || data.undecoded === true,
+    undecoded: unread || data.undecoded === true,
     ...identity,
     content_sha256: hash,
     data,
@@ -580,9 +557,129 @@ function computeDebugInfo(
   return result;
 }
 
+/** Decoded debug records before their structural interpretation. */
+interface DebugRecords {
+  readonly identity: Pick<DebugRecovery, 'uuid' | 'build_id' | 'matched_by' | 'pdb'>;
+  readonly diagnostics: Diagnostic[];
+  readonly data: DwarfData;
+  /** Debug data that may hold declarations was not read. */
+  readonly unread: boolean;
+}
+
+/** The PDB of a PE image, matched by the GUID and age of its CodeView (RSDS) record; frame
+ * variables placed through the image's unwind data. */
+function pdbRecords(
+  image: LoadedImage,
+  context: OperationContext,
+  bytes: Uint8Array,
+): DebugRecords {
+  const match = matchPdb(image, bytes, context);
+  let parsed: PdbResult;
+  try {
+    parsed = parsePdb(bytes, context, {
+      sections: image.sections.map((section) => section.virtual_range.start.value),
+      frame: unwindFrames(image),
+    });
+  } catch (error) {
+    if (error instanceof OperationError) throw error;
+    throw new OperationError({ ...dwarfDiagnostic(`PDB: ${String(error)}`), severity: 'error' });
+  }
+  boundDebugOutput(parsed.data, context);
+  return {
+    identity: {
+      uuid: null,
+      build_id: null,
+      matched_by: 'guid-age',
+      pdb: { guid: match.guid, age: match.age },
+    },
+    // Counted limitations ("PDB: 12 procedures have no procedure type") are unsupported
+    // records, not malformed ones.
+    diagnostics: parsed.data.diagnostics.map((message) => ({
+      ...dwarfDiagnostic(message),
+      ...(/^PDB: \d/.test(message) ? { code: 'unavailable_semantics' as const } : {}),
+    })),
+    data: parsed.data,
+    unread: false,
+  };
+}
+
+/** DWARF of a Mach-O or ELF image: embedded, or in its matched companion file. */
+function dwarfRecords(
+  image: LoadedImage,
+  context: OperationContext,
+  slice: LoadedImage['slices'][number],
+  hash: string,
+  external?: ExternalDebugInput,
+): DebugRecords | DebugRecovery {
+  const none = { uuid: null, build_id: null, matched_by: null, pdb: null } as const;
+  const targetBytes = image.bytes.read(slice.offset, Number(slice.size));
+  let header: DebugHeaders;
+  try {
+    if (image.target.format === 'macho') {
+      const macho = selectDebugSections(targetBytes, context, external?.bytes);
+      header = {
+        ...macho,
+        uuid: macho.uuid || null,
+        build_id: null,
+        matched_by: external ? 'uuid' : null,
+      };
+    } else {
+      const elf = selectElfDebugSections(targetBytes, context, external?.bytes);
+      header = {
+        little: true,
+        sections: elf.sections,
+        diagnostics: elf.diagnostics,
+        uuid: null,
+        build_id: elf.buildId,
+        matched_by: elf.matched_by,
+      };
+      if (!external && !elf.present)
+        return emptyRecovery(
+          hash,
+          { ...none, build_id: elf.buildId, matched_by: elf.matched_by },
+          [],
+          false,
+        );
+    }
+  } catch (error) {
+    if (error instanceof OperationError) throw error;
+    // Embedded ELF debug data is optional evidence: a malformed table hides its
+    // declarations but never fails an image the loader accepted.
+    if (image.target.format === 'elf' && !external)
+      return emptyRecovery(hash, none, [dwarfDiagnostic(`ELF debug data: ${String(error)}`)], true);
+    throw new OperationError({ ...dwarfDiagnostic(String(error)), severity: 'error' });
+  }
+  const identity = {
+    uuid: header.uuid,
+    build_id: header.build_id,
+    matched_by: header.matched_by,
+    pdb: null,
+  };
+  const diagnostics = header.diagnostics.map(dwarfDiagnostic);
+  if (!header.sections.get('__debug_info')?.length)
+    return emptyRecovery(hash, identity, diagnostics, diagnostics.length > 0);
+  const parsed = parseDwarfSections(header.sections, context, { littleEndian: header.little });
+  diagnostics.push(...parsed.diagnostics);
+  const data = parsed.data;
+  if (!data)
+    return {
+      status: parsed.status,
+      undecoded: parsed.status === 'partial',
+      ...identity,
+      content_sha256: hash,
+      data,
+      types: [],
+      functions: [],
+      evidence: [],
+      diagnostics,
+    };
+  // Sections left unread (compression, relocations) hide declarations.
+  return { identity, diagnostics, data, unread: header.diagnostics.length > 0 };
+}
+
 /** Function and global symbols a companion debug file declares where the image has none (a
- * stripped image): functions at their DWARF entry, sized by a single contiguous range, and
- * globals at their static DW_OP_addr. Each carries the debug record's evidence. Seeds and
+ * stripped image, a PE image and its PDB): functions at their debug entry, sized by a single
+ * contiguous range, globals at their static address (DW_OP_addr, S_GDATA32) and PDB publics. Each carries the debug record's evidence. Seeds and
  * names discovery like any symbol; never replaces an image symbol. */
 export function companionSymbols(
   image: LoadedImage,
@@ -606,7 +703,12 @@ export function companionSymbols(
     proof: readonly string[],
   ) => {
     context.checkpoint(1);
-    if (symbols.length >= limit || taken.has(address) || !/^[\x21-\x7e]{1,4096}$/.test(name))
+    // Printable ASCII; inner spaces allowed (C++ names: `std::map<int, char>::find`).
+    if (
+      symbols.length >= limit ||
+      taken.has(address) ||
+      !/^[\x21-\x7e](?:[\x20-\x7e]{0,4094}[\x21-\x7e])?$/.test(name)
+    )
       return;
     const translated = image.address_map.translate(
       { image_id: image.id, space: 'va', value: address },
@@ -680,6 +782,14 @@ export function companionSymbols(
       proof,
     ]);
   }
+  // Linker publics (PDB) name what no debug record declares: code compiled without debug
+  // information, imported data. Compiler-generated constants (string literals `??_C@`,
+  // floating-point pools `__real@`/`__xmm@`) are left to the data they hold.
+  for (const symbol of recovery.data?.publics ?? []) {
+    if (/^(\?\?_C@|__real@|__xmm@)/.test(symbol.name)) continue;
+    const proof = `evidence_${fingerprint([image.selected_slice_id, recovery.content_sha256, symbol.id])}`;
+    add(symbol.id, symbol.name, symbol.code ? 'function' : 'object', symbol.address, null, [proof]);
+  }
   return { symbols, evidence: [...used.values()] };
 }
 
@@ -706,6 +816,7 @@ export function debugSummary(
       matched_by: null,
       uuid: null,
       build_id: null,
+      pdb: null,
       companion_sha256: image.companion?.sha256 ?? null,
       functions: 0,
       types: 0,
@@ -720,6 +831,7 @@ export function debugSummary(
     matched_by: recovery.matched_by,
     uuid: recovery.uuid,
     build_id: recovery.build_id,
+    pdb: recovery.pdb,
     companion_sha256: image.companion?.sha256 ?? null,
     functions: recovery.functions.length,
     types: recovery.data?.types.length ?? 0,

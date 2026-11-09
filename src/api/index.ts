@@ -53,8 +53,8 @@ export interface OpenBinaryOptions {
   readonly cachePath?: string;
   readonly sliceId?: string;
   /** Separate debug file of the binary (the DWARF file inside a `.dSYM` bundle, an ELF
-   * `objcopy --only-keep-debug` file), imported with it after its UUID, GNU build ID or
-   * `.gnu_debuglink` CRC matches. Part of the project identity: the same binary with and
+   * `objcopy --only-keep-debug` file, a PE's PDB), imported with it after its UUID, GNU
+   * build ID, `.gnu_debuglink` CRC or PDB GUID and age matches. Part of the project identity: the same binary with and
    * without a debug file are two projects. Nothing is looked up by path or ID. */
   readonly debugPath?: string;
   /** `false` disables analysis caching for this session: no derived analysis (published

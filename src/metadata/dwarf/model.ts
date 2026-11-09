@@ -104,6 +104,15 @@ export interface DebugLine {
   endAddress?: bigint | undefined;
   endSequence?: boolean | undefined;
 }
+/** A linker public symbol (PDB S_PUB32): a name at an address, without a contract. Names
+ * are as linked (MSVC-decorated for C++), demangled for display like any symbol. */
+export interface DebugPublic {
+  id: string;
+  name: string;
+  address: bigint;
+  /** The linker marked it code or a function. */
+  code: boolean;
+}
 export interface DebugSymbols {
   uuid: string;
   functions: DebugFunction[];
@@ -115,4 +124,5 @@ export interface DebugSymbols {
   undecoded?: boolean | undefined;
   variables?: DebugVariable[] | undefined;
   inlineScopes?: DebugInlineScope[] | undefined;
+  publics?: DebugPublic[] | undefined;
 }

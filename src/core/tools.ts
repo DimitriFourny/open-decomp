@@ -282,7 +282,7 @@ export const projectOpenArgsSchema = z.strictObject({
       kind: z.literal('import'),
       input_path: z.string().min(1).max(32768),
       /** Separate debug file of the input, imported with it and matched to it (the DWARF
-       * file inside a dSYM bundle, an ELF `objcopy --only-keep-debug` file). */
+       * file inside a dSYM bundle, an ELF `objcopy --only-keep-debug` file, a PE's PDB). */
       debug_path: z.string().min(1).max(32768).optional(),
       project_path: z.string().min(1).max(32768),
       slice_id: sliceIdSchema.optional(),
