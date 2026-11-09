@@ -73,6 +73,37 @@ test('unrelated seeded bodies do not consume a selected two-instruction graph bu
   assert.deepEqual(observed[1], observed[0]);
 });
 
+test('a structured graph after its formatted listing reuses the traversal at the same charge', () => {
+  const image = selectedImage(3);
+  const decoder = new Arm64Decoder();
+  try {
+    const published = discoverFunctions({ image, decoder, revision: 2 }, createOperationContext());
+    const functions = published.graphs.map((item) => item.function);
+    const fn = functions.find((item) => item.entry.value === 0x1018n)!;
+    const graph = (project_id: string, formatting: boolean) => {
+      const context = createOperationContext();
+      const value = reconstructFunctionGraph(
+        { project_id, revision: 2, image, function: fn, functions, formatting },
+        context,
+      );
+      return { value, work: context.consumedWork!() };
+    };
+    const fresh = graph('reuse-fresh', false);
+    const formatted = graph('reuse-cached', true);
+    const structured = graph('reuse-cached', false);
+    // Served by the formatted request's traversal (same instruction objects), without its
+    // presentations, charging what the fresh structured build charged.
+    assert.equal(structured.value.instructions, formatted.value.instructions);
+    assert.equal(structured.value.presentations, undefined);
+    assert.equal(formatted.value.presentations?.size, 2);
+    assert.deepEqual(structured.value, fresh.value);
+    assert.equal(structured.work, fresh.work);
+    assert.ok(formatted.work > fresh.work);
+  } finally {
+    decoder.dispose();
+  }
+});
+
 test('direct native calls do not enlarge caller ownership', () => {
   // bl +8; ret; mov w0, #42; ret
   const base = navigationBytes(

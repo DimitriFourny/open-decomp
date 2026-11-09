@@ -666,14 +666,18 @@ export class SqliteProjectStore implements ProjectStore {
     return { image_id, existing: false };
   }
 
-  #readImageBytes(imageId: string): Uint8Array {
+  /** The stored image file, checked against its content hash. `verified`: bytes of this
+   * image already checked; a file equal to them needs no new hash (comparing costs far less
+   * than hashing, most of all with a JavaScript SHA-256), and any other file is hashed. */
+  #readImageBytes(imageId: string, verified?: ImmutableBytes): Uint8Array {
     this.#current();
     imageIdSchema.parse(imageId);
     const row = this.#prepare('SELECT sha256 FROM images WHERE image_id=?').get(imageId);
     if (!row) fail('not_found', 'Image is not part of this project');
     const sha = digestSchema.parse(row['sha256']);
     const bytes = checkedFile(this.#storagePath('images', sha), MAX_IMAGE_BYTES);
-    if (contentHash(bytes) !== sha) fail('invalid_input', 'Stored image integrity check failed');
+    if (!verified?.equals(bytes) && contentHash(bytes) !== sha)
+      fail('invalid_input', 'Stored image integrity check failed');
     return bytes;
   }
 
@@ -720,8 +724,9 @@ export class SqliteProjectStore implements ProjectStore {
     const cached = this.#loadedImages.get(key);
     if (cached) {
       // Retain the original full-file integrity check even on a warm metadata hit.
-      // Do not trust timestamps or a cached digest of externally replaceable files.
-      this.#readImageBytes(imageId);
+      // Do not trust timestamps or a cached digest of externally replaceable files: the
+      // file is read again and must equal the verified bytes (or hash to the digest).
+      this.#readImageBytes(imageId, cached.image.bytes);
       this.#loadedImages.delete(key);
       this.#loadedImages.set(key, cached);
       return cached.image;
