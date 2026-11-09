@@ -86,6 +86,10 @@ import {
   type TypeSpec,
 } from '../metadata/library-contracts/catalog.js';
 import {
+  libraryConstantSet,
+  libraryConstantText,
+} from '../metadata/library-contracts/constant-names.js';
+import {
   planSourceNames,
   sourceGenericStems,
   sourceIdentifierStem,
@@ -469,6 +473,8 @@ export class Renderer {
   private readonly headerStatements = new Set<string>();
   private readonly typeRecords = new Map<string, SuppliedTypeRecord | null>();
   private readonly libraryDeclarations = new Map<string, readonly CatalogEntry[]>();
+  /** Library declaration proof -> declared function name (`open`, `CreateFileW`). */
+  private readonly libraryContractNames = new Map<string, string>();
   private readonly callParameterSpellings = new Map<string, string | null>();
   /** C integer type of each printed struct-member lvalue, by its text. */
   private readonly memberTypes = new Map<string, IntegerCType>();
@@ -669,6 +675,7 @@ export class Renderer {
         if (proof.origin.kind === 'library') {
           const found = findDeclarationByPath(proof.origin.contract, proof.origin.library);
           if (found.length) this.libraryDeclarations.set(proof.id, found);
+          if (found.length) this.libraryContractNames.set(proof.id, proof.origin.contract);
         }
       }
     for (const signature of input.types?.signatures ?? []) {
@@ -2814,6 +2821,40 @@ export class Renderer {
     return agreed;
   }
 
+  /** Header constant names of a library call's constant argument (`O_WRONLY | O_CREAT`,
+   * `0644`): every library declaration the signature rests on must name one function, and
+   * the target ABI's headers must spell the exact value. */
+  private libraryConstantArgument(
+    projection: BoundaryProjection,
+    index: number,
+    value: Value,
+  ): string | undefined {
+    const abi = this.input.source?.abi.id;
+    const constant = this.constantOf(value);
+    if (!abi || constant === undefined || value.type.kind !== 'integer') return undefined;
+    let name: string | undefined;
+    for (const id of projection.signature?.evidence_ids ?? []) {
+      this.context.checkpoint(1);
+      const declared = this.libraryContractNames.get(id);
+      if (declared === undefined) continue;
+      if (name !== undefined && name !== declared) return undefined;
+      name = declared;
+    }
+    const set = name === undefined ? undefined : libraryConstantSet(name, index);
+    const text =
+      set &&
+      libraryConstantText(
+        abi,
+        set,
+        constant,
+        value.type.bits,
+        this.language === 'python-like' ? '0o' : '0',
+      );
+    return text !== undefined && this.printer.simplify('library_constant', [value.id])
+      ? this.guarded(text)
+      : undefined;
+  }
+
   /** A pointer type whose pointee is an 8-bit integer (`char`, `uint8_t`). */
   private bytePointerType(id: string): boolean {
     const pointer = this.typeRecords.get(id)?.definition;
@@ -3659,7 +3700,9 @@ export class Renderer {
         if (emitted.has(name)) continue;
         emitted.add(name);
         structures.push(id);
-        for (const field of type.fields) pending.push(field.type_id);
+        // A header record is declared by its library header: no body, no member types.
+        if (record.source !== 'library')
+          for (const field of type.fields) pending.push(field.type_id);
       }
     }
     // Every structure name is typedef'd only where the finished text mentions it.
@@ -3730,6 +3773,7 @@ export class Renderer {
       const members = this.partialLayout(id);
       if (!members) continue;
       const record = this.typeRecords.get(id);
+      if (record?.source === 'library') continue;
       const tag =
         record?.source === 'user' || record?.source === 'llm'
           ? this.sourceStructs.tag(id)
@@ -5163,6 +5207,8 @@ export class Renderer {
       !pointer && this.characterParameter(projection, index) ? this.constantOf(value) : undefined;
     const character = code === undefined ? undefined : this.printer.character(code, true);
     if (character && this.printer.simplify('character_literal', [value.id])) return character.text;
+    const symbolic = this.libraryConstantArgument(projection, index, value);
+    if (symbolic !== undefined) return symbolic;
     const objcLiteral = literalsAllowed ? this.objcLiteral(value) : undefined;
     const literal =
       objcLiteral ??

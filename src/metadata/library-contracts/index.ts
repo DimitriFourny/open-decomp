@@ -21,6 +21,7 @@ import {
   type CatalogEntry,
   type TypeSpec,
 } from './catalog.js';
+import { libraryRecord, type FieldSpec, type LibraryRecord } from './generated/types/index.js';
 import { abiTypedefColumn, isAbiTypedef, libraryScalar, type PlainScalar } from './variables.js';
 export type { ArgumentMemory } from './catalog.js';
 
@@ -42,8 +43,19 @@ export interface LibraryType {
   readonly definition: RecoveredType;
   readonly abi_type: AbiType;
   readonly evidence_ids: readonly string[];
-  /** Declared C name of an opaque or handle type, printed instead of an anonymous name. */
+  /** Declared C name of an opaque or handle type, printed instead of an anonymous name;
+   * for a header record, its tag with keyword (`struct stat`) or typedef name (`FILE`). */
   readonly spelling?: string;
+  /** A header record: its field names are the declared member names. */
+  readonly member_names?: true;
+}
+
+/** Printed name of a header record: the tag of `struct stat`, the typedef name `FILE`;
+ * a member's unnamed record type (`struct sigaction.__sigaction_handler`) has none. */
+function recordSpelling(name: string, record: LibraryRecord): string | undefined {
+  if (record.name.includes('.')) return undefined;
+  if (/^(?:struct|union) \w+$/.test(name)) return name;
+  return /^\w+$/.test(name) ? name : undefined;
 }
 export interface LibraryContract {
   readonly id: string;
@@ -212,9 +224,76 @@ export function recoverLibraryContracts(
       ? integer(shape.bits, shape.signed, shape.name)
       : float(shape.bits, shape.name);
   };
+  /** A header record (`struct stat`, `FILE`) as a structure with its declared members;
+   * the record is registered before its members resolve, so a member pointing back to it
+   * (`struct _LIST_ENTRY *Flink`) reuses its ID. */
+  function resolveRecord(
+    spec: Extract<TypeSpec, { kind: 'opaque' }>,
+    record: LibraryRecord,
+    proof: string,
+  ): LibraryType {
+    const id = entityIdentity(image.selected_slice_id, 'library-type', [
+        abi.id,
+        ['record', spec.name],
+      ]),
+      prior = types.get(id);
+    if (prior) {
+      if (!prior.evidence_ids.includes(proof))
+        types.set(id, { ...prior, evidence_ids: [...prior.evidence_ids, proof] });
+      return prior;
+    }
+    const size = record.size === null ? null : BigInt(record.size);
+    const spelling = recordSpelling(spec.name, record);
+    const shell: LibraryType = {
+      id,
+      name: spec.name,
+      definition: { kind: 'structure', size, alignment: record.alignment, fields: [] },
+      abi_type: { kind: 'unknown', size },
+      evidence_ids: [proof],
+      ...(spelling === undefined ? {} : { spelling }),
+      member_names: true,
+    };
+    types.set(id, shell);
+    const fields = record.fields.map((field) => ({
+      id: entityIdentity(image.selected_slice_id, 'library-field', [id, field.name]),
+      name: field.name,
+      offset: BigInt(field.offset),
+      type_id: resolveField(field.type, proof).id,
+    }));
+    const value: LibraryType = {
+      ...(types.get(id) ?? shell),
+      definition: { kind: 'structure', size, alignment: record.alignment, fields },
+    };
+    types.set(id, value);
+    return value;
+  }
+  function resolveField(spec: FieldSpec, proof: string): LibraryType {
+    if (typeof spec === 'string' || spec.kind !== 'array') return resolve(spec, proof);
+    const element = resolveField(spec.of, proof);
+    const count = spec.count === null ? null : BigInt(spec.count);
+    const id = entityIdentity(image.selected_slice_id, 'library-type', [
+        abi.id,
+        ['array', element.id, spec.count],
+      ]),
+      prior = types.get(id);
+    if (prior) return prior;
+    const value: LibraryType = {
+      id,
+      name: `array of ${element.name}`,
+      definition: { kind: 'array', element: element.id, count },
+      abi_type: { kind: 'unknown', size: null },
+      evidence_ids: [proof],
+    };
+    types.set(id, value);
+    return value;
+  }
   function resolve(spec: TypeSpec, proof: string): LibraryType {
     context.checkpoint(1);
     let resolved: TypeSpecResolution, spelling: string | undefined;
+    if (typeof spec === 'object' && spec.kind === 'opaque' && spec.spelled !== false) {
+      const record = libraryRecord(abi.id, spec.name);
+      if (record) return resolveRecord(spec, record, proof);
+    }
     if (typeof spec === 'string') {
       if (isAbiTypedef(spec)) return resolve(ABI_TYPEDEFS[spec][abiColumn], proof);
       if (spec === 'fnptr') return resolve(FUNCTION_POINTER, proof);

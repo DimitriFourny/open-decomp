@@ -39,6 +39,11 @@ export interface CParsedType {
   readonly definition: CTypeDefinition;
 }
 
+export interface CEnumerator {
+  readonly name: string;
+  readonly value: bigint;
+}
+
 /** 1-based line and column (UTF-16 code units). */
 export interface CDiagnostic {
   readonly message: string;
@@ -51,5 +56,7 @@ export interface CParseResult {
   readonly types: readonly CParsedType[];
   /** C name (struct/union/enum tag or typedef name) -> key into `types`. */
   readonly named: ReadonlyMap<string, string>;
+  /** Enumeration key (into `types`, an integer) -> its enumerators in declaration order. */
+  readonly enumerators: ReadonlyMap<string, readonly CEnumerator[]>;
   readonly diagnostics: readonly CDiagnostic[];
 }

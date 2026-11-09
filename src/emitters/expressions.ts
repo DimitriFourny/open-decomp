@@ -501,6 +501,8 @@ const simplifications = {
     'a rotation of a w-bit unsigned bare variable by a constant 0<k<w is (x << k) | (x >> (w-k)) reduced to w bits, printed in the direction with the smaller count; the variable is pure, so reading it twice in one expression is exact',
   character_literal:
     'a constant combined with a value established as one character code (a byte loaded through a pointer to bytes, or a library character parameter) is that code spelled as the character constant of the same value',
+  library_constant:
+    "a constant argument of a library call whose platform header names that parameter's values (curated per function and argument) is spelled with those header names: the names denote the same value on the target ABI (library-derived presentation)",
   pointer_identity:
     'identity comparison of two declared pointer variables of one type, or of one with the null constant (integer zero): equal address bits compare equal, so no integer round trip is printed',
   equality_sign_reinterpretation:

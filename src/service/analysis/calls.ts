@@ -142,8 +142,26 @@ function buildNativeCallIndex(
   }
   const referencesByFunction = new Map<string, Map<string, ReferenceRecord[]>>();
   const callersByTarget = new Map<string, ReferenceRecord[]>();
+  const stubImports = new Map<string, LoadedImage['imports'][number][]>();
   for (const reference of references) {
     context.checkpoint(1);
+    // A published import stub (an ELF PLT entry, a PE thunk) at an address no import names
+    // as its loader callable entry: its established forwarding branch through the import
+    // slot is the proof that calling the stub calls that import.
+    const stub =
+      reference.kind === 'branch' && reference.from_function !== null
+        ? functionsById.get(reference.from_function)
+        : undefined;
+    const forwarded =
+      stub?.kind === 'import_stub' && reference.status === 'established' && reference.to_entity
+        ? importsById.get(reference.to_entity)
+        : undefined;
+    if (stub && forwarded && !forwarded.weak) {
+      const key = nativeAddressKey(stub.entry),
+        list = stubImports.get(key) ?? [];
+      if (!list.includes(forwarded)) list.push(forwarded);
+      stubImports.set(key, list);
+    }
     if (reference.kind === 'call' || reference.kind === 'tail_call') {
       if (reference.to) {
         const key = nativeAddressKey(reference.to),
@@ -165,6 +183,8 @@ function buildNativeCallIndex(
     byInstruction.set(reference.from_instruction, list);
     referencesByFunction.set(reference.from_function, byInstruction);
   }
+  for (const [key, list] of stubImports)
+    if (!importsByAddress.has(key)) importsByAddress.set(key, list);
   const indexed: NativeCallIndex = {
     functions,
     references,

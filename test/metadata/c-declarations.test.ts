@@ -131,6 +131,11 @@ test('typedef of an anonymous struct takes the typedef name; nested anonymous ty
   assert.deepEqual(definition(result, 'Rec$name'), { kind: 'pointer', to: 'int8_t', bits: 64 });
   assert.deepEqual(definition(result, 'RecPtr'), { kind: 'pointer', to: 'Rec', bits: 64 });
   assert.deepEqual(definition(result, 'Color'), { kind: 'integer', bits: 32, signed: true });
+  assert.deepEqual(result.enumerators.get(result.named.get('Color')!), [
+    { name: 'RED', value: 0n },
+    { name: 'GREEN', value: 4n },
+    { name: 'BLUE', value: 5n },
+  ]);
   assert.equal(result.named.get('Node'), 'Node');
   assert.deepEqual(layout(result, 'Node'), { size: 24n, fields: ['next@0', 'prev@8', 'color@16'] });
   assert.deepEqual(definition(result, 'NodeRef'), { kind: 'pointer', to: 'Node', bits: 64 });

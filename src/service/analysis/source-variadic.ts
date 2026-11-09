@@ -10,6 +10,7 @@ import {
   type SSAForm,
   type Value,
 } from '../../ir/index.js';
+import { libraryConstant } from '../../metadata/library-contracts/generated/types/index.js';
 import type { LibraryContracts } from '../../metadata/library-contracts/index.js';
 import type { SourceAddress } from '../../reconstruction/source-model.js';
 
@@ -257,13 +258,18 @@ function locationCandidates(
   return cursor === end ? [...new Set(values)] : null;
 }
 
-/** Darwin `open` reads its mode argument exactly when `O_CREAT` (0x200 in the
- * Darwin `<sys/fcntl.h>`) is set and has no other mode-consuming flag. Other
- * targets use only the target-independent rule that zero flags take no mode. */
+/** `open` reads its mode argument exactly when the flags create a file: `O_CREAT`, or
+ * all of `O_TMPFILE` on Linux (glibc `__OPEN_NEEDS_MODE`, Darwin `<sys/fcntl.h>`), with the
+ * flag values of the target's headers. Zero flags take no mode on every target. */
 function openModeRequired(abi: AbiProfile, flags: readonly bigint[]): boolean | null {
   if (flags.every((value) => value === 0n)) return false;
-  if (abi.id !== 'darwin-arm64') return null;
-  const created = flags.map((value) => (value & 0x200n) !== 0n);
+  const create = libraryConstant(abi.id, 'O_CREAT');
+  if (create === undefined) return null;
+  const temporary = libraryConstant(abi.id, 'O_TMPFILE');
+  const created = flags.map(
+    (value) =>
+      (value & create) !== 0n || (temporary !== undefined && (value & temporary) === temporary),
+  );
   return created.every(Boolean) ? true : created.some(Boolean) ? null : false;
 }
 

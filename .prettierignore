@@ -15,3 +15,8 @@ licenses/
 
 # Generated header interface data (byte identity matters; see scripts/generate-library-prototypes.ts).
 /src/metadata/library-contracts/generated/data/
+
+# Generated per-ABI record layouts and constants (see scripts/generate-library-types.ts).
+/src/metadata/library-contracts/generated/types/darwin-arm64.ts
+/src/metadata/library-contracts/generated/types/sysv-amd64.ts
+/src/metadata/library-contracts/generated/types/windows-x64.ts

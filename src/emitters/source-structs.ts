@@ -235,7 +235,7 @@ export class SourceStructs {
     const tag =
       record?.definition.kind === 'structure' &&
       record.spelling &&
-      /^[A-Za-z_$][\w$]*$/.test(record.spelling)
+      (/^[A-Za-z_$][\w$]*$/.test(record.spelling) || this.libraryTag(record) !== undefined)
         ? record.spelling
         : undefined;
     const image = this.images.get(id)?.name;
@@ -258,6 +258,8 @@ export class SourceStructs {
    * complete type name that needs no typedef. Undefined for every other structure. */
   tag(id: string): string | undefined {
     const record = this.records.get(id);
+    const library = record ? this.libraryTag(record) : undefined;
+    if (library !== undefined) return library;
     if (
       (record?.source !== 'user' && record?.source !== 'llm') ||
       record.definition.kind !== 'structure' ||
@@ -268,6 +270,15 @@ export class SourceStructs {
     const { fields } = record.definition;
     const union = fields.length > 1 && fields.every((field) => field.offset === 0n);
     return `${union ? 'union' : 'struct'} ${record.spelling}`;
+  }
+
+  /** A header record named by its tag (`struct stat`): spelled with its keyword. */
+  private libraryTag(record: SuppliedTypeRecord): string | undefined {
+    return record.source === 'library' &&
+      record.definition.kind === 'structure' &&
+      /^(?:struct|union) [A-Za-z_]\w*$/.test(record.spelling ?? '')
+      ? record.spelling
+      : undefined;
   }
 
   private storage(id: string): { size: bigint; bits: number } | null {
