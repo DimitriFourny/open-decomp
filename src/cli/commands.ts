@@ -13,6 +13,8 @@ interface Arguments {
   json: boolean;
   cachePath?: string;
   sliceId?: string;
+  /** `--debug PATH`: separate debug file imported with the binary. */
+  debugPath?: string;
   /** Explicit `--analysis-cache` / `--no-analysis-cache`; absent means the settings decide. */
   analysisCache?: boolean;
   /** `--no-open-job`: open without the open-time job. */
@@ -40,7 +42,7 @@ type AnalysisResult =
 
 const settingsOption = '[--settings PATH]';
 const cacheOptions =
-  '[--cache PATH] [--slice ID] [--analysis-cache|--no-analysis-cache] [--no-open-job] [--unit-store-mib N]';
+  '[--cache PATH] [--slice ID] [--debug PATH] [--analysis-cache|--no-analysis-cache] [--no-open-job] [--unit-store-mib N]';
 const usage = {
   functions: `open-decomp functions BINARY [--name TEXT] [--json] ${cacheOptions} ${settingsOption}`,
   decompile: `open-decomp decompile BINARY (--function NAME | --id ID | --address va:0x.../rva:0x.../file:0x...) [--language c-like|python-like] [--view source|checked] [--inference proven|likely] [--json] ${cacheOptions} ${settingsOption}`,
@@ -129,6 +131,7 @@ function parse(args: readonly string[]): ParsedArguments {
   const allowed = [
     '--cache',
     '--slice',
+    '--debug',
     '--settings',
     '--unit-store-mib',
     ...(command === 'functions'
@@ -191,6 +194,8 @@ function parse(args: readonly string[]): ParsedArguments {
     slice = values.get('--slice'),
     settings = values.get('--settings');
   if (cache !== undefined) result.cachePath = cache;
+  const debug = values.get('--debug');
+  if (debug !== undefined) result.debugPath = debug;
   if (settings !== undefined) result.settingsPath = settings;
   if (slice !== undefined) {
     if (!sliceIdSchema.safeParse(slice).success) throw new UsageError('--slice must be a slice ID');
@@ -273,7 +278,7 @@ function help(command: Command): void {
           : command === 'decompile'
             ? 'Decompile one exact, unambiguous function name, entity ID or address.\nText stdout contains only pseudocode; JSON preserves the result envelope.\n--inference proven|likely  proven (default) closes only established interfaces; likely also closes open argument lists by gated heuristics (each guess is marked `likely_arity(...)` and recorded as a guess inference; may be wrong).'
             : 'Print the image-wide merged structure types as C declarations (the names decompile uses).\nAnalyzes function bodies within the default budget; a partial result exits 2.'
-    }\n\n--cache PATH  Override the sidecar cache root (default: BINARY.open-decomp).\n--slice ID    Select a binary slice.\n--analysis-cache     Force analysis caching on (overrides analysis_cache: false in a settings file).\n--no-open-job  Open without the open-time job, which prepares every function's callee unit in helper processes at open and persists it (callees first, within the unit store cap). Output and per-request work are identical either way.\n--unit-store-mib N  Byte cap of the project's persisted callee units (1..1048576 MiB; default 256). Units past it are prepared on demand.\n--no-analysis-cache  Read and write no derived analysis: no published results, reuse candidates or persisted callee summaries, and no in-process summary reuse. Import and indexes still persist. Output is identical; repeated and cross-process runs are slower.\n--settings PATH  Read settings from PATH instead of $XDG_CONFIG_HOME/open-decomp/settings.json (default ~/.config/open-decomp/settings.json). A flag beats the file; the file beats built-in defaults. See: open-decomp settings --help.\n${command === 'export' ? '' : '--json        Write {project_path,reused,result} JSON to stdout.\n'}--help        Show this help.\nProgress, project reuse and diagnostics go to stderr. Work stays in the foreground.\nExit: ${command === 'export' ? '0 all files written (even if some functions are partial/failed); 1 error/cancelled' : '0 complete/empty; 2 semantic partial; 1 error/unsupported/cancelled'}; 130 SIGINT; 143 SIGTERM.\n`,
+    }\n\n--cache PATH  Override the sidecar cache root (default: BINARY.open-decomp).\n--slice ID    Select a binary slice.\n--debug PATH  Import a separate debug file with the binary (the DWARF file inside a .dSYM bundle, or an ELF objcopy --only-keep-debug file), matched by UUID, GNU build ID or .gnu_debuglink CRC. The pair is its own project.\n--analysis-cache     Force analysis caching on (overrides analysis_cache: false in a settings file).\n--no-open-job  Open without the open-time job, which prepares every function's callee unit in helper processes at open and persists it (callees first, within the unit store cap). Output and per-request work are identical either way.\n--unit-store-mib N  Byte cap of the project's persisted callee units (1..1048576 MiB; default 256). Units past it are prepared on demand.\n--no-analysis-cache  Read and write no derived analysis: no published results, reuse candidates or persisted callee summaries, and no in-process summary reuse. Import and indexes still persist. Output is identical; repeated and cross-process runs are slower.\n--settings PATH  Read settings from PATH instead of $XDG_CONFIG_HOME/open-decomp/settings.json (default ~/.config/open-decomp/settings.json). A flag beats the file; the file beats built-in defaults. See: open-decomp settings --help.\n${command === 'export' ? '' : '--json        Write {project_path,reused,result} JSON to stdout.\n'}--help        Show this help.\nProgress, project reuse and diagnostics go to stderr. Work stays in the foreground.\nExit: ${command === 'export' ? '0 all files written (even if some functions are partial/failed); 1 error/cancelled' : '0 complete/empty; 2 semantic partial; 1 error/unsupported/cancelled'}; 130 SIGINT; 143 SIGTERM.\n`,
   );
 }
 
@@ -399,6 +404,7 @@ export async function runAnalysisCli(args: readonly string[]): Promise<void> {
     session = await openBinary(parsed.binary, {
       ...(cachePath === undefined ? {} : { cachePath }),
       ...(parsed.sliceId === undefined ? {} : { sliceId: parsed.sliceId }),
+      ...(parsed.debugPath === undefined ? {} : { debugPath: parsed.debugPath }),
       ...(analysisCache ? {} : { analysisCache: false }),
       openJob: parsed.noOpenJob ? false : {},
       ...(parsed.unitStoreBytes === undefined ? {} : { unitStoreBytes: parsed.unitStoreBytes }),

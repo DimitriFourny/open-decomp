@@ -97,16 +97,25 @@ export async function applyDefaults(
     source['kind'] !== 'import' ||
     source['project_path'] !== undefined ||
     typeof source['input_path'] !== 'string' ||
-    (source['slice_id'] !== undefined && typeof source['slice_id'] !== 'string')
+    (source['slice_id'] !== undefined && typeof source['slice_id'] !== 'string') ||
+    (source['debug_path'] !== undefined && typeof source['debug_path'] !== 'string')
   )
     return { input };
   const inputPath = source['input_path'];
-  if (!isAbsolute(inputPath))
-    return { path: 'source.input_path', hint: 'input_path must be an absolute path' };
+  const debugPath = source['debug_path'];
+  if (!isAbsolute(inputPath) || (debugPath !== undefined && !isAbsolute(debugPath)))
+    return { path: 'source.input_path', hint: 'input_path and debug_path must be absolute paths' };
   let projectPath: string;
   try {
     const sha256 = await hashInput(await authorizePath(projects.authorized_roots, inputPath));
-    projectPath = join(projects.cache_root, projectDirectoryName(sha256, source['slice_id']));
+    const debugSha256 =
+      debugPath === undefined
+        ? undefined
+        : await hashInput(await authorizePath(projects.authorized_roots, debugPath));
+    projectPath = join(
+      projects.cache_root,
+      projectDirectoryName(sha256, source['slice_id'], debugSha256),
+    );
   } catch (error) {
     return {
       path: 'source.input_path',

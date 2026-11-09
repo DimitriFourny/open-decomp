@@ -7,10 +7,15 @@ function invalid(message: string): never {
   throw new OperationError({ code: 'invalid_input', severity: 'error', message, evidence_ids: [] });
 }
 
-/** Name of one project directory under a cache root: content hash plus the selected slice. The
- * CLI, the API and MCP's `cache_root` default share it, so they open the same projects. */
-export function projectDirectoryName(sha256: string, sliceId: string | undefined): string {
-  return `${sha256}.${sliceId ?? 'default'}`;
+/** Name of one project directory under a cache root: content hash plus the selected slice, and
+ * the content hash of a companion debug file imported with it. The CLI, the API and MCP's
+ * `cache_root` default share it, so they open the same projects. */
+export function projectDirectoryName(
+  sha256: string,
+  sliceId: string | undefined,
+  debugSha256?: string,
+): string {
+  return `${sha256}.${sliceId ?? 'default'}${debugSha256 === undefined ? '' : `.debug-${debugSha256}`}`;
 }
 
 /** Hash bounded chunks rather than retaining another complete image in the host. */

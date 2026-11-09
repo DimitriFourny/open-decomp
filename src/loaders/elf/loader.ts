@@ -495,9 +495,11 @@ class Parser extends Reader {
           const owner = this.raw[section];
           if (!owner) this.fail('ELF symbol section index outside table', p);
           if (owner.flags & 2n && type !== 6) {
-            if (value < owner.va || this.end(value, size) > owner.va + owner.size)
-              this.fail('ELF symbol exceeds its owning section', p);
-            address = this.address('va', value);
+            const inside = value >= owner.va && this.end(value, size) <= owner.va + owner.size;
+            // GNU ld aligns zero-size markers such as __TMC_END__ past a short section's end;
+            // such a marker keeps its name but claims no address in that section.
+            if (inside) address = this.address('va', value);
+            else if (size) this.fail('ELF symbol exceeds its owning section', p);
           }
         } else if (section === 0xfff1) address = this.address('va', value);
         else if (section !== 0)
@@ -1093,7 +1095,7 @@ class Parser extends Reader {
  */
 export class ELFLoader implements Loader {
   readonly name = 'open-decomp-elf';
-  readonly version = '1.0.0';
+  readonly version = '1.0.1';
   readonly format = 'elf' as const;
   inspect(
     bytes: ImmutableBytes,

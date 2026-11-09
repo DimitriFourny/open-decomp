@@ -231,6 +231,13 @@ export function parseDwarf(
       diagnostics.push(message);
     }
   };
+  // Units, DIEs or references that were skipped hide declarations. Locations, line rows
+  // and unrepresentable types are decoded-but-limited and do not set this.
+  let undecoded = false;
+  const hide = (message: string) => {
+    undecoded = true;
+    diagnose(message);
+  };
   let totalDies = 0,
     unitCount = 0;
   let work = 0,
@@ -248,7 +255,7 @@ export function parseDwarf(
       ({ end, offsetSize } = info.initialLength());
     } catch (error) {
       if (error instanceof OperationError) throw error;
-      diagnose(`DWARF unit at 0x${start.toString(16)}: ${String(error)}`);
+      hide(`DWARF unit at 0x${start.toString(16)}: ${String(error)}`);
       break;
     }
     try {
@@ -315,7 +322,7 @@ export function parseDwarf(
       for (const die of unit.dies) dies.set(die.offset, die);
     } catch (error) {
       if (error instanceof OperationError) throw error;
-      diagnose(`DWARF unit at 0x${start.toString(16)}: ${String(error)}`);
+      hide(`DWARF unit at 0x${start.toString(16)}: ${String(error)}`);
     }
     info.position = end;
     if (totalDies > DWARF_LIMITS.dies || unitCount > 10_000) break;
@@ -326,16 +333,16 @@ export function parseDwarf(
     if (typeof attribute.value !== 'bigint') return undefined;
     const relative = attribute.form >= 0x11 && attribute.form <= 0x15;
     if (!relative && attribute.form !== 0x10) {
-      diagnose(`Unsupported DIE reference form 0x${attribute.form.toString(16)}`);
+      hide(`Unsupported DIE reference form 0x${attribute.form.toString(16)}`);
       return undefined;
     }
     const offset = number(attribute.value + BigInt(relative ? owner.unit.start : 0));
     if (relative && (offset < owner.unit.start || offset >= owner.unit.end)) {
-      diagnose(`DIE reference at 0x${owner.offset.toString(16)} escapes its compilation unit`);
+      hide(`DIE reference at 0x${owner.offset.toString(16)} escapes its compilation unit`);
       return undefined;
     }
     const found = dies.get(offset);
-    if (!found) diagnose(`Unresolved DIE reference 0x${offset.toString(16)}`);
+    if (!found) hide(`Unresolved DIE reference 0x${offset.toString(16)}`);
     return found;
   }
   function inherited(
@@ -478,8 +485,9 @@ export function parseDwarf(
         little,
         spend,
         indexedAddress: (index: bigint) => indexedAddress(unit, index),
+        // One diagnostic per kind of unsupported expression, not one per variable.
         diagnose: (message: string) =>
-          diagnose(`Location at DIE 0x${die.offset.toString(16)}: ${message}`),
+          diagnose(`DWARF location left symbolic: ${message.replace(/^Error: /, '')}`),
       };
     try {
       if (attr.value instanceof Uint8Array) {
@@ -963,7 +971,7 @@ export function parseDwarf(
       }
     } catch (error) {
       if (error instanceof OperationError) throw error;
-      diagnose(`DIE at 0x${die.offset.toString(16)}: ${String(error)}`);
+      hide(`DIE at 0x${die.offset.toString(16)}: ${String(error)}`);
     }
   }
   const lineOffsets = new Map<number, Map<number, string>>();
@@ -1098,12 +1106,12 @@ export function parseDwarf(
     }
   }
   if (sections.has('__debug_types'))
-    diagnose(
+    hide(
       'DWARF .debug_types signature units are unsupported; compilation-unit types remain available.',
     );
   functions.sort((a, b) =>
     a.address < b.address ? -1 : a.address > b.address ? 1 : a.name.localeCompare(b.name),
   );
   lines.sort((a, b) => (a.address < b.address ? -1 : a.address > b.address ? 1 : 0));
-  return { functions, types, lines, diagnostics, variables, inlineScopes };
+  return { functions, types, lines, diagnostics, undecoded, variables, inlineScopes };
 }

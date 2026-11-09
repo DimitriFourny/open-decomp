@@ -19,6 +19,9 @@ export interface EmissionInput {
   /** Only active note annotations are rendered here; type recovery consumes type
    * assertions separately. The coordinator resolves active names into names. */
   readonly annotations?: readonly Annotation[];
+  /** Debug-declared names of fixed stack homes, by entry-SP-relative offset: the
+   * default name of the local stored there (an asserted name still wins). */
+  readonly frame_names?: ReadonlyMap<bigint, string>;
   /** Native ABI and bounded source observations; absent for synthetic IR callers. */
   readonly source?: SourceEvidence;
   /** Address of the decoded instruction an IR node's provenance names (its

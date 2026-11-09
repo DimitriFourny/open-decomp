@@ -1,0 +1,32 @@
+{
+  "license": "MIT (repository LICENSE)",
+  "source": "shapes.c",
+  "target": "x86_64-linux-gnu (PIE, dynamically linked against glibc)",
+  "compiler": "gcc (Debian 14.2.0-19) 14.2.0",
+  "linker": "GNU ld (GNU Binutils for Debian) 2.44",
+  "recipe_cwd": "test/metadata/debug/fixtures/elf",
+  "recipe": ["sh build.sh"],
+  "inputs": {
+    "shapes-g": "-g -O0: embedded DWARF 5",
+    "shapes-dwarf4": "-g -gdwarf-4 -O0: embedded DWARF 4",
+    "shapes-O2": "-g -O2: location lists, entry values, discontiguous main",
+    "shapes-gz": "-g -gz=zlib: SHF_COMPRESSED (ELFCOMPRESS_ZLIB) debug sections",
+    "shapes-stripped / shapes.debug": "stripped image with .gnu_debuglink and its objcopy --only-keep-debug file, matched by GNU build ID",
+    "shapes-nobuildid / shapes-nobuildid.debug": "-Wl,--build-id=none: matched by the .gnu_debuglink CRC-32"
+  },
+  "notes": [
+    "Static compiler/linker fixtures; never executed by tests.",
+    "-fdebug-prefix-map keeps the build directory out of the DWARF; byte identity holds for the recorded toolchain only."
+  ],
+  "sha256": {
+    "shapes.c": "8cabc3e7fc65d66efc8f2714662364aba4601ea0a712cb028e368c266c563c51",
+    "shapes-g": "826fe6c8e2a10785dd3d9358b65dfe140949786601115ca438e741ffd2380df2",
+    "shapes-dwarf4": "34c19c68f70aadce831f27d36c87b12ed43a7cb679214749739c418a065532b4",
+    "shapes-O2": "154ce7598a45cab7680d7d26ddb2c42748b2293918fe1d8714a2dd5619ccffd5",
+    "shapes-gz": "fdff8db04dae0a6495eeb2ba2bed58b8172331b94c2b58afa09d223970dfd197",
+    "shapes-stripped": "65a23d15b2a26db28ab100e466feb656093ecf2163fff3118373d8c7d9ec17d5",
+    "shapes.debug": "a92606cc125bd56ed22143fa46d58859beb68f52c35ffa5498684e0bed256a8a",
+    "shapes-nobuildid": "fc4217515dc7727c76141b35c56b6624aed61cdaa4a095fd879f93cf8a8c6b9c",
+    "shapes-nobuildid.debug": "f8ffadd3865be62c019f365388c8501d88a680a6d7738c6196ec5f11f10abb1d"
+  }
+}

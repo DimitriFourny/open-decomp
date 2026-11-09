@@ -33,7 +33,7 @@ import {
   type SuppliedSignature,
   type SuppliedTypeRecord,
 } from '../../analysis/types/index.js';
-import { recoverDebugInfo } from '../../metadata/debug/index.js';
+import { frameVariableNames, recoverDebugInfo } from '../../metadata/debug/index.js';
 import { recoverLibraryContracts } from '../../metadata/library-contracts/index.js';
 import { cSourceName } from '../../metadata/symbols/c-names.js';
 import { structureControlFlow } from '../../presentation/index.js';
@@ -612,6 +612,13 @@ export async function executeDecompilation(
           types,
           names,
           annotations: active.annotations,
+          // The canonical frame address is the caller's SP: x86-64's call pushed 8 bytes.
+          frame_names: frameVariableNames(
+            debug.data,
+            loaded.function.entry.value,
+            image.target.architecture === 'x86_64' ? 8n : 0n,
+            context,
+          ),
           source,
           instruction_address: instructionAddresses(graph.instructions),
         },
@@ -727,12 +734,16 @@ export async function executeDecompilation(
         },
       ];
       let signature: Signature | null = null;
-      const signatures = types.signatures.filter(
+      const supported = types.signatures.filter(
         (item) =>
           item.subject_id === ir.id &&
           item.abi_state === 'complete' &&
           (item.status === 'established' || item.status === 'asserted'),
       );
+      // Without a conflict, every signature agrees with an assertion (recoverTypes compares
+      // their types structurally): the assertion's own type IDs describe the function.
+      const assertions = supported.filter((item) => item.status === 'asserted');
+      const signatures = assertions.length ? assertions : supported;
       if (!types.conflicts.some((conflict) => conflict.subject_id === ir.id) && signatures.length) {
         const keys = new Set(
           signatures.map((item) =>

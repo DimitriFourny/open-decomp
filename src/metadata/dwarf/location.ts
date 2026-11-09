@@ -30,6 +30,7 @@ export function decodeLocation(
     result = { kind: 'register-offset', register: r.nleb(), offset: r.leb(true) };
   else if (opcode === 0x03) result = { kind: 'address', address: r.uint(context.addressSize) };
   else if (opcode === 0xa1) result = { kind: 'address', address: context.indexedAddress(r.leb()) };
+  else if (opcode === 0x9c) result = { kind: 'cfa-offset', offset: 0n };
   else throw new Error(`Unsupported DWARF location opcode 0x${opcode.toString(16)}`);
   if (r.position !== r.end)
     throw new Error(

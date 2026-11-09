@@ -174,6 +174,9 @@ export class QueryService {
               {
                 kind: 'import',
                 source_path: open.source.input_path,
+                ...(open.source.debug_path === undefined
+                  ? {}
+                  : { debug_path: open.source.debug_path }),
                 slice_id: open.source.slice_id ?? null,
                 ...(open.source.mode === 'resume' ? { resume_only: true } : {}),
                 budget: open.budget,

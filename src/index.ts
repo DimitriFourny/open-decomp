@@ -18,6 +18,9 @@ export * as DWARF from './metadata/dwarf/index.js';
 export {
   recoverDebugInfo,
   debugContextAt,
+  debugSummary,
+  frameVariableNames,
+  selectElfDebugSections,
   variableLocationsAt,
   type DebugRecovery,
   type ExternalDebugInput,
