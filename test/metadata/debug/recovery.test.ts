@@ -323,12 +323,15 @@ test('work, output and cancellation budgets propagate without partial publicatio
     () => recoverDebugInfo(image, createOperationContext({ signal: controller.signal }), debug),
     (error: unknown) => error instanceof OperationError && error.code === 'cancelled',
   );
-  for (const budget of [{ work: 1 }, { output_bytes: 1024 }]) {
-    assert.throws(
-      () => recoverDebugInfo(image, createOperationContext({ budget }), debug),
-      (error: unknown) => error instanceof OperationError && error.code === 'resource_limit',
-    );
-  }
+  assert.throws(
+    () => recoverDebugInfo(image, createOperationContext({ budget: { work: 1 } }), debug),
+    (error: unknown) => error instanceof OperationError && error.code === 'resource_limit',
+  );
+  // A recovery is shared by every request: its size bound is the engine's, not the caller's.
+  assert.deepEqual(
+    recoverDebugInfo(image, createOperationContext({ budget: { output_bytes: 1024 } }), debug),
+    recoverDebugInfo(image, createOperationContext(), debug),
+  );
 });
 
 test('malformed command counts, unit lengths and reference contributions are bounded', () => {

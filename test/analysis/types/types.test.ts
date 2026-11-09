@@ -119,6 +119,7 @@ function debugInput(types: SuppliedTypeRecord[], sig: Signature): DebugRecovery 
     uuid: null,
     build_id: null,
     matched_by: null,
+    pdb: null,
     content_sha256: 'a'.repeat(64),
     data: null,
     evidence: [],
