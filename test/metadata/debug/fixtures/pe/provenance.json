@@ -1,0 +1,28 @@
+{
+  "license": "MIT (repository LICENSE)",
+  "source": "shapes.c",
+  "target": "x86_64-windows-msvc (freestanding PE32+ console image: no CRT, no imports)",
+  "compiler": "clang 22 bundled with zig 0.17.1 (`zig clang -gcodeview`; PyPI wheel ziglang==0.17.1)",
+  "linker": "LLD bundled with zig 0.17.1 (`zig lld-link /debug /Brepro`)",
+  "recipe_cwd": "test/metadata/debug/fixtures/pe",
+  "recipe": ["PATH=<dir with zig 0.17.1>:$PATH sh build.sh"],
+  "inputs": {
+    "shapes-O0.exe / shapes-O0.pdb": "-O0: stack-pointer frames (as MSVC builds them), S_LOCAL with S_DEFRANGE_FRAMEPOINTER_REL",
+    "shapes-O0-fp.exe / shapes-O0-fp.pdb": "-O0 -fno-omit-frame-pointer: RBP frames established by UWOP_SET_FPREG with a frame offset",
+    "shapes-O2.exe / shapes-O2.pdb": "-O2: register and ranged S_DEFRANGE_* locations, an inlined static (copy_name)"
+  },
+  "notes": [
+    "Static compiler/linker fixtures; never executed by tests.",
+    "/Brepro derives the PDB GUID from the output; the compilation directory, source prefix map, /pdbsourcepath and /pdbaltpath record C:\\open_decomp instead of the build directory, so a rebuild anywhere with the recorded toolchain is byte-identical.",
+    "Each pair matches by its own GUID and age; the cross pairs (an image with another build's PDB) are the mismatch tests."
+  ],
+  "sha256": {
+    "shapes.c": "76a33d899c7d03b188890023968196ef8206fff31d52f0cbfab7d003f0c15bfa",
+    "shapes-O0.exe": "d082a1a00429a53f751c91b6f5389c97adfcb91bc3992d8ce4ca016e878fa450",
+    "shapes-O0.pdb": "16aea794efe3976cb199760517e997907fdcc46d3447a102047113a35729cc52",
+    "shapes-O0-fp.exe": "fe865973c7ed65f579a3eb1664e79f8d315c3269f139b0920d6736b15b2b2153",
+    "shapes-O0-fp.pdb": "79b1b4b225d946cb85ee59d68a2c3d8b388b02bed91c6541e1835b1d4f135a39",
+    "shapes-O2.exe": "261593bac0e333f8a90b3785b57b44d07d2551f964a97e4582529d470bfbe95d",
+    "shapes-O2.pdb": "79b19f2c3b04dff8ff3d3bab9c06860f7d924c92e949f5ba312daf41350acafc"
+  }
+}
