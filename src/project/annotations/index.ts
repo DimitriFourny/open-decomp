@@ -383,6 +383,8 @@ export class AnnotationService {
           }
           validateTypes([annotation.value.type_id]);
         }
+        if (annotation.value.kind === 'library_match' && subject.kind !== 'function')
+          reject('invalid_input', 'A library match requires a function subject');
         if (annotation.value.kind === 'signature') {
           if (!['function', 'call', 'import', 'export'].includes(subject.kind))
             reject('invalid_input', 'Signatures require an exact callable subject');

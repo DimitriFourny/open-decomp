@@ -68,7 +68,8 @@ function pageOf(
   };
 }
 
-/** One row per function: `entry  name  size  boundary/analysis  signature?  short ID`. */
+/** One row per function: `entry  name  size  boundary/analysis  signature?  short ID`; a name
+ * from a library signature match says so. */
 export function functionsListing(result: ToolResult<'functions_find'>): string | undefined {
   if (!('data' in result)) return undefined;
   const short = shortIds(result.data.items.map((item) => item.id));
@@ -79,7 +80,9 @@ export function functionsListing(result: ToolResult<'functions_find'>): string |
       const first = item.ranges[0];
       return [
         at(item.entry),
-        nameOf(item),
+        item.library_match
+          ? `${nameOf(item)} (library match ${item.library_match.library})`
+          : nameOf(item),
         first === undefined
           ? 'no range'
           : `size ${first.size}${item.ranges.length > 1 ? ` (+${item.ranges.length - 1} ranges)` : ''}`,

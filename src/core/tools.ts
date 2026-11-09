@@ -1126,7 +1126,22 @@ export const stringsFindResultSchema = resultSchema(
   z.strictObject({ items: z.array(stringRecordSchema).max(1000), page: pageInfoSchema }),
 );
 export const functionsFindResultSchema = resultSchema(
-  z.strictObject({ items: z.array(functionSchema).max(1000), page: pageInfoSchema }),
+  z.strictObject({
+    items: z
+      .array(
+        functionSchema.extend({
+          /** The function is named by a library signature match (presentation provenance). */
+          library_match: z
+            .strictObject({
+              library: z.string().min(1).max(256),
+              name: z.string().min(1).max(1024),
+            })
+            .optional(),
+        }),
+      )
+      .max(1000),
+    page: pageInfoSchema,
+  }),
 );
 export const functionGetResultSchema = resultSchema(functionGetDataSchema);
 /** Info diagnostics explaining why no reviewed source is delivered start with this prefix. */

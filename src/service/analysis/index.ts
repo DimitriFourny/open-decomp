@@ -35,6 +35,10 @@ import {
 } from '../../analysis/types/index.js';
 import { frameVariableNames, recoverDebugInfo } from '../../metadata/debug/index.js';
 import { recoverLibraryContracts } from '../../metadata/library-contracts/index.js';
+import {
+  recoverMatchedContracts,
+  withMatchedContracts,
+} from '../../metadata/library-signatures/contracts.js';
 import { cSourceName } from '../../metadata/symbols/c-names.js';
 import { structureControlFlow } from '../../presentation/index.js';
 import { emitC } from '../../emitters/c/index.js';
@@ -71,6 +75,7 @@ import { likelyPointerTypes } from './likely-types.js';
 import { objcMethodSignature } from './objc-signature.js';
 import { imageTypeDump, recoverImageTypes, type ImageTypeDump } from './image-types.js';
 import type { NativePreparationInput } from './native-prepare.js';
+import { libraryMatches, namingAnnotations } from '../../project/annotations/naming.js';
 export type { ImageTypeDump } from './image-types.js';
 export { executeAnnotations } from './annotations.js';
 export { executeTypesDeclare } from './types-declare.js';
@@ -214,10 +219,6 @@ export async function executeDecompilation(
       requiredNodes = Math.max(requiredNodes, boundIR(ir, context));
       context.progress('metadata', 3, 7);
       const debug = recoverDebugInfo(image, fullContext);
-      const library = recoverLibraryContracts(
-        { image, abi: components.abi, revision: args.revision },
-        fullContext,
-      );
       const calls = resolveCalls(
         ir,
         image,
@@ -225,6 +226,28 @@ export async function executeDecompilation(
         references,
         args.options.indirect_targets === 'bounded',
         context,
+      );
+      const annotationService = new AnnotationService(store);
+      // Library signature matches of the function and its callees supply their library
+      // declarations, as an import's identity does (recorded as annotation dependencies).
+      const matches = libraryMatches(
+        dependencies.annotationView(() =>
+          annotationService.active(args.revision, fullContext, {
+            entity_ids: [ir.id, ...calls.subjects],
+            on_dependencies: dependencies.recordAnnotationScope,
+          }),
+        ).annotations,
+        new Map(functions.map((fn) => [fn.id, fn.entry])),
+      );
+      const library = withMatchedContracts(
+        recoverLibraryContracts(
+          { image, abi: components.abi, revision: args.revision },
+          fullContext,
+        ),
+        recoverMatchedContracts(
+          { image, abi: components.abi, revision: args.revision, matches },
+          fullContext,
+        ),
       );
       const nativeTypes: SuppliedTypeRecord[] = [
         ...debug.types.map((type) => ({
@@ -334,7 +357,6 @@ export async function executeDecompilation(
         ...baselineCatalog.subjects.map((subject) => subject.id),
         ...calls.subjects,
       ]);
-      const annotationService = new AnnotationService(store);
       let active = dependencies.annotationView(() =>
         annotationService.active(args.revision, fullContext, {
           catalog: trusted,
@@ -420,7 +442,7 @@ export async function executeDecompilation(
       });
       const nameDiagnostics: Diagnostic[] = [];
       const named = new Map<string, (typeof active.annotations)[number][]>();
-      for (const annotation of active.annotations)
+      for (const annotation of namingAnnotations(active.annotations))
         if (annotation.value.kind === 'name') {
           const list = named.get(annotation.entity_id) ?? [];
           list.push(annotation);

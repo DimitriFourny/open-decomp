@@ -17,6 +17,7 @@ import {
 } from '../../core/index.js';
 import type {
   Address,
+  Annotation,
   CanonicalValue,
   CursorBinding,
   Evidence,
@@ -53,6 +54,7 @@ import {
   executeTypesDeclare,
 } from '../analysis/index.js';
 import { libraryListing } from '../../project/annotations/type-library.js';
+import { namingAnnotations } from '../../project/annotations/naming.js';
 import { runNativeOpenJob } from '../analysis/native-open-job.js';
 import {
   investigationArtifact,
@@ -119,30 +121,34 @@ function virtual(image: LoadedImage, address: Address): Address {
     queryFailure('invalid_address', 'File offset has no virtual mapping');
   return translated.address;
 }
-/** Only a unique active assertion changes presentation. Native names stay searchable. */
+/** Only a unique active assertion changes presentation (a library match when no name
+ * annotation exists). Native names stay searchable. */
 function presentName<T extends { readonly id: string; readonly display_name: string | null }>(
   scope: Scope,
   revision: number,
   record: T,
 ): T {
   const names = new Set(
-    scope.store
-      .readAnnotations(record.id, revision)
+    namingAnnotations(scope.store.readAnnotations(record.id, revision))
       .filter((item) => item.status === 'asserted' && item.value.kind === 'name')
       .map((item) => (item.value.kind === 'name' ? item.value.value : '')),
   );
   return names.size === 1 ? { ...record, display_name: [...names][0]! } : record;
 }
 /** Batch form of presentName: one bounded annotation query per 1000 entities, never one
- * store round trip per image function. Presentation is identical to presentName. */
+ * store round trip per image function. Presentation is identical to presentName. With
+ * `libraryMatches`, a record named by a unique library match carries `library_match`. */
 function presentNames<T extends { readonly id: string; readonly display_name: string | null }>(
   scope: Scope,
   revision: number,
   records: readonly T[],
+  libraryMatches = false,
 ): T[] {
   const named = new Map<string, Set<string>>();
+  const matched = new Map<string, Map<string, { library: string; name: string }>>();
   for (let start = 0; start < records.length; start += 1000) {
     const entity_ids = records.slice(start, start + 1000).map((record) => record.id);
+    const annotations: Annotation[] = [];
     let cursor: string | undefined;
     do {
       scope.context.checkpoint(1);
@@ -152,18 +158,29 @@ function presentNames<T extends { readonly id: string; readonly display_name: st
         limit: 1000,
         ...(cursor === undefined ? {} : { cursor }),
       });
-      for (const item of page.items) {
-        if (item.status !== 'asserted' || item.value.kind !== 'name') continue;
-        const names = named.get(item.entity_id) ?? new Set<string>();
-        names.add(item.value.value);
-        named.set(item.entity_id, names);
-      }
+      annotations.push(...page.items);
       cursor = page.next_cursor ?? undefined;
     } while (cursor !== undefined);
+    for (const item of namingAnnotations(annotations)) {
+      if (item.status !== 'asserted' || item.value.kind !== 'name') continue;
+      const names = named.get(item.entity_id) ?? new Set<string>();
+      names.add(item.value.value);
+      named.set(item.entity_id, names);
+    }
+    if (libraryMatches)
+      for (const item of annotations) {
+        if (item.status !== 'asserted' || item.value.kind !== 'library_match') continue;
+        const matches = matched.get(item.entity_id) ?? new Map();
+        matches.set(item.value.name, { library: item.value.library, name: item.value.name });
+        matched.set(item.entity_id, matches);
+      }
   }
   return records.map((record) => {
     const names = named.get(record.id);
-    return names?.size === 1 ? { ...record, display_name: [...names][0]! } : record;
+    if (names?.size !== 1) return record;
+    const display_name = [...names][0]!,
+      match = matched.get(record.id)?.get(display_name);
+    return { ...record, display_name, ...(match ? { library_match: match } : {}) };
   });
 }
 function resultEvidence(
@@ -603,7 +620,7 @@ async function dispatch(
               (range) => address >= range.start.value && address < range.start.value + range.size,
             )),
       );
-      const presentedItems = presentNames(scope, args.revision, candidates);
+      const presentedItems = presentNames(scope, args.revision, candidates, true);
       for (const [index, item] of candidates.entries()) {
         const presented = presentedItems[index]!;
         if (
