@@ -591,7 +591,9 @@ export function companionSymbols(
       { image_id: image.id, space: 'va', value: address },
       'va',
     );
-    if (translated.kind !== 'mapped') return;
+    // Code must be file-backed; a global may live in zero-fill storage (.bss).
+    if (translated.kind === 'unmapped' || (kind === 'function' && translated.kind !== 'mapped'))
+      return;
     taken.add(address);
     for (const id of proof) {
       const item = evidence.get(id);
