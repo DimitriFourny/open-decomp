@@ -1,4 +1,4 @@
-import type { Annotation } from '../../core/index.js';
+import type { Address, Annotation } from '../../core/index.js';
 
 /** The annotations that name their subjects: every `name` annotation, and for a subject that
  * has no unretracted `name` annotation, each `library_match` read as a name with the same
@@ -16,5 +16,35 @@ export function namingAnnotations(annotations: readonly Annotation[]): Annotatio
     if (annotation.value.kind === 'name') return [annotation];
     if (annotation.value.kind !== 'library_match' || named.has(annotation.entity_id)) return [];
     return [{ ...annotation, value: { kind: 'name', value: annotation.value.name } }];
+  });
+}
+
+/** Functions an asserted `library_match` annotation with a contract gives a library
+ * declaration: the function entry and the declaration's nominal library and name. */
+export function libraryMatches(
+  annotations: readonly Annotation[],
+  entries: ReadonlyMap<string, Address>,
+): {
+  function_id: string;
+  entry: Address;
+  library: string;
+  name: string;
+  evidence_ids: readonly string[];
+}[] {
+  return annotations.flatMap((annotation) => {
+    const value = annotation.value,
+      entry = entries.get(annotation.entity_id);
+    if (annotation.status !== 'asserted' || value.kind !== 'library_match' || !value.contract)
+      return [];
+    if (!entry) return [];
+    return [
+      {
+        function_id: annotation.entity_id,
+        entry,
+        library: value.contract.library,
+        name: value.contract.name,
+        evidence_ids: annotation.evidence_ids,
+      },
+    ];
   });
 }

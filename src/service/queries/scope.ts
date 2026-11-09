@@ -1,5 +1,6 @@
 import { buildOnce, useBuilt } from '../../core/index.js';
 import type {
+  Annotation,
   FunctionRecord,
   LoadedImage,
   OperationContext,
@@ -8,6 +9,8 @@ import type {
   StoredRecordKinds,
 } from '../../core/index.js';
 import { reconstructFunctionGraph, type QueryFunctionGraph } from './graphs.js';
+import { libraryMatchNoreturnCalls } from '../../metadata/library-contracts/index.js';
+import { libraryMatches } from '../../project/annotations/naming.js';
 import { queryFailure } from './shared.js';
 
 export type IndexState = 'complete' | 'partial' | 'not_started';
@@ -26,6 +29,7 @@ const navigation = new WeakMap<
     readonly revision: number;
     readonly image: LoadedImage;
     readonly functions: readonly FunctionRecord[];
+    readonly noreturn: ReadonlyMap<bigint, readonly string[]>;
     references?: readonly ReferenceRecord[];
   }
 >();
@@ -174,6 +178,7 @@ export function loadFunctionGraph(
           exports: records(read, revision, image.id, 'export').items,
         },
         functions: records(read, revision, image.id, 'function').items,
+        noreturn: matchedNoreturnCalls(scope.store, revision, image, quiet),
       };
     });
     navigation.set(image, indexed);
@@ -186,9 +191,40 @@ export function loadFunctionGraph(
       function: loaded.function,
       functions: indexed.functions,
       formatting,
+      noreturn_matches: indexed.noreturn,
     },
     scope.context,
   );
+}
+
+/** Noreturn library declarations of the functions library signature matches named, at a
+ * revision: a revision's graphs end the blocks of their calls. */
+function matchedNoreturnCalls(
+  store: ReadScope['store'],
+  revision: number,
+  image: LoadedImage,
+  context: OperationContext,
+): ReadonlyMap<bigint, readonly string[]> {
+  const annotations: Annotation[] = [];
+  let cursor: string | undefined;
+  do {
+    context.checkpoint(1);
+    const page = store.queryAnnotations({
+      revision,
+      limit: 1000,
+      ...(cursor === undefined ? {} : { cursor }),
+    });
+    for (const item of page.items) if (item.value.kind === 'library_match') annotations.push(item);
+    cursor = page.next_cursor ?? undefined;
+  } while (cursor !== undefined);
+  if (!annotations.length) return new Map();
+  const entries = new Map(
+    records({ store, context }, revision, image.id, 'function').items.map((fn) => [
+      fn.id,
+      fn.entry,
+    ]),
+  );
+  return libraryMatchNoreturnCalls(libraryMatches(annotations, entries), image.target.format);
 }
 
 /** Reuse the immutable native function/reference arrays already materialized for

@@ -136,13 +136,16 @@ function presentName<T extends { readonly id: string; readonly display_name: str
   return names.size === 1 ? { ...record, display_name: [...names][0]! } : record;
 }
 /** Batch form of presentName: one bounded annotation query per 1000 entities, never one
- * store round trip per image function. Presentation is identical to presentName. */
+ * store round trip per image function. Presentation is identical to presentName. With
+ * `libraryMatches`, a record named by a unique library match carries `library_match`. */
 function presentNames<T extends { readonly id: string; readonly display_name: string | null }>(
   scope: Scope,
   revision: number,
   records: readonly T[],
+  libraryMatches = false,
 ): T[] {
   const named = new Map<string, Set<string>>();
+  const matched = new Map<string, Map<string, { library: string; name: string }>>();
   for (let start = 0; start < records.length; start += 1000) {
     const entity_ids = records.slice(start, start + 1000).map((record) => record.id);
     const annotations: Annotation[] = [];
@@ -164,10 +167,20 @@ function presentNames<T extends { readonly id: string; readonly display_name: st
       names.add(item.value.value);
       named.set(item.entity_id, names);
     }
+    if (libraryMatches)
+      for (const item of annotations) {
+        if (item.status !== 'asserted' || item.value.kind !== 'library_match') continue;
+        const matches = matched.get(item.entity_id) ?? new Map();
+        matches.set(item.value.name, { library: item.value.library, name: item.value.name });
+        matched.set(item.entity_id, matches);
+      }
   }
   return records.map((record) => {
     const names = named.get(record.id);
-    return names?.size === 1 ? { ...record, display_name: [...names][0]! } : record;
+    if (names?.size !== 1) return record;
+    const display_name = [...names][0]!,
+      match = matched.get(record.id)?.get(display_name);
+    return { ...record, display_name, ...(match ? { library_match: match } : {}) };
   });
 }
 function resultEvidence(
@@ -607,7 +620,7 @@ async function dispatch(
               (range) => address >= range.start.value && address < range.start.value + range.size,
             )),
       );
-      const presentedItems = presentNames(scope, args.revision, candidates);
+      const presentedItems = presentNames(scope, args.revision, candidates, true);
       for (const [index, item] of candidates.entries()) {
         const presented = presentedItems[index]!;
         if (

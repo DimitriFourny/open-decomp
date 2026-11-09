@@ -164,6 +164,25 @@ export function libraryNoreturnCalls(
   );
 }
 
+/** Entries of functions a library signature match declares noreturn (`exit`, `abort`,
+ * `__stack_chk_fail`), with the match evidence: calls of them end their block. */
+export function libraryMatchNoreturnCalls(
+  matches: readonly MatchedLibraryFunction[],
+  format: LoadedImage['target']['format'],
+): ReadonlyMap<bigint, readonly string[]> {
+  const result = new Map<bigint, readonly string[]>();
+  for (const matched of matches) {
+    const declaration = findDeclaration(
+      libraryLookupName(format, matched.name),
+      matched.library,
+      format,
+    );
+    if (declaration?.noreturn === true && matched.entry.space === 'va')
+      result.set(matched.entry.value, matched.evidence_ids);
+  }
+  return result;
+}
+
 /** Match exact native import names AND nominal library identity. No local symbol,
  * demangled text, ordinal guess, weak binding or nonzero import addend establishes
  * a contract. The declaration remains conditional on that library implementation;

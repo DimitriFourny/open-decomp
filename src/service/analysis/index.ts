@@ -12,8 +12,6 @@ import {
   toolSchemas,
   type CacheIdentity,
   type Address,
-  type Annotation,
-  type FunctionRecord,
   type CanonicalValue,
   type DecodedInstruction,
   type Diagnostic,
@@ -36,10 +34,7 @@ import {
   type SuppliedTypeRecord,
 } from '../../analysis/types/index.js';
 import { frameVariableNames, recoverDebugInfo } from '../../metadata/debug/index.js';
-import {
-  recoverLibraryContracts,
-  type MatchedLibraryFunction,
-} from '../../metadata/library-contracts/index.js';
+import { recoverLibraryContracts } from '../../metadata/library-contracts/index.js';
 import { cSourceName } from '../../metadata/symbols/c-names.js';
 import { structureControlFlow } from '../../presentation/index.js';
 import { emitC } from '../../emitters/c/index.js';
@@ -76,7 +71,7 @@ import { likelyPointerTypes } from './likely-types.js';
 import { objcMethodSignature } from './objc-signature.js';
 import { imageTypeDump, recoverImageTypes, type ImageTypeDump } from './image-types.js';
 import type { NativePreparationInput } from './native-prepare.js';
-import { namingAnnotations } from '../../project/annotations/naming.js';
+import { libraryMatches, namingAnnotations } from '../../project/annotations/naming.js';
 export type { ImageTypeDump } from './image-types.js';
 export { executeAnnotations } from './annotations.js';
 export { executeTypesDeclare } from './types-declare.js';
@@ -90,30 +85,6 @@ export interface AnalysisScope {
   /** False disables every derived-analysis read and write (published results, reuse
    * candidates, persisted and in-process prepared units); default true. */
   readonly analysis_cache?: boolean;
-}
-
-/** Functions an asserted `library_match` annotation gives a library declaration. */
-function libraryMatches(
-  annotations: readonly Annotation[],
-  functions: readonly FunctionRecord[],
-): MatchedLibraryFunction[] {
-  const entries = new Map(functions.map((fn) => [fn.id, fn.entry]));
-  return annotations.flatMap((annotation) => {
-    const value = annotation.value,
-      entry = entries.get(annotation.entity_id);
-    if (annotation.status !== 'asserted' || value.kind !== 'library_match' || !value.contract)
-      return [];
-    if (!entry) return [];
-    return [
-      {
-        function_id: annotation.entity_id,
-        entry,
-        library: value.contract.library,
-        name: value.contract.name,
-        evidence_ids: annotation.evidence_ids,
-      },
-    ];
-  });
 }
 
 /** Instruction id -> address of the function's decoded instructions, indexed on first use
@@ -262,7 +233,7 @@ export async function executeDecompilation(
             on_dependencies: dependencies.recordAnnotationScope,
           }),
         ).annotations,
-        functions,
+        new Map(functions.map((fn) => [fn.id, fn.entry])),
       );
       const library = recoverLibraryContracts(
         { image, abi: components.abi, revision: args.revision, matches },

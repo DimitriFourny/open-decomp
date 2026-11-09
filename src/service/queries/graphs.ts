@@ -97,6 +97,8 @@ export function reconstructFunctionGraph(
     readonly function: FunctionRecord;
     readonly functions: readonly FunctionRecord[];
     readonly formatting?: boolean;
+    /** Noreturn entries named by library signature matches at `revision`. */
+    readonly noreturn_matches?: ReadonlyMap<bigint, readonly string[]>;
   },
   context: OperationContext,
 ): QueryFunctionGraph {
@@ -116,7 +118,10 @@ export function reconstructFunctionGraph(
       revision,
       functions: input.functions,
       index: prepareDiscoveryIndex({ image, revision, functions: input.functions }, quiet),
-      noreturn_calls: libraryNoreturnCalls(image, quiet),
+      noreturn_calls: new Map([
+        ...libraryNoreturnCalls(image, quiet),
+        ...(input.noreturn_matches ?? []),
+      ]),
     }));
     indexes.set(image, prepared);
   }
