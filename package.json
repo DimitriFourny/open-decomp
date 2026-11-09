@@ -68,6 +68,7 @@
     "test:integration": "node --import tsx scripts/test.ts integration",
     "fingerprints": "node --import tsx scripts/output-fingerprints.ts",
     "prototypes": "node --import tsx scripts/generate-library-prototypes.ts",
+    "library-types": "node --import tsx scripts/generate-library-types.ts",
     "check": "bun run typecheck && bun run format:check && bun run test:unit && bun run test:integration && bun run build",
     "cli": "node dist/src/cli/entry.js",
     "smoke": "node dist/scripts/smoke.js",
