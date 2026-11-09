@@ -102,6 +102,8 @@ test('constant arguments spell flags, value fields, exact values and modes', () 
   assert.equal(text('sysv-amd64', 'open', 1, 0x241n), 'O_WRONLY | O_CREAT | O_TRUNC');
   assert.equal(text('darwin-arm64', 'open', 1, 0x601n), 'O_WRONLY | O_CREAT | O_TRUNC');
   assert.equal(text('sysv-amd64', 'open', 1, 0n), 'O_RDONLY');
+  assert.equal(text('sysv-amd64', 'open', 1, 0x40n), 'O_RDONLY | O_CREAT');
+  assert.equal(text('sysv-amd64', 'open', 1, 0x8n), undefined);
   assert.equal(text('sysv-amd64', 'open', 2, 0o644n), '0644');
   assert.equal(
     libraryConstantText('sysv-amd64', CONSTANT_SETS.file_mode, 0o755n, 32, '0o'),

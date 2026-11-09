@@ -53,7 +53,7 @@ export function libraryConstantText(
     if (name === undefined) continue;
     // A zero field value is spelled too: `O_RDONLY | O_CREAT`, `MB_OK | MB_ICONERROR`.
     parts.push(name);
-    named = true;
+    named ||= part !== 0n;
     rest &= ~fieldMask;
   }
   const candidates = flags
@@ -67,7 +67,8 @@ export function libraryConstantText(
     rest &= ~item.bits;
     named = true;
   }
-  if (!named) return undefined;
+  // A zero field value alone spells a zero word, never other bits (`O_RDONLY | 0x8`).
+  if (!parts.length || (!named && rest)) return undefined;
   if (rest) parts.push(`0x${rest.toString(16)}`);
   return parts.join(' | ');
 }
