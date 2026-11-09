@@ -1,4 +1,5 @@
 import type { Address, Annotation } from '../../core/index.js';
+import type { MatchedLibraryFunction } from '../../metadata/library-signatures/contracts.js';
 
 /** The annotations that name their subjects: every `name` annotation, and for a subject that
  * has no unretracted `name` annotation, each `library_match` read as a name with the same
@@ -24,13 +25,7 @@ export function namingAnnotations(annotations: readonly Annotation[]): Annotatio
 export function libraryMatches(
   annotations: readonly Annotation[],
   entries: ReadonlyMap<string, Address>,
-): {
-  function_id: string;
-  entry: Address;
-  library: string;
-  name: string;
-  evidence_ids: readonly string[];
-}[] {
+): MatchedLibraryFunction[] {
   return annotations.flatMap((annotation) => {
     const value = annotation.value,
       entry = entries.get(annotation.entity_id);

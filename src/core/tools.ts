@@ -1132,7 +1132,10 @@ export const functionsFindResultSchema = resultSchema(
         functionSchema.extend({
           /** The function is named by a library signature match (presentation provenance). */
           library_match: z
-            .strictObject({ library: z.string().min(1).max(256), name: z.string().min(1).max(1024) })
+            .strictObject({
+              library: z.string().min(1).max(256),
+              name: z.string().min(1).max(1024),
+            })
             .optional(),
         }),
       )

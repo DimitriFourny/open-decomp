@@ -69,6 +69,22 @@ export {
   type LibraryType,
 } from './metadata/library-contracts/index.js';
 export {
+  archiveMembers,
+  buildSignatureLibrary,
+  decodeSignatureLibrary,
+  encodeSignatureLibrary,
+  matchSignatures,
+  objectFunctions,
+  ObjectFormatError,
+  SignatureFormatError,
+  type LibraryMatch,
+  type MatchReport,
+  type MatchTarget,
+  type SignatureLibrary,
+  type SignatureSource,
+  type MatchedLibraryFunction,
+} from './metadata/library-signatures/index.js';
+export {
   recoverRuntimeMetadata,
   type RuntimeRecord,
   type RuntimeMetadata,

@@ -77,7 +77,10 @@ const KEY_BYTES = 12;
 /** Signatures grouped by which of their leading bytes are masked, then by those bytes:
  * a lookup costs one hash probe per distinct leading mask, not one comparison per signature. */
 class SignatureIndex {
-  readonly groups = new Map<string, { length: number; fixed: number[]; table: Map<string, Candidate[]> }>();
+  readonly groups = new Map<
+    string,
+    { length: number; fixed: number[]; table: Map<string, Candidate[]> }
+  >();
 
   constructor(libraries: readonly SignatureLibrary[]) {
     for (const library of libraries)
@@ -367,7 +370,9 @@ export function matchSignatures(
           chosen.contract === null ? null : { library: library.contracts!, name: chosen.contract },
         kind: chosen.ifunc ? 'ifunc_resolver' : 'function',
         confirmed_calls: Math.min(...chosen.members.map((member) => member.confirmed)),
-        calls: Math.min(...chosen.members.map(({ candidate }) => candidate.alternative.calls.length)),
+        calls: Math.min(
+          ...chosen.members.map(({ candidate }) => candidate.alternative.calls.length),
+        ),
       },
       chosen.members,
     );
@@ -406,7 +411,7 @@ export function matchSignatures(
     );
     return true;
   };
-  for (let changed = true; changed; ) {
+  for (let changed = true; changed;) {
     changed = false;
     for (const [id, { fn, resolver }] of stubs)
       if (nameStub(id, fn, resolver)) {

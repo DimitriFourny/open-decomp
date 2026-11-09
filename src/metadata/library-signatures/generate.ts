@@ -11,7 +11,10 @@ import {
 
 /** A function body to sign: from a relocatable object or a linked image with symbols. */
 export interface SignatureSource {
-  readonly names: readonly { readonly name: string; readonly binding: 'local' | 'global' | 'weak' }[];
+  readonly names: readonly {
+    readonly name: string;
+    readonly binding: 'local' | 'global' | 'weak';
+  }[];
   readonly bytes: Uint8Array;
   /** 1 where the byte is position-dependent. */
   readonly masked: Uint8Array;
@@ -67,13 +70,18 @@ export function buildSignatureLibrary(
   sources: Iterable<SignatureSource>,
   header: Omit<SignatureLibrary, 'functions'>,
 ): { library: SignatureLibrary; stats: SignatureStats } {
-  const byBody = new Map<string, { fn: Omit<SignatureFunction, 'alternatives'>; alternatives: Map<string, SignatureAlternative> }>();
+  const byBody = new Map<
+    string,
+    { fn: Omit<SignatureFunction, 'alternatives'>; alternatives: Map<string, SignatureAlternative> }
+  >();
   const objects = new Map<string, number>();
   let bodies = 0,
     skipped = 0;
   for (const source of sources) {
     bodies++;
-    const names = preferredNames(source.names.filter((entry) => !/\.cold(\.\d+)?$/.test(entry.name)));
+    const names = preferredNames(
+      source.names.filter((entry) => !/\.cold(\.\d+)?$/.test(entry.name)),
+    );
     if (!names.length || !source.bytes.length) {
       skipped++;
       continue;

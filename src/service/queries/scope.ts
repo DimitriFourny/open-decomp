@@ -1,6 +1,5 @@
 import { buildOnce, useBuilt } from '../../core/index.js';
 import type {
-  Annotation,
   FunctionRecord,
   LoadedImage,
   OperationContext,
@@ -9,7 +8,7 @@ import type {
   StoredRecordKinds,
 } from '../../core/index.js';
 import { reconstructFunctionGraph, type QueryFunctionGraph } from './graphs.js';
-import { libraryMatchNoreturnCalls } from '../../metadata/library-contracts/index.js';
+import { matchedNoreturn } from '../../metadata/library-signatures/contracts.js';
 import { libraryMatches } from '../../project/annotations/naming.js';
 import { queryFailure } from './shared.js';
 
@@ -29,7 +28,6 @@ const navigation = new WeakMap<
     readonly revision: number;
     readonly image: LoadedImage;
     readonly functions: readonly FunctionRecord[];
-    readonly noreturn: ReadonlyMap<bigint, readonly string[]>;
     references?: readonly ReferenceRecord[];
   }
 >();
@@ -178,7 +176,6 @@ export function loadFunctionGraph(
           exports: records(read, revision, image.id, 'export').items,
         },
         functions: records(read, revision, image.id, 'function').items,
-        noreturn: matchedNoreturnCalls(scope.store, revision, image, quiet),
       };
     });
     navigation.set(image, indexed);
@@ -191,40 +188,38 @@ export function loadFunctionGraph(
       function: loaded.function,
       functions: indexed.functions,
       formatting,
-      noreturn_matches: indexed.noreturn,
+      noreturn_lookup: matchedNoreturnLookup(scope, revision, indexed.image, indexed.functions),
     },
     scope.context,
   );
 }
 
-/** Noreturn library declarations of the functions library signature matches named, at a
- * revision: a revision's graphs end the blocks of their calls. */
-function matchedNoreturnCalls(
-  store: ReadScope['store'],
+const entriesOf = new WeakMap<readonly FunctionRecord[], Map<bigint, FunctionRecord>>();
+
+/** Whether a call target is a function a library signature match declares noreturn (`exit`,
+ * `abort`): reads that function's annotations only, so a graph depends on the annotations of
+ * the functions it calls, not on every annotation of the project. */
+function matchedNoreturnLookup(
+  scope: ReadScope,
   revision: number,
   image: LoadedImage,
-  context: OperationContext,
-): ReadonlyMap<bigint, readonly string[]> {
-  const annotations: Annotation[] = [];
-  let cursor: string | undefined;
-  do {
-    context.checkpoint(1);
-    const page = store.queryAnnotations({
-      revision,
-      limit: 1000,
-      ...(cursor === undefined ? {} : { cursor }),
-    });
-    for (const item of page.items) if (item.value.kind === 'library_match') annotations.push(item);
-    cursor = page.next_cursor ?? undefined;
-  } while (cursor !== undefined);
-  if (!annotations.length) return new Map();
-  const entries = new Map(
-    records({ store, context }, revision, image.id, 'function').items.map((fn) => [
-      fn.id,
-      fn.entry,
-    ]),
-  );
-  return libraryMatchNoreturnCalls(libraryMatches(annotations, entries), image.target.format);
+  functions: readonly FunctionRecord[],
+): (address: bigint) => readonly string[] | undefined {
+  let entries = entriesOf.get(functions);
+  if (!entries) {
+    entries = new Map(functions.map((fn) => [fn.entry.value, fn]));
+    entriesOf.set(functions, entries);
+  }
+  const byEntry = entries;
+  return (address) => {
+    const fn = byEntry.get(address);
+    if (!fn) return undefined;
+    const [match] = libraryMatches(
+      scope.store.readAnnotations(fn.id, revision),
+      new Map([[fn.id, fn.entry]]),
+    );
+    return match && matchedNoreturn(match, image.target.format);
+  };
 }
 
 /** Reuse the immutable native function/reference arrays already materialized for

@@ -35,6 +35,10 @@ import {
 } from '../../analysis/types/index.js';
 import { frameVariableNames, recoverDebugInfo } from '../../metadata/debug/index.js';
 import { recoverLibraryContracts } from '../../metadata/library-contracts/index.js';
+import {
+  recoverMatchedContracts,
+  withMatchedContracts,
+} from '../../metadata/library-signatures/contracts.js';
 import { cSourceName } from '../../metadata/symbols/c-names.js';
 import { structureControlFlow } from '../../presentation/index.js';
 import { emitC } from '../../emitters/c/index.js';
@@ -235,9 +239,12 @@ export async function executeDecompilation(
         ).annotations,
         new Map(functions.map((fn) => [fn.id, fn.entry])),
       );
-      const library = recoverLibraryContracts(
-        { image, abi: components.abi, revision: args.revision, matches },
-        fullContext,
+      const library = withMatchedContracts(
+        recoverLibraryContracts({ image, abi: components.abi, revision: args.revision }, fullContext),
+        recoverMatchedContracts(
+          { image, abi: components.abi, revision: args.revision, matches },
+          fullContext,
+        ),
       );
       const nativeTypes: SuppliedTypeRecord[] = [
         ...debug.types.map((type) => ({

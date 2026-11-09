@@ -1,0 +1,26 @@
+{
+  "license": "MIT (repository LICENSE)",
+  "sources": ["sigfix1.c", "sigfix2.c", "sigfix-main.c"],
+  "target": "x86_64-linux-gnu (PIE, dynamically linked against glibc)",
+  "compiler": "gcc (Debian 14.2.0-19) 14.2.0",
+  "linker": "GNU ld (GNU Binutils for Debian) 2.44",
+  "recipe_cwd": "test/metadata/fixtures/signatures",
+  "recipe": ["sh build.sh"],
+  "inputs": {
+    "libsigfix.a": "ar archive of sigfix1.o (sig_count, sig_twice, sig_dup, sig_mix) and sigfix2.o (sig_mix_copy: the body of sig_mix)",
+    "sigfix-symbols": "sigfix-main.c linked with libsigfix.a",
+    "sigfix-stripped": "sigfix-symbols without symbols (strip)"
+  },
+  "notes": [
+    "Static compiler/linker fixtures for library signatures; never executed by tests.",
+    "Byte identity holds for the recorded toolchain only."
+  ],
+  "sha256": {
+    "sigfix1.c": "00fc0f0b17d70a3343ed3088c830bf7d6baeba765b07dce4c1f8d454b7e36841",
+    "sigfix2.c": "330520517571ef4f6b6adc2b4836c58ac38eda8e0c59ab0db455ca9e980eb7b3",
+    "sigfix-main.c": "aacca71b19332c4ccd12e48fb8fb9357803a8c0a99eba9a9133a6e5558db326f",
+    "libsigfix.a": "df2a9a0a71c16876d318674d32440f0190f80d430eda2ae0103c8bbf10f6afbe",
+    "sigfix-symbols": "729f0c4bce29192ba6cbd48fecefb768160d5367d68cf3b664751d3f4d12b0b5",
+    "sigfix-stripped": "ae765ee797b92c684bd0c8edf17ba59feb9bddcdf806f4a6fe3c1c995ae0c76e"
+  }
+}

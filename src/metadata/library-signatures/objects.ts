@@ -7,7 +7,10 @@ export class ObjectFormatError extends Error {}
 /** One function symbol's body in an object. */
 export interface ObjectFunction {
   /** Symbol names at the address (aliases), in symbol-table order. */
-  readonly names: readonly { readonly name: string; readonly binding: 'local' | 'global' | 'weak' }[];
+  readonly names: readonly {
+    readonly name: string;
+    readonly binding: 'local' | 'global' | 'weak';
+  }[];
   readonly bytes: Uint8Array;
   /** 1 where the byte is position-dependent (relocated or rewritable by the linker). */
   readonly masked: Uint8Array;
@@ -32,7 +35,7 @@ export function archiveMembers(bytes: Uint8Array): ObjectMember[] {
     new TextDecoder('latin1').decode(bytes.subarray(start, start + length));
   const members: ObjectMember[] = [];
   let longNames = '';
-  for (let offset = 8; offset + 60 <= bytes.length; ) {
+  for (let offset = 8; offset + 60 <= bytes.length;) {
     const rawName = text(offset, 16).trimEnd();
     const size = Number.parseInt(text(offset + 48, 10).trim(), 10);
     if (text(offset + 58, 2) !== '`\n' || !Number.isSafeInteger(size) || size < 0)
@@ -152,7 +155,10 @@ export function objectFunctions(member: ObjectMember): ObjectFunction[] {
     };
   });
   // Function symbols by section and address; aliases share one body.
-  const bodies = new Map<string, { section: number; value: number; size: number; names: ObjectFunction['names']; ifunc: boolean }>();
+  const bodies = new Map<
+    string,
+    { section: number; value: number; size: number; names: ObjectFunction['names']; ifunc: boolean }
+  >();
   const functionAt = new Map<string, string>();
   for (const symbol of symbols) {
     if ((symbol.type !== 2 && symbol.type !== 10) || !symbol.name) continue;
@@ -179,7 +185,10 @@ export function objectFunctions(member: ObjectMember): ObjectFunction[] {
     if (!functionAt.has(key)) functionAt.set(key, symbol.name);
   }
   // Relocations by the section they apply to.
-  const relocations = new Map<number, { offset: number; type: number; symbol: number; addend: number }[]>();
+  const relocations = new Map<
+    number,
+    { offset: number; type: number; symbol: number; addend: number }[]
+  >();
   for (const section of sections) {
     if (section.type !== 4 || section.link !== symtabIndex) continue;
     const list = relocations.get(section.info) ?? [];
@@ -212,14 +221,17 @@ export function objectFunctions(member: ObjectMember): ObjectFunction[] {
       if (relocation.type !== 2 && relocation.type !== 4) continue;
       const opcode = bytes[at - 1],
         isBranch =
-          opcode === 0xe8 || opcode === 0xe9 || (bytes[at - 2] === 0x0f && (opcode! & 0xf0) === 0x80);
+          opcode === 0xe8 ||
+          opcode === 0xe9 ||
+          (bytes[at - 2] === 0x0f && (opcode! & 0xf0) === 0x80);
       const symbol = symbols[relocation.symbol];
       if (!isBranch || !symbol) continue;
       let name: string | undefined;
       if (symbol.type === 3) {
         // Section-relative: the function at the target offset of that section.
         name = functionAt.get(`${symbol.section}:${relocation.addend + 4}`);
-        if (symbol.section === body.section && relocation.addend + 4 === body.value) name = undefined;
+        if (symbol.section === body.section && relocation.addend + 4 === body.value)
+          name = undefined;
       } else if (symbol.name && relocation.addend === -4) name = symbol.name;
       if (name) calls.push([at, name]);
     }
