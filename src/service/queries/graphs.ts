@@ -67,7 +67,11 @@ function retain(
     cachedUnits -= prior.units;
     cachedCharacters -= prior.characters;
   }
-  while (cache.size >= 32 || cachedUnits + units > 8192 || cachedCharacters + characters > 1_048_576) {
+  while (
+    cache.size >= 32 ||
+    cachedUnits + units > 8192 ||
+    cachedCharacters + characters > 1_048_576
+  ) {
     const oldest = cache.keys().next().value!;
     const removed = cache.get(oldest)!;
     cache.delete(oldest);

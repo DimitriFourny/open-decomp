@@ -39,7 +39,55 @@ export function loadImage(store: ProjectStore, revision: number, id: string): Lo
     );
   return store.readLoadedImage(id, slices[0]!.selected_slice_id, revision);
 }
+/** Completed record scans per store, by revision, image and kind (most recent last). */
+const scans = new WeakMap<
+  ProjectStore,
+  Map<
+    string,
+    { readonly items: readonly unknown[]; readonly state: IndexState; readonly charges: number }
+  >
+>();
+const MAX_SCANS_PER_STORE = 32;
+
+/** Every record of a kind at a revision. The records of a committed revision never change, so
+ * a completed scan is kept per store and a repeat (every `xrefs_get` reads all references:
+ * seconds per query on a 160 KB binary) costs one dependency read: the one `rereadScopes`
+ * makes, with the same work charges as the scan, so readsets, budgets and results are
+ * unchanged. */
 export function records<K extends keyof StoredRecordKinds>(
+  scope: ReadScope,
+  revision: number,
+  image_id: string,
+  kind: K,
+): { items: StoredRecordKinds[K][]; state: IndexState } {
+  let kept = scans.get(scope.store);
+  if (!kept) scans.set(scope.store, (kept = new Map()));
+  const key = `${revision}:${image_id}:${kind}`;
+  const hit = kept.get(key);
+  if (hit) {
+    scope.store.queryRecords({ kind, image_id, revision, limit: 1 });
+    for (let charge = 0; charge < hit.charges; charge++) scope.context.checkpoint(1);
+    kept.delete(key);
+    kept.set(key, hit);
+    return { items: [...hit.items] as StoredRecordKinds[K][], state: hit.state };
+  }
+  let charges = 0;
+  const counted: ReadScope = {
+    store: scope.store,
+    context: {
+      ...scope.context,
+      checkpoint(work) {
+        scope.context.checkpoint(work);
+        charges++;
+      },
+    },
+  };
+  const scanned = scan(counted, revision, image_id, kind);
+  if (kept.size >= MAX_SCANS_PER_STORE) kept.delete(kept.keys().next().value!);
+  kept.set(key, { items: [...scanned.items], state: scanned.state, charges });
+  return scanned;
+}
+function scan<K extends keyof StoredRecordKinds>(
   scope: ReadScope,
   revision: number,
   image_id: string,
