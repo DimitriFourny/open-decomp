@@ -3,7 +3,7 @@
  * timed through the public API, as a client would see them.
  *
  *   node --import tsx scripts/bench/browse.ts BINARY [--limit N] [--cache DIR] [--source]
- *     [--discovery-instructions N] [--no-cfg] [--no-xrefs]
+ *     [--discovery-instructions N] [--open-work N] [--no-cfg] [--no-xrefs]
  *
  * Phases: open (import, or resume with a --cache that holds the project), whole-image
  * discovery to its end under the client's budget (`completeDiscovery`), the function index, then for each
@@ -26,6 +26,7 @@ const { values, positionals } = parseArgs({
     cache: { type: 'string' },
     source: { type: 'boolean', default: false },
     'discovery-instructions': { type: 'string', default: '1000000' },
+    'open-work': { type: 'string' },
     'no-cfg': { type: 'boolean', default: false },
     'no-xrefs': { type: 'boolean', default: false },
   },
@@ -79,7 +80,12 @@ function data<T extends { state: string }>(result: T, what: string): Data<T> {
 }
 
 let started = performance.now();
-const session = await api.openBinary(input, { cachePath });
+const session = await api.openBinary(input, {
+  cachePath,
+  ...(values['open-work'] === undefined
+    ? {}
+    : { budget: { work: Number(values['open-work']), deadline_ms: 300_000 } }),
+});
 try {
   console.log(`open (${session.reused ? 'resume' : 'import'}): ${ms(started)}`);
   // The client's discovery budget (OpenReverse): the largest OpenDecomp accepts.
