@@ -840,12 +840,33 @@ class Parser extends Reader {
     this.importSymbols.add(symbol.record.id);
   }
 
+  /** The null symbol (index 0) of a relocation table that links no symbol table. */
+  nullSymbol(table: bigint): NativeSymbol {
+    return {
+      record: {
+        id: this.id('symbol', table),
+        original_name: null,
+        display_name: null,
+        kind: 'unknown',
+        address: null,
+        size: 0n,
+        binding: 'local',
+        evidence_ids: [],
+      },
+      undefined: true,
+      type: 0,
+      p: table,
+    };
+  }
+
   parseRelocations(): void {
     const slots = new Set<bigint>();
     for (const s of this.raw) {
       if (s.type !== 4 && s.type !== 9) continue;
+      // sh_link SHN_UNDEF: a table without a symbol table (a static executable's
+      // IRELATIVE `.rela.iplt`), where only the null symbol index is valid.
       const stride = s.type === 4 ? 24n : 16n,
-        symbols = this.symbolTables.get(s.link);
+        symbols = s.link === 0 ? [this.nullSymbol(s.p)] : this.symbolTables.get(s.link);
       if (s.stride !== stride || s.size % stride || !symbols || s.info >= this.raw.length)
         this.fail('Invalid ELF relocation table or symbol/target link', s.p);
       if (s.flags & 0x800n)

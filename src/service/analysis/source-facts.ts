@@ -142,6 +142,7 @@ import { objcSourceFacts } from './objc-messages.js';
 import { calleeReadsGuess, likelyArities } from './likely-arity.js';
 import { nativeVariadicInterface } from './native-variadic.js';
 import { likelyTypes } from './likely-types.js';
+import { namingAnnotations } from '../../project/annotations/naming.js';
 
 export interface SourceFactsInput {
   readonly scope: AnalysisScope;
@@ -970,11 +971,9 @@ function sourceAddresses(
     if (!candidates.has(key)) continue;
     functionEntries.set(key, fn.id === input.ir.id);
     if (names.has(key)) continue;
-    const annotations = scope.store
-      .readAnnotations(fn.id, revision)
-      .filter(
-        (annotation) => annotation.value.kind === 'name' && annotation.status !== 'retracted',
-      );
+    const annotations = namingAnnotations(scope.store.readAnnotations(fn.id, revision)).filter(
+      (annotation) => annotation.status !== 'retracted',
+    );
     const asserted = new Set(
       annotations.flatMap((annotation) =>
         annotation.status === 'asserted' && annotation.value.kind === 'name'

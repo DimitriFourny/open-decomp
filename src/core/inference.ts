@@ -275,7 +275,7 @@ export const inferenceDetailsByKind = {
     kind: z.literal('annotation'),
     annotation_id: annotationIdSchema,
     annotation_status: z.enum(['hypothesis', 'asserted', 'retracted']),
-    annotation_kind: z.enum(['name', 'note', 'type', 'signature']),
+    annotation_kind: z.enum(['name', 'note', 'type', 'signature', 'library_match']),
   }),
 } as const;
 export const inferenceDetailsSchema = z.discriminatedUnion('kind', [

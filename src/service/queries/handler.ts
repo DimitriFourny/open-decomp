@@ -17,6 +17,7 @@ import {
 } from '../../core/index.js';
 import type {
   Address,
+  Annotation,
   CanonicalValue,
   CursorBinding,
   Evidence,
@@ -52,6 +53,7 @@ import {
   executeTypesDeclare,
 } from '../analysis/index.js';
 import { libraryListing } from '../../project/annotations/type-library.js';
+import { namingAnnotations } from '../../project/annotations/naming.js';
 import { runNativeOpenJob } from '../analysis/native-open-job.js';
 import {
   investigationArtifact,
@@ -118,15 +120,15 @@ function virtual(image: LoadedImage, address: Address): Address {
     queryFailure('invalid_address', 'File offset has no virtual mapping');
   return translated.address;
 }
-/** Only a unique active assertion changes presentation. Native names stay searchable. */
+/** Only a unique active assertion changes presentation (a library match when no name
+ * annotation exists). Native names stay searchable. */
 function presentName<T extends { readonly id: string; readonly display_name: string | null }>(
   scope: Scope,
   revision: number,
   record: T,
 ): T {
   const names = new Set(
-    scope.store
-      .readAnnotations(record.id, revision)
+    namingAnnotations(scope.store.readAnnotations(record.id, revision))
       .filter((item) => item.status === 'asserted' && item.value.kind === 'name')
       .map((item) => (item.value.kind === 'name' ? item.value.value : '')),
   );
@@ -142,6 +144,7 @@ function presentNames<T extends { readonly id: string; readonly display_name: st
   const named = new Map<string, Set<string>>();
   for (let start = 0; start < records.length; start += 1000) {
     const entity_ids = records.slice(start, start + 1000).map((record) => record.id);
+    const annotations: Annotation[] = [];
     let cursor: string | undefined;
     do {
       scope.context.checkpoint(1);
@@ -151,14 +154,15 @@ function presentNames<T extends { readonly id: string; readonly display_name: st
         limit: 1000,
         ...(cursor === undefined ? {} : { cursor }),
       });
-      for (const item of page.items) {
-        if (item.status !== 'asserted' || item.value.kind !== 'name') continue;
-        const names = named.get(item.entity_id) ?? new Set<string>();
-        names.add(item.value.value);
-        named.set(item.entity_id, names);
-      }
+      annotations.push(...page.items);
       cursor = page.next_cursor ?? undefined;
     } while (cursor !== undefined);
+    for (const item of namingAnnotations(annotations)) {
+      if (item.status !== 'asserted' || item.value.kind !== 'name') continue;
+      const names = named.get(item.entity_id) ?? new Set<string>();
+      names.add(item.value.value);
+      named.set(item.entity_id, names);
+    }
   }
   return records.map((record) => {
     const names = named.get(record.id);
