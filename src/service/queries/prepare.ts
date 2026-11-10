@@ -183,13 +183,17 @@ function publishFunctions(
       stub
         ? {
             ...named,
-            // A stub is the import it forwards to; an existing native name stays.
+            // A stub is the import it forwards to; an existing native name stays, and a name
+            // taken from the import's own callable entry shows the import's display name.
             ...(named.original_name === null
               ? {
                   original_name: stub.import.original_name,
                   display_name: stub.import.display_name,
                 }
-              : {}),
+              : named.original_name === stub.import.original_name &&
+                  named.display_name === named.original_name
+                ? { display_name: stub.import.display_name }
+                : {}),
             kind: 'import_stub' as const,
             boundary: named.boundary === 'conflicting' ? named.boundary : ('established' as const),
             analysis: 'complete' as const,
