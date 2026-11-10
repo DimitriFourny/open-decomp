@@ -5033,7 +5033,13 @@ export class Renderer {
         `Exact ${type.bits}-bit little-endian storage view whose address must be ${access.alignment}-byte aligned (misalignment faults); no strict-aliasing or padding assumption.`,
       );
     }
-    return `*(${access.volatile ? 'volatile ' : ''}${name} *)${this.printer.group(address, UNARY)}`;
+    // `(uintptr_t)&object` converted straight back to a pointer is the pointer
+    // itself: the access type states the alignment the machine access needs.
+    const direct =
+      address.pointer && address.text === `(uintptr_t)${address.pointer.text}`
+        ? this.printer.primary(address.pointer.text)
+        : null;
+    return `*(${access.volatile ? 'volatile ' : ''}${name} *)${direct ? (/^&[\w.]+(?:\[\w+\])?$/.test(direct.text) ? direct.text : `(${direct.text})`) : this.printer.group(address, UNARY)}`;
   }
 
   private storage(node: Extract<Instruction, { kind: 'load' | 'store' }>): string {
@@ -7191,24 +7197,58 @@ export class Renderer {
 
   /** An inlined zero extension does not change which case matches when every
    * case value fits its operand, so that narrower operand is the selector. */
-  private switchSelector(control: Extract<Control, { kind: 'switch' }>): Value {
+  private switchSelector(control: Extract<Control, { kind: 'switch' }>): {
+    readonly value: Value;
+    /** Added to each case value (modulo the selector width) for its label. */
+    readonly offset: bigint;
+  } {
     const expression = this.inline.has(control.value.id)
       ? this.program.expressions.get(control.value.id)
       : undefined;
+    let selector = control.value;
     if (
-      expression?.kind !== 'cast' ||
-      expression.op !== 'zero_extend' ||
-      expression.value.type.kind !== 'integer' ||
-      !control.cases.every((item) => item.bits < 1n << BigInt(bitWidth(expression.value.type))) ||
-      !this.localValidation.presentation(
+      expression?.kind === 'cast' &&
+      expression.op === 'zero_extend' &&
+      expression.value.type.kind === 'integer' &&
+      control.cases.every((item) => item.bits < 1n << BigInt(bitWidth(expression.value.type))) &&
+      this.localValidation.presentation(
         'switch_selector_extension',
         control.id,
         'a zero-extended selector whose case values all fit the unextended operand is switched on that operand; the same case matches for every value',
         [control.value.id, expression.value.id],
       )
     )
-      return control.value;
-    return expression.value;
+      selector = expression.value;
+    // An inline `x - c` / `x + c` selector of x's width switches on x: x - c == k
+    // exactly when x == k + c modulo 2^width, a bijection, so every case and
+    // the default select the same arm (the range guard was folded already).
+    const rebased = this.inline.has(selector.id)
+      ? this.program.expressions.get(selector.id)
+      : undefined;
+    if (
+      rebased?.kind === 'integer' &&
+      (rebased.op === 'sub' || rebased.op === 'add') &&
+      selector.type.kind === 'integer' &&
+      sameType(rebased.left.type, selector.type) &&
+      this.constantOf(rebased.left) === undefined
+    ) {
+      const constant = this.constantOf(rebased.right);
+      if (
+        constant !== undefined &&
+        constant !== 0n &&
+        this.localValidation.presentation(
+          'switch_selector_rebase',
+          control.id,
+          'a selector x - c (x + c) at the width of x is switched on x with every case label k printed as k + c (k - c) modulo 2^width: x - c == k exactly when x == k + c, so each case and the default select the same arm',
+          [selector.id, rebased.left.id],
+        )
+      )
+        return {
+          value: rebased.left,
+          offset: rebased.op === 'sub' ? constant : BigInt.asUintN(selector.type.bits, -constant),
+        };
+    }
+    return { value: selector, offset: 0n };
   }
 
   /** Source-view case layout. A copy-free, bodiless case arm reaching another
@@ -7269,7 +7309,11 @@ export class Renderer {
    * grouped and omitted case edges land where the arm printed for them does.
    * An empty `default` is dropped and an arm that cannot fall through ends
    * without `break`. */
-  private sourceSwitch(control: Extract<Control, { kind: 'switch' }>, depth: number): void {
+  private sourceSwitch(
+    control: Extract<Control, { kind: 'switch' }>,
+    depth: number,
+    label: (bits: bigint) => bigint = (bits) => bits,
+  ): void {
     const c = this.language === 'c-like';
     const landing = (arm: ControlArm): EmittedEdge | undefined =>
       arm.body
@@ -7279,7 +7323,7 @@ export class Renderer {
     let printed = 0;
     for (const group of plan.groups) {
       this.context.checkpoint(group.labels.length);
-      const labels = group.labels.map((bits) => bits.toString());
+      const labels = group.labels.map((bits) => label(bits).toString());
       const scoped = c && this.armDeclares(group.arm);
       if (c) {
         for (const label of labels.slice(0, -1)) this.writer.line(depth + 1, `case ${label}:`);
@@ -9565,14 +9609,29 @@ export class Renderer {
       }
       case 'switch': {
         ids.push(control.value.id);
-        const selector = this.sourceView ? this.switchSelector(control) : control.value;
+        const selector = this.sourceView
+          ? this.switchSelector(control)
+          : { value: control.value, offset: 0n };
+        const whole = this.printed(selector.value),
+          width = bitWidth(selector.value.type);
+        // A signed local read as its unsigned pattern switches on the local:
+        // the labels print in its signed range instead.
+        const printed =
+          this.sourceView &&
+          whole.unreduced?.ctype?.signed &&
+          whole.unreduced.ctype.bits === width &&
+          whole.ctype?.bits === width
+            ? whole.unreduced
+            : whole;
         this.writer.line(
           depth,
-          this.language === 'c-like'
-            ? `switch (${this.value(selector)}) {`
-            : `match ${this.value(selector)}:`,
+          this.language === 'c-like' ? `switch (${printed.text}) {` : `match ${printed.text}:`,
         );
-        if (this.sourceView) this.sourceSwitch(control, depth);
+        if (this.sourceView)
+          this.sourceSwitch(control, depth, (bits) => {
+            const label = BigInt.asUintN(width, bits + selector.offset);
+            return printed.ctype?.signed ? BigInt.asIntN(width, label) : label;
+          });
         else {
           for (const item of control.cases) {
             this.context.checkpoint(1);

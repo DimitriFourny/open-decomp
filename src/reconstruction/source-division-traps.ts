@@ -27,6 +27,10 @@ export interface DivisionTrap {
   readonly bits: number;
 }
 
+/** Presentation record scope of `division_trap`. */
+export const DIVISION_TRAP_SCOPE =
+  'x86 divide-error guards of a division whose double-width dividend is the sign (zero) extension of an N-bit value and whose divisor is the same extension of an N-bit value: they trap exactly when the divisor is zero or (signed) the dividend is the minimum and the divisor -1, the inputs on which the N-bit quotient and remainder operators of the dialect trap (C-like: signed only at N = 32 and 64, whose int32_t/int64_t operands are not promoted; Python-like: unsigned only), and otherwise the low halves of the wide quotient and remainder are the N-bit truncating quotient and remainder; the guards and trap blocks print nothing and the division prints as a statement where it is defined';
+
 type Division = Extract<Expression, { kind: 'integer' }> & {
   readonly op: 'sdiv' | 'udiv' | 'srem' | 'urem';
 };
@@ -87,7 +91,32 @@ export function classifyDivisionTraps(
       ? BigInt.asUintN(bitWidth(value.type), expression.bits)
       : null;
   };
-  const same = (left: Value, right: Value): boolean => resolve(left).id === resolve(right).id;
+  /** One value, or structurally identical pure definitions (two reads of one
+   * register join the same cells in separate nodes). */
+  const same = (left: Value, right: Value, depth = 0): boolean => {
+    left = resolve(left);
+    right = resolve(right);
+    if (left.id === right.id) return true;
+    if (depth > 3 || !sameType(left.type, right.type)) return false;
+    const a = expressions.get(left.id),
+      b = expressions.get(right.id);
+    if (!a || !b || a.kind !== b.kind || a.kind === 'indeterminate') return false;
+    if (a.kind === 'constant') return a.bits === (b as typeof a).bits;
+    const shape = (expression: Expression): string =>
+      JSON.stringify(expression, (key, item: unknown) =>
+        typeof item === 'bigint'
+          ? String(item)
+          : item && typeof item === 'object' && 'id' in item
+            ? null
+            : item,
+      );
+    if (shape(a) !== shape(b)) return false;
+    const x = expressionOperands(a),
+      y = expressionOperands(b);
+    return (
+      x.length === y.length && x.every((operand, index) => same(operand, y[index]!, depth + 1))
+    );
+  };
   /** The `bits`-wide value `x` with `value == ext(x)` (sign extension when
    * `signed`, else zero extension), also through low slices at least `bits`
    * wide of such an extension; or null. */

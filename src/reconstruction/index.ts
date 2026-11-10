@@ -45,7 +45,11 @@ import { normalizeSourceRanges } from './source-ranges.js';
 import { constantRotationOperands } from './source-shifts.js';
 import { projectLikelyTypes } from './source-likely.js';
 import { STACK_PROTECTOR_PREMISE } from './source-protector.js';
-import { classifyDivisionTraps, type DivisionTrap } from './source-division-traps.js';
+import {
+  classifyDivisionTraps,
+  DIVISION_TRAP_SCOPE,
+  type DivisionTrap,
+} from './source-division-traps.js';
 import { projectSourceTypes } from './source-types.js';
 import {
   permitsVoidSourceSignature,
@@ -355,12 +359,10 @@ function reconstructView(
       language === 'c-like',
     )) {
       if (
-        !localValidation.presentation(
-          'division_trap',
-          trap.block,
-          `x86 divide-error guards of a ${trap.bits}-bit ${trap.signed ? 'signed' : 'unsigned'} division whose dividend is the ${trap.signed ? 'sign' : 'zero'} extension of a ${trap.bits}-bit value: they trap exactly when the divisor is zero${trap.signed ? ' or the dividend is the minimum and the divisor -1' : ''}, the inputs on which the dialect's ${trap.bits}-bit quotient and remainder operators trap, and otherwise the low halves of the wide quotient and remainder are the ${trap.bits}-bit truncating quotient and remainder; the guards and trap blocks print nothing and the division prints at the guard`,
-          [...trap.guards.keys(), ...trap.results.map((item) => item.value.id)],
-        )
+        !localValidation.presentation('division_trap', trap.block, DIVISION_TRAP_SCOPE, [
+          ...trap.guards.keys(),
+          ...trap.results.map((item) => item.value.id),
+        ])
       )
         continue;
       for (const result of [...trap.results, ...trap.slices])
