@@ -230,6 +230,8 @@ export class X86Semantics {
     block: BlockBuilder,
     readonly instruction: DecodedInstruction,
     readonly abi: AbiProfile,
+    /** DF is clear at this instruction (ABI entry state, no DF writer in the function). */
+    readonly directionClear: boolean,
     readonly abstractFP: () => void,
   ) {
     this.block = block;
@@ -900,6 +902,57 @@ export class X86Semantics {
     return operand.value;
   }
 
+  /**
+   * STOS/MOVS and their REP forms (REPNE behaves as REP for them) with a 64-bit address size and
+   * no segment override, when DF is known clear: each element stores RAX's low bits (STOS) or
+   * the element at RSI (MOVS) to RDI, then advances RDI (and RSI) by the element size. REP runs
+   * that while RCX is not zero, decrementing RCX: an explicit IR loop, element by element.
+   * Flags are unchanged.
+   */
+  string(move: boolean, size: number): void {
+    const p = this.p;
+    if (!this.directionClear)
+      throw new Unsupported('String operation where the direction flag may be set');
+    if (p.address_bits !== 64 || p.prefixes.segment)
+      throw new Unsupported('String operation with a 32-bit address or segment override');
+    const access = { endian: 'little' as const, alignment: 1, volatile: false };
+    const element = (): void => {
+      const b = this.block,
+        target = b.readRegister(gpr('rdi'));
+      let value: Value;
+      if (move) {
+        const source = b.readRegister(gpr('rsi'));
+        value = b.load(integer(size), source, access);
+        b.writeRegister(gpr('rsi'), b.int('add', source, this.c(64, BigInt(size / 8))));
+      } else value = b.readRegister(gpr('rax', size));
+      b.store(target, value, access);
+      b.writeRegister(gpr('rdi'), b.int('add', target, this.c(64, BigInt(size / 8))));
+    };
+    if (!p.prefixes.rep && !p.prefixes.repne) {
+      element();
+      return;
+    }
+    const origin = instructionProvenance(this.instruction);
+    const header = this.builder.block([this.instruction.id, 'rep', 'header'], [], origin),
+      body = this.builder.block([this.instruction.id, 'rep', 'body'], [], origin),
+      exit = this.builder.block([this.instruction.id, 'rep', 'exit'], [], origin);
+    this.block.jump(header);
+    const count = header.readRegister(gpr('rcx'));
+    header.branch(
+      header.compare('eq', count, header.constant(integer(64), 0n)),
+      header.edge(exit),
+      header.edge(body),
+    );
+    this.block = body;
+    element();
+    this.block.writeRegister(
+      gpr('rcx'),
+      this.block.int('sub', this.block.readRegister(gpr('rcx')), this.c(64, 1n)),
+    );
+    this.block.jump(header);
+    this.block = exit;
+  }
+
   stackPush(value: Value): void {
     const b = this.block,
       sp = b.readRegister(this.abi.stack_pointer),
@@ -1140,6 +1193,15 @@ export class X86Semantics {
       this.write(dst!, this.read(src!, 128, alignment), alignment);
       return;
     }
+    const stringOperation = /^(Movs|Stos)([bwdq])_m/.exec(p.encoding);
+    if (stringOperation) {
+      this.string(
+        stringOperation[1] === 'Movs',
+        { b: 8, w: 16, d: 32, q: 64 }[stringOperation[2]!]!,
+      );
+      return;
+    }
+    if (m === 'cld' && this.directionClear) return;
     if (m === 'movss' || m === 'movsd' || m === 'movd' || m === 'movq') {
       if (
         !operands.some(

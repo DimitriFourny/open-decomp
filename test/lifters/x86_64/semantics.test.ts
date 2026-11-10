@@ -176,7 +176,7 @@ test('legacy scalar SSE preserves upper lanes and rejects unsupported MXCSR', ()
 });
 
 test('unsupported families stay unknown, while explicit UD2 is a trap', () => {
-  for (const code of ['d9 e8', 'f3 a4', 'f0 0f c7 09', 'c5 f8 58 c1']) {
+  for (const code of ['d9 e8', 'f3 67 a4', 'f0 0f c7 09', 'c5 f8 58 c1']) {
     const lifted = liftBytes(`${code} c3`);
     assert.equal(lifted.coverage.state, 'partial');
     assert.ok(

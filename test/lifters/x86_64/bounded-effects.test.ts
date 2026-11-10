@@ -32,10 +32,10 @@ test('an unlifted instruction clobbers only the state its decoded access sets ma
   const cases: readonly (readonly [string, string, string[], string[], string])[] = [
     // pmaddwd xmm0, xmm1: legacy SSE preserves bits above 127.
     ['66 0f f5 c1', 'pmaddwd', ['zmm0[0:128]'], ['mxcsr[0:6]'], 'none'],
-    // rep stosq: RCX and RDI change, memory is written; RAX, RSP and flags survive.
-    ['f3 48 ab', 'rep stosq', ['rcx[0:64]', 'rdi[0:64]'], [], 'unknown_read_write'],
+    // rep stosq with a 32-bit address size (not lifted): RCX and RDI change, memory is written; RAX, RSP and flags survive.
+    ['f3 67 48 ab', 'rep stosq', ['rcx[0:64]', 'rdi[0:64]'], [], 'unknown_read_write'],
     // rep movsb also advances RSI.
-    ['f3 a4', 'rep movsb', ['rcx[0:64]', 'rdi[0:64]', 'rsi[0:64]'], [], 'unknown_read_write'],
+    ['f3 67 a4', 'rep movsb', ['rcx[0:64]', 'rdi[0:64]', 'rsi[0:64]'], [], 'unknown_read_write'],
     // cvtsd2si rax, xmm0: a GPR result from a vector input touches no memory.
     ['f2 48 0f 2d c0', 'cvtsd2si', ['rax[0:64]'], ['mxcsr[0:6]'], 'none'],
     // cvtsd2si eax, xmm0: a 32-bit write zero-extends, so the whole RAX root is an output.

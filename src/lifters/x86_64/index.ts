@@ -42,7 +42,8 @@ export interface X86LiftResult {
  * scalar/packed FP arithmetic, MIN/MAX/SQRT/CMP, CVTSI2SS/SD, CVTTSS/SD2SI and
  * CVTSS2SD/CVTSD2SS and their packed forms, and legacy SSE integer moves, add/sub/bitwise, unpacks,
  * shuffles, lane compares/min/max, mask extraction, PINSRW/PEXTRW, shifts,
- * PMULUDQ/PMULLW, saturating packs and quadword half moves. Addresses use decoded RIP targets or
+ * PMULUDQ/PMULLW, saturating packs and quadword half moves; STOS/MOVS and their REP
+ * loops while DF is provably clear (ABI entry state, no DF writer in the function). Addresses use decoded RIP targets or
  * explicit address-size wrapping, scale and segment bases (FS/GS base is physical
  * state). Decoder access/flags metadata never defines these instruction semantics;
  * it only bounds the effect of an unlifted one.
@@ -60,7 +61,7 @@ export interface X86LiftResult {
  * Legacy scalar writes preserve upper lanes except memory MOVSS/MOVSD and
  * MOVD/MOVQ, which clear bits through 127; bits above XMM remain preserved.
  *
- * Unsupported: x87/MMX, string/REP operations, CMPXCHG8B/16B, RCL/RCR, BMI/ADX,
+ * Unsupported: x87/MMX, CMPS/SCAS/LODS, CMPXCHG8B/16B, RCL/RCR, BMI/ADX,
  * saturating arithmetic, rounding FP-to-integer conversions, AVX and later encodings, crypto,
  * system/privileged/transactional instructions, CET enforcement and precise
  * memory-fault/exception delivery. ENDBR64 is a landing marker abstraction, not
@@ -163,6 +164,18 @@ export class X86Lifter implements Lifter<RegisterIR> {
     const tablesByBranch = new Map((graph.jump_tables ?? []).map((table) => [table.branch, table]));
     const selectors = new Map<string, { block: BlockBuilder; value: Value }>();
     const fpSeen = new Set<string>();
+    // The SysV and Windows x64 ABIs clear DF at function entry and across calls. When no decoded
+    // instruction of the function may change DF (STD, POPF, IRET...), it is clear throughout.
+    const directionClear = !graph.instructions.some(
+      (instruction) =>
+        instruction.payload?.architecture !== 'x86_64' ||
+        (((instruction.payload.flags.written |
+          instruction.payload.flags.set |
+          instruction.payload.flags.undefined) >>
+          10n) &
+          1n) ===
+          1n,
+    );
     const unknownEffect = (
       block: BlockBuilder,
       reason: string,
@@ -207,7 +220,7 @@ export class X86Lifter implements Lifter<RegisterIR> {
           terminated = true;
           break;
         }
-        const semantics = new X86Semantics(builder, block, instruction, abi, () => {
+        const semantics = new X86Semantics(builder, block, instruction, abi, directionClear, () => {
           const reason = 'FP uses canonical arithmetic NaNs and abstracted MXCSR exception status';
           reasons.add(reason);
           if (!fpSeen.has(instruction.id)) {
