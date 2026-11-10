@@ -109,6 +109,37 @@ const OBJC_SET_PROPERTY: CatalogEntry['parameters'] = [
   ['offset', 'long'],
 ];
 
+const FUNCTEXCEPT =
+  'https://gcc.gnu.org/git/?p=gcc.git;a=blob;f=libstdc%2B%2B-v3/include/bits/functexcept.h';
+/** libstdc++'s out-of-line throw helpers (`bits/functexcept.h`, all `__noreturn__`), by their
+ * Itanium-mangled names; the ones that take a message take `const char*`. */
+function libstdcxxThrows(): Record<string, CatalogEntry> {
+  const message = (): CatalogEntry =>
+    entry('cxx', 'void', [['message', C]], { noreturn: true, source: FUNCTEXCEPT });
+  const none = (): CatalogEntry =>
+    entry('cxx', 'void', [], { noreturn: true, source: FUNCTEXCEPT });
+  return {
+    _ZSt17__throw_bad_allocv: none(),
+    _ZSt16__throw_bad_castv: none(),
+    _ZSt25__throw_bad_function_callv: none(),
+    _ZSt28__throw_bad_array_new_lengthv: none(),
+    _ZSt19__throw_logic_errorPKc: message(),
+    _ZSt20__throw_length_errorPKc: message(),
+    _ZSt20__throw_out_of_rangePKc: message(),
+    _ZSt24__throw_invalid_argumentPKc: message(),
+    _ZSt21__throw_runtime_errorPKc: message(),
+    _ZSt24__throw_out_of_range_fmtPKcz: entry('cxx', 'void', [['format', C]], {
+      noreturn: true,
+      variadic: true,
+      source: FUNCTEXCEPT,
+    }),
+    _ZSt20__throw_system_errori: entry('cxx', 'void', [['code', 'int']], {
+      noreturn: true,
+      source: FUNCTEXCEPT,
+    }),
+  };
+}
+
 /** Structured declarations only. These are conditional library contracts, not
  * proof of the loaded implementation or a promise of purity. Pointer qualifiers
  * and full function-pointer source types are not represented by the core model.
@@ -150,6 +181,7 @@ export const catalog: Readonly<Record<string, CatalogEntry>> = {
     noreturn: true,
     source: 'https://github.com/llvm/llvm-project/tree/main/libcxxabi',
   }),
+  ...libstdcxxThrows(),
   objc_exception_throw: entry('objc', 'void', [['exception', V]], {
     noreturn: true,
     source: 'https://github.com/apple-oss-distributions/objc4',
@@ -732,7 +764,11 @@ export function identifiesLibraryKind(
   if (format === 'elf') {
     const module = path.slice(path.lastIndexOf('/') + 1);
     if (library === 'c' || library === 'posix' || library === 'glibc') return GLIBC.test(module);
-    if (library === 'cxx') return module === 'libstdc++.so.6' || module === 'libc++abi.so.1';
+    // libgcc_s implements the Itanium unwind interface (`_Unwind_Resume`) the C++ ABI uses.
+    if (library === 'cxx')
+      return (
+        module === 'libstdc++.so.6' || module === 'libc++abi.so.1' || module === 'libgcc_s.so.1'
+      );
     return false;
   }
   switch (library) {

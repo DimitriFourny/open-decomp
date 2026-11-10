@@ -224,6 +224,18 @@ test('the stack-protector failure handler is noreturn in libSystem and glibc onl
   assert.equal(findDeclaration('__stack_chk_fail', 'msvcrt.dll', 'pe'), undefined);
 });
 
+test('C++ runtime helpers that throw or resume unwinding are noreturn', () => {
+  assert.equal(findDeclaration('_Unwind_Resume', 'libgcc_s.so.1', 'elf')?.noreturn, true);
+  assert.equal(
+    findDeclaration('_ZSt20__throw_length_errorPKc', 'libstdc++.so.6', 'elf')?.noreturn,
+    true,
+  );
+  const fmt = findDeclaration('_ZSt24__throw_out_of_range_fmtPKcz', 'libstdc++.so.6', 'elf');
+  assert.equal(fmt?.variadic, true);
+  // libgcc_s binds only C++ ABI declarations, never C library ones.
+  assert.equal(findDeclaration('strlen', 'libgcc_s.so.1', 'elf'), undefined);
+});
+
 test('named pointer typedefs keep their name over an opaque pointee', () => {
   const result = contracts(windows, [binding(windows, 'CreateFileW', 'KERNEL32.DLL')]);
   const create = named(result, 'CreateFileW');
