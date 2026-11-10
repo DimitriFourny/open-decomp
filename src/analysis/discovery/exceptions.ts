@@ -257,10 +257,9 @@ function parseEhFrame(
           cie = readCie(cieOffset + 8, cieOffset + 4 + cieLength);
           cies.set(cieOffset, cie);
         }
-        let q = body + 4;
-        let begin: bigint, range: bigint;
-        [begin, q] = pointer(cie.fdeEncoding, q);
-        [range, q] = pointer(cie.fdeEncoding & 0x0f, q);
+        const [begin, afterBegin] = pointer(cie.fdeEncoding, body + 4);
+        const [range, afterRange] = pointer(cie.fdeEncoding & 0x0f, afterBegin);
+        let q = afterRange;
         let lsda = 0n;
         if (cie.augmented) {
           const [dataLength, data] = uleb(q);
