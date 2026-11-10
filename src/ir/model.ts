@@ -272,6 +272,9 @@ export type Terminator = Origin & { readonly effect: Effect } & (
     | { readonly kind: 'trap'; readonly reason: string }
     | { readonly kind: 'unknown'; readonly reason: string }
   );
+/** Reason of the trap a lifter ends a block with when discovery proved its final call does
+ * not return (a trap edge after a call). */
+export const NORETURN_CALL_TRAP = 'Call to a noreturn callee does not return';
 export interface BasicBlock extends Origin {
   readonly parameters: readonly Value[];
   readonly effect_parameter: Effect;

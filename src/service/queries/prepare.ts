@@ -267,6 +267,7 @@ export function prepareDiscoveryStep(
   const cited = [
     ...discovery.graphs.flatMap((graph) => [
       ...graph.function.evidence_ids,
+      ...(graph.function.noreturn ?? []),
       ...graph.diagnostics.flatMap((diagnostic) => diagnostic.evidence_ids),
       ...graph.instructions.flatMap((instruction) => [
         ...instruction.evidence_ids,

@@ -155,6 +155,8 @@ export interface DiscoveryIndex {
   readonly executable: readonly Interval[];
   /** Object-symbol addresses: named data, never a function root. */
   readonly objects: ReadonlySet<bigint>;
+  /** Entries of published functions proven never to return, with that proof's evidence. */
+  readonly noreturn: ReadonlyMap<bigint, readonly string[]>;
   data_after(value: bigint, context: OperationContext): number;
   executable_end(value: bigint, context: OperationContext): bigint;
 }
@@ -339,12 +341,17 @@ export function discoverFunctions(
   /** Evidence that a call never returns: its direct target is declared noreturn, or it reads
    * (itself or through a thunk at its target) a noreturn import slot; undefined otherwise. */
   const thunks = new Map<bigint, readonly string[] | null>();
+  /** Roots this traversal proved never to return (`provenNoreturn`), by entry. */
+  const neverReturns = new Map<bigint, readonly string[]>();
   const noreturnOf = (call: DecodedInstruction): readonly string[] | undefined => {
     const flow = call.flow;
     if (call.validity !== 'valid' || flow.kind !== 'call') return undefined;
     const slots = input.noreturn_slots;
     if (flow.target) {
-      const declared = input.noreturn_calls?.get(flow.target.value);
+      const declared =
+        input.noreturn_calls?.get(flow.target.value) ??
+        index.noreturn.get(flow.target.value) ??
+        neverReturns.get(flow.target.value);
       if (declared || !slots?.size) return declared;
       let thunk = thunks.get(flow.target.value);
       if (thunk === undefined) {
@@ -947,6 +954,100 @@ export function discoverFunctions(
       seed(va(target), TAIL_TARGET_RULE, promoted.get(target)!, false);
     return promoted.size > 0;
   };
+  /** Least fixpoint over the decoded instructions: a root never returns when every path from
+   * its entry ends in an undefined-instruction trap (`ud2`, `udf`, `brk` other than the debugger
+   * break `#0xf000`) or a call that does not return (`noreturnOf`: library contracts, published
+   * or proven roots, noreturn import slots), or enters another root that never returns. A
+   * return, an indirect branch (jump tables included: their proof may not survive extraction),
+   * an unknown or invalid instruction, an undecoded address (gap, limit) or an entry into
+   * another root that may return makes it unproven. Calls of unproven targets are assumed to
+   * return, so each added root is proven from roots already proven: the result is sound for
+   * any iteration order and, being a least fixpoint, independent of it. */
+  function provenNoreturn(): void {
+    const terminal = (instruction: DecodedInstruction): boolean => {
+      const payload = instruction.payload;
+      if (instruction.flow.kind !== 'trap' || !payload) return false;
+      if (payload.architecture === 'x86_64') return /^ud[012]$/.test(payload.mnemonic);
+      if (payload.encoding.startsWith('UDF_')) return true;
+      return payload.encoding.startsWith('BRK_') && payload.fields.imm16 !== 0xf000n;
+    };
+    const roots = [...seeds.values()]
+      .filter((item) => !resume || traversed.has(item.entry.value))
+      .sort((a, b) => (a.entry.value < b.entry.value ? -1 : a.entry.value > b.entry.value ? 1 : 0));
+    /** The evidence of every path end, or undefined when some path may return. `optimistic`
+     * ends every path at a call or another root: a root that may return even then never
+     * qualifies. */
+    const walk = (entry: bigint, optimistic: boolean): readonly string[] | undefined => {
+      const parents = new Set<string>();
+      const visited = new Set<bigint>();
+      const pending = [entry];
+      while (pending.length) {
+        context.checkpoint(1);
+        const address = pending.pop()!;
+        if (visited.has(address)) continue;
+        visited.add(address);
+        if (address !== entry && seedAt(address)) {
+          if (optimistic) continue;
+          const proof =
+            input.noreturn_calls?.get(address) ??
+            index.noreturn.get(address) ??
+            neverReturns.get(address);
+          if (!proof) return undefined;
+          for (const id of proof) parents.add(id);
+          continue;
+        }
+        const instruction = decoded.get(address);
+        if (!instruction || instruction.validity !== 'valid') return undefined;
+        const flow = instruction.flow;
+        if (
+          flow.kind === 'return' ||
+          flow.kind === 'unknown' ||
+          flow.kind === 'indirect_branch' ||
+          (flow.kind === 'trap' && !terminal(instruction))
+        )
+          return undefined;
+        if (flow.kind === 'trap')
+          for (const id of instructionEvidence.get(instruction.id) ?? instruction.evidence_ids)
+            parents.add(id);
+        if (flow.kind === 'call') {
+          if (optimistic) continue;
+          const proof = noreturnOf(instruction);
+          if (proof) {
+            for (const id of proof) parents.add(id);
+            continue;
+          }
+        }
+        for (const successor of instructionSuccessors(instruction)) pending.push(successor.value);
+      }
+      return [...parents];
+    };
+    let open = roots.filter(
+      (item) =>
+        !index.noreturn.has(item.entry.value) &&
+        !input.noreturn_calls?.has(item.entry.value) &&
+        walk(item.entry.value, true) !== undefined,
+    );
+    for (let changed = true; changed && open.length;) {
+      changed = false;
+      const still: typeof open = [];
+      for (const item of open) {
+        const parents = walk(item.entry.value, false);
+        if (parents === undefined) {
+          still.push(item);
+          continue;
+        }
+        neverReturns.set(item.entry.value, [
+          derive(
+            'every path from the entry ends in a trap or a call that does not return',
+            item.entry,
+            [...item.evidence, ...parents],
+          ),
+        ]);
+        changed = true;
+      }
+      open = still;
+    }
+  }
   drain();
   let enumerated = false;
   if (!selected && !exhausted) {
@@ -967,6 +1068,9 @@ export function discoverFunctions(
     }
   }
   const functionEntries = { has: (value: bigint): boolean => seedAt(value) !== undefined };
+  // Image-wide and continuation modes: roots that provably never return, before extraction, so
+  // that calls to them end their blocks like calls to noreturn imports.
+  if (!selected) provenNoreturn();
   const graphs: FunctionGraph[] = [];
   let blockCount = 0;
   const allSeeds = selected
@@ -1285,6 +1389,11 @@ export function discoverFunctions(
         display_name: name,
         evidence_ids: [...item.evidence].sort(),
         signature: null,
+        ...(neverReturns.has(item.entry.value) || index.noreturn.has(item.entry.value)
+          ? {
+              noreturn: neverReturns.get(item.entry.value) ?? index.noreturn.get(item.entry.value)!,
+            }
+          : {}),
         boundary: conflict
           ? 'conflicting'
           : item.established && members.length > 0
@@ -1789,7 +1898,8 @@ export function prepareDiscoveryIndex(
         (assertion.ranges ?? []).flatMap(ranges),
       );
   }
-  for (const fn of input.functions ?? [])
+  const noreturn = new Map<bigint, readonly string[]>();
+  for (const fn of input.functions ?? []) {
     seed(
       fn.entry,
       'published function root',
@@ -1797,6 +1907,8 @@ export function prepareDiscoveryIndex(
       fn.boundary === 'established',
       fn.original_name,
     );
+    if (fn.noreturn) noreturn.set(normalize(fn.entry).value, fn.noreturn);
+  }
   const ordered_seeds = [...seeds.values()].sort((a, b) => {
     context.checkpoint(1);
     return a.entry.value < b.entry.value ? -1 : a.entry.value > b.entry.value ? 1 : 0;
@@ -1813,6 +1925,7 @@ export function prepareDiscoveryIndex(
     boundary_claims: boundaryClaims,
     executable: executableRanges,
     objects: objectAddresses,
+    noreturn,
     data_after: dataAfter,
     executable_end: executableEnd,
   };

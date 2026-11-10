@@ -786,6 +786,69 @@ test('a call through a noreturn import slot, directly or through a thunk, ends f
   assert.equal(viaRegister.function.boundary, 'conflicting');
 });
 
+test('a root whose every path ends in a trap or a noreturn call never returns, and calls to it end flow', () => {
+  // f (+0): call die (+6); g (+5): ret; die (+6): BODY
+  const run = (body: readonly number[]) => {
+    const image = raw([0xe8, 0x01, 0, 0, 0, 0xc3, ...body]);
+    const result = discover(image, { assertions: [assertion(image, 5), assertion(image, 6)] });
+    const at = (offset: number) =>
+      result.graphs.find((graph) => graph.function.entry.value === 0x1000n + BigInt(offset))!;
+    return { result, f: at(0), g: at(5), die: at(6) };
+  };
+  // ud2: die never returns, so f's call ends its block and f never returns either.
+  const proven = run([0x0f, 0x0b]);
+  assert.ok(proven.die.function.noreturn);
+  assert.ok(proven.f.function.noreturn);
+  assert.equal(proven.g.function.noreturn, undefined);
+  assert.equal(proven.f.function.boundary, 'established');
+  assert.deepEqual(
+    proven.f.blocks.flatMap((block) => block.edges.map((edge) => edge.kind)),
+    ['trap'],
+  );
+  // f's proof cites die's.
+  const proofs = new Map(proven.result.evidence.map((item) => [item.id, item]));
+  assert.ok(
+    proven.f.function.noreturn!.some((id) =>
+      proofs.get(id)?.derived_from.some((parent) => proven.die.function.noreturn!.includes(parent)),
+    ),
+  );
+  // int3 (a debugger may continue), a path to ret, an unresolved indirect branch: no proof.
+  for (const body of [[0xcc], [0x74, 0x01, 0xc3, 0x0f, 0x0b], [0xff, 0xe0]]) {
+    const unproven = run(body);
+    assert.equal(unproven.die.function.noreturn, undefined, JSON.stringify(body));
+    assert.equal(unproven.f.function.noreturn, undefined);
+    assert.equal(unproven.f.function.boundary, 'conflicting');
+  }
+  // Two roots that only jump to each other: a least fixpoint proves neither.
+  const loop = raw([0xeb, 0x00, 0xeb, 0xfc]);
+  const cycle = discover(loop, { assertions: [assertion(loop, 2)] });
+  assert.ok(cycle.graphs.every((graph) => graph.function.noreturn === undefined));
+  // A published proof ends the call in a selected-entry graph.
+  const image = raw([0xe8, 0x01, 0, 0, 0, 0xc3, 0xc3]);
+  const record = (offset: number, noreturn?: readonly string[]) => ({
+    id: `entity_${offset}`,
+    original_name: null,
+    display_name: null,
+    evidence_ids: [],
+    entry: address(image, offset),
+    ranges: [{ start: address(image, offset), size: 1n }],
+    boundary: 'established' as const,
+    signature: null,
+    analysis: 'complete' as const,
+    ...(noreturn ? { noreturn } : {}),
+  });
+  for (const noreturn of [undefined, ['evidence_published_proof']]) {
+    const selected = discover(image, {
+      selected_entry: address(image, 0),
+      functions: [record(5), record(6, noreturn)],
+    }).graphs[0]!;
+    assert.deepEqual(
+      selected.blocks.flatMap((block) => block.edges.map((edge) => edge.kind)),
+      [noreturn ? 'trap' : 'fallthrough'],
+    );
+  }
+});
+
 test("selected discovery publishes every proof its diagnostics cite, including another root's seed proofs", () => {
   // A (entry, +0): jz +4 -> B (+4, asserted root). Conditional flow into a foreign
   // root is a boundary conflict whose diagnostic cites B's seed proof, not A's.
