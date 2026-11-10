@@ -895,7 +895,7 @@ test('schema-2 migration preserves artifacts, jobs, revisions and removal actors
   const { bytes: _bytes, address_map: _map, ...legacyMetadata } = p.image;
   db.prepare('UPDATE loaded_images SET payload=?').run(encodeStored(legacyMetadata));
   db.exec(
-    'DROP TABLE analysis_artifacts; DROP TABLE loaded_image_records; DROP TABLE analysis_reuse; DROP TABLE native_summaries; DROP TABLE discovery_frontiers; DROP TABLE data_entities; DROP INDEX records_scope_revision; DROP INDEX loaded_images_revision; PRAGMA user_version=2;',
+    'DROP TABLE analysis_index; DROP TABLE loaded_image_records; DROP TABLE analysis_reuse; DROP TABLE native_summaries; DROP TABLE discovery_frontiers; DROP TABLE data_entities; DROP INDEX records_scope_revision; DROP INDEX loaded_images_revision; PRAGMA user_version=2;',
   );
   db.close();
   p.state.store = SqliteProjectStore.open(p.state.path, 'resume');
@@ -937,7 +937,7 @@ test('a real SQLite index insertion failure rolls back artifact and terminal-job
   await p.state.store.close();
   const db = new DatabaseSync(join(p.state.path, 'project.sqlite'));
   db.exec(
-    "CREATE TRIGGER reject_catalog BEFORE INSERT ON analysis_artifacts BEGIN SELECT RAISE(ABORT, 'interrupted publication'); END;",
+    "CREATE TRIGGER reject_catalog BEFORE INSERT ON analysis_index BEGIN SELECT RAISE(ABORT, 'interrupted publication'); END;",
   );
   db.close();
   p.state.store = SqliteProjectStore.open(p.state.path, 'resume');

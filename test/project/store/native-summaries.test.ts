@@ -270,23 +270,23 @@ test('rows of superseded revisions are dropped when a newer revision writes', as
   assert.equal(state.store.readNativeSummary(late.scope, late.function_id), null);
 });
 
-test('a schema-5 project migrates to 8 with an empty summary table and keeps working', async (t) => {
+test('a schema-5 project migrates to the current schema with an empty summary table and keeps working', async (t) => {
   const state = open(t);
   await state.store.close();
   const db = new DatabaseSync(join(state.path, 'project.sqlite'));
   db.exec(
-    'DROP TABLE native_summaries; DROP TABLE discovery_frontiers; DROP TABLE data_entities; PRAGMA user_version=5;',
+    'DROP TABLE native_summaries; DROP TABLE discovery_frontiers; DROP TABLE data_entities; DROP TABLE analysis_index; CREATE TABLE analysis_artifacts(revision INTEGER NOT NULL, analysis_id TEXT NOT NULL, artifact_id TEXT NOT NULL REFERENCES artifacts(id), PRIMARY KEY(revision,analysis_id,artifact_id)) STRICT; PRAGMA user_version=5;',
   );
   db.close();
   state.store = SqliteProjectStore.open(state.path, 'resume');
-  assert.equal(state.store.snapshot().schema_version, 8);
+  assert.equal(state.store.snapshot().schema_version, 9);
   const item = row(0, 'after-migration');
   assert.ok(state.store.queueNativeSummary(item));
   state.store.flushNativeSummaries();
   assert.deepEqual(state.store.readNativeSummary(item.scope, item.function_id), item);
   await state.store.close();
   assert.deepEqual(query(join(state.path, 'project.sqlite'), 'PRAGMA user_version'), [
-    { user_version: 8 },
+    { user_version: 9 },
   ]);
 });
 

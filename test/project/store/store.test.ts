@@ -453,14 +453,16 @@ test('newer schema rejection leaves database bytes untouched and an active store
   assert.equal(contentHash(readFileSync(join(state.path, 'project.sqlite'))), before);
 });
 
-test('a schema-7 store migrates to 8; data entities resolve by id and VA window at their revision and never move', async (t) => {
+test('a schema-7 store migrates to the current schema; data entities resolve by id and VA window at their revision and never move', async (t) => {
   const { state, imageId, sliceId } = await project(t);
   await state.store.close();
   const db = new DatabaseSync(join(state.path, 'project.sqlite'));
-  db.exec('DROP TABLE data_entities; PRAGMA user_version=7;');
+  db.exec(
+    'DROP TABLE data_entities; DROP TABLE analysis_index; CREATE TABLE analysis_artifacts(revision INTEGER NOT NULL, analysis_id TEXT NOT NULL, artifact_id TEXT NOT NULL REFERENCES artifacts(id), PRIMARY KEY(revision,analysis_id,artifact_id)) STRICT; PRAGMA user_version=7;',
+  );
   db.close();
   state.store = SqliteProjectStore.open(state.path, 'resume');
-  assert.equal(state.store.snapshot().schema_version, 8);
+  assert.equal(state.store.snapshot().schema_version, 9);
   const at = (value: bigint) => ({ image_id: imageId, space: 'va' as const, value });
   const entity = (value: bigint) => ({
     id: globalDataIdentity(sliceId, at(value)),
@@ -552,4 +554,108 @@ test('job recovery pagination survives reopen and rejects cursors after project 
   assert.throws(() => state.store.listJobs({ limit: 2, cursor: first.next_cursor! }), {
     code: 'stale_cursor',
   });
+});
+
+test('a schema-8 store migrates its text catalog index to fixed-width keys; lookups and pages are unchanged', async (t) => {
+  const { state, sha256, sliceId, fn } = await project(t);
+  const cache: CacheIdentity = {
+    image_sha256: sha256,
+    slice_id: sliceId,
+    function_id: fn.id,
+    target: {
+      format: 'pe',
+      architecture: 'x86_64',
+      abi: 'windows-x64',
+      endian: 'little',
+      address_bits: 64,
+      features: [],
+    },
+    versions: {
+      backend: 'test',
+      loader: null,
+      decoder: null,
+      lifter: null,
+      analysis: null,
+      abi: null,
+      emitter: null,
+    },
+    evidence_revision: 1,
+    annotation_revision: 1,
+    options: DEFAULT_ANALYSIS_OPTIONS,
+    budget: DEFAULT_BUDGET,
+  };
+  const field = entityIdentity(sliceId, 'field', 'migrated'),
+    proof = newIdentity('evidence');
+  const published: string[] = [];
+  for (const work of [1000, 2000, 3000]) {
+    const job: Job = {
+      id: newIdentity('job'),
+      project_id: state.store.project_id,
+      input_revision: 1,
+      operation: 'function_decompile',
+      state: 'running',
+      progress: { phase: 'analysis', completed: 0, total: 1 },
+      artifacts: [],
+      diagnostics: [],
+      published_revision: null,
+    };
+    state.store.saveJob(job);
+    const result = await state.store.publishArtifact({
+      job_id: job.id,
+      expected_revision: 1,
+      media_type: 'text/plain',
+      bytes: Buffer.from(`artifact ${work}`),
+      cache: { ...cache, budget: { ...DEFAULT_BUDGET, work } },
+      analysis_ids: work === 3000 ? [fn.id] : [fn.id, field, proof],
+    });
+    assert.equal(result.state, 'published');
+    if (result.state === 'published') published.push(result.artifact.id);
+  }
+  const lookup = (ids: string[], limit: number) => {
+    const pages: string[][] = [];
+    let cursor: string | undefined;
+    do {
+      const page = state.store.findAnalysisArtifacts({
+        revision: 1,
+        ids,
+        limit,
+        ...(cursor ? { cursor } : {}),
+      });
+      pages.push(page.items.map((item) => item.id));
+      cursor = page.next_cursor ?? undefined;
+    } while (cursor);
+    return pages;
+  };
+  const sorted = [...published].sort();
+  assert.deepEqual(lookup([fn.id], 2), [sorted.slice(0, 2), sorted.slice(2)]);
+  const before = [lookup([fn.id], 2), lookup([field], 10), lookup([proof, field], 1)];
+  assert.deepEqual(before[1], [published.slice(0, 2).sort()]);
+  // Rewrite the index in its schema-8 text form.
+  await state.store.close();
+  const db = new DatabaseSync(join(state.path, 'project.sqlite'));
+  db.exec(`CREATE TABLE analysis_artifacts(revision INTEGER NOT NULL, analysis_id TEXT NOT NULL, artifact_id TEXT NOT NULL REFERENCES artifacts(id), PRIMARY KEY(revision,analysis_id,artifact_id)) STRICT;
+    INSERT INTO analysis_artifacts SELECT revision,
+      CASE substr(analysis_key,1,1) WHEN x'01' THEN 'entity_' ELSE 'evidence_' END || lower(hex(substr(analysis_key,2))),
+      'artifact_' || lower(hex(artifact_key)) FROM analysis_index;
+    DROP TABLE analysis_index; PRAGMA user_version=8;`);
+  assert.equal(db.prepare('SELECT count(*) AS n FROM analysis_artifacts').get()?.['n'], 7);
+  db.close();
+  state.store = SqliteProjectStore.open(state.path, 'resume');
+  assert.equal(state.store.snapshot().schema_version, 9);
+  assert.deepEqual([lookup([fn.id], 2), lookup([field], 10), lookup([proof, field], 1)], before);
+  await state.store.close();
+  const probe = new DatabaseSync(join(state.path, 'project.sqlite'), { readOnly: true });
+  assert.equal(probe.prepare('SELECT count(*) AS n FROM analysis_index').get()?.['n'], 7);
+  assert.equal(
+    probe
+      .prepare("SELECT count(*) AS n FROM sqlite_master WHERE name='analysis_artifacts'")
+      .get()?.['n'],
+    0,
+  );
+  probe.close();
+  state.store = SqliteProjectStore.open(state.path, 'resume');
+  assert.throws(
+    () => state.store.findAnalysisArtifacts({ revision: 1, ids: ['entity_x'], limit: 1 }),
+    { code: 'invalid_input' },
+  );
 });

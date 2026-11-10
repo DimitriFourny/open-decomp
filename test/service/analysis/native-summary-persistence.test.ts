@@ -308,7 +308,7 @@ test('disabled analysis caching writes no derived rows and delivers like a cache
   for (const id of ids) await p.decompile(id, {}, undefined, { analysis_cache: false, phases });
   assert.ok(!phases.includes('native_summary_cache'), 'a summary was reused');
   assert.ok(!phases.includes('dependency-reuse'), 'a stored result was reused');
-  for (const table of ['artifacts', 'analysis_artifacts', 'analysis_reuse', 'native_summaries'])
+  for (const table of ['artifacts', 'analysis_index', 'analysis_reuse', 'native_summaries'])
     assert.deepEqual(
       await sql(p, `SELECT count(*) AS n FROM ${table}`),
       [{ n: 0 }],
