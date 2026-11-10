@@ -48,6 +48,7 @@ import { validateReconstruction, validateRenderedTransfers } from '../reconstruc
 import { foldSourceCondition } from '../reconstruction/source-conditions.js';
 import { constantRotationOperands } from '../reconstruction/source-shifts.js';
 import {
+  omittedChecks,
   registerOutputs,
   stackEntry,
   variadicArea,
@@ -1588,8 +1589,41 @@ export class Renderer {
       nativeFp: this.fpPresentation.expressions.has(expression),
       floatLiterals: this.fpPresentation.expressions.has(expression),
       ...(this.sourceView ? { definition: this.definition } : {}),
+      ...(this.trappingDivisions.has(expression) ? { trapping: true } : {}),
     });
   }
+
+  /** Source view: the omitted guards and trap blocks a printed trapping
+   * division stands for map to its statement (an empty span: the header). */
+  private mapDivisionChecks(value: string, start: number, end: number): void {
+    const checks = this.sourceView
+      ? this.program.source?.division_traps?.checks.get(value)
+      : undefined;
+    for (const id of checks ?? []) {
+      this.context.checkpoint(1);
+      const control = this.controls.get(id),
+        block = this.program.blocks.get(id);
+      if (control && !this.mappedControls.has(id)) this.map(control, start, [], end);
+      if (block && !this.mappedControls.has(block.control.id)) {
+        this.map(block, start, [], end);
+        this.map(block.control, start, [], end);
+      }
+    }
+  }
+
+  /** Source view: the definitions of divisions whose omitted x86 divide-error
+   * guards are the dialect operator's own trap conditions. */
+  private get trappingDivisions(): ReadonlySet<Expression> {
+    if (this.trappingCache) return this.trappingCache;
+    const values = this.sourceView ? this.program.source?.division_traps?.values : undefined;
+    const expressions = new Set<Expression>();
+    for (const id of values ?? []) {
+      const expression = this.program.expressions.get(id);
+      if (expression) expressions.add(expression);
+    }
+    return (this.trappingCache = expressions);
+  }
+  private trappingCache: ReadonlySet<Expression> | undefined;
 
   /** The pure IR definition of the value `printed` prints for `value`. */
   private definition = (value: Value): Expression | undefined => {
@@ -5766,6 +5800,7 @@ export class Renderer {
     }
     this.writer.statement(depth, text);
     this.inferenceSites.set(node.id, { start, end: this.writer.offset });
+    if (node.kind === 'assign') this.mapDivisionChecks(node.result.id, start, this.writer.offset);
     if (this.program.source && node.kind === 'call') {
       const projection = this.program.calls.get(node.id)!;
       const returned = new Set(projection.results.map((value) => value.id));
@@ -6742,19 +6777,19 @@ export class Renderer {
     }
   }
 
-  /** Source view: the body without the omitted stack-protector checks. */
+  /** Source view: the body without the omitted stack-protector and division-trap checks. */
   private omitProtector(body: Region): Region {
-    const protector = this.sourceView ? this.program.source?.stack_protector : undefined;
-    return protector
-      ? omitStackProtector(body, protector.guards, protector.omitted, this.context)
+    const checks = this.sourceView ? omittedChecks(this.program.source) : undefined;
+    return checks?.guards.size
+      ? omitStackProtector(body, checks.guards, checks.omitted, this.context)
       : body;
   }
 
-  /** Blocks that print nothing: FP-guard and stack-protector failure paths. */
+  /** Blocks that print nothing: FP-guard, stack-protector and division-trap failure paths. */
   private get omittedBlocks(): ReadonlySet<string> {
-    const protector = this.sourceView ? this.program.source?.stack_protector : undefined;
-    return protector?.omitted.size
-      ? new Set([...this.fpPresentation.omitted, ...protector.omitted])
+    const checks = this.sourceView ? omittedChecks(this.program.source) : undefined;
+    return checks?.omitted.size
+      ? new Set([...this.fpPresentation.omitted, ...checks.omitted])
       : this.fpPresentation.omitted;
   }
 
@@ -8354,7 +8389,11 @@ export class Renderer {
     const plan = planSourceInlining(
       program,
       this.context,
-      (value) => this.names.has(value.id) || rotated.has(value.id),
+      // A division whose guards were omitted traps where it is defined.
+      (value) =>
+        this.names.has(value.id) ||
+        rotated.has(value.id) ||
+        program.source?.division_traps?.values.has(value.id) === true,
       (node) => indices.get(node.id),
       (destination, expression) => {
         // Same presented storage: the same IEEE width (whole value, or its low
@@ -10114,6 +10153,9 @@ export class Renderer {
         for (const node of block.statements) this.map(node, start, [], end);
       }
     }
+    // Omitted division-trap checks map to their printed division, else to the header.
+    for (const id of this.program.source?.division_traps?.values ?? [])
+      this.mapDivisionChecks(id, 0, 0);
     if (this.sourceView) {
       const renamed: string[] = [];
       for (const [id, spelling] of this.linkageNames)
@@ -10875,7 +10917,12 @@ export function renderSource(
   version: string,
 ): EmissionResult {
   // Reconstruction does not depend on the attempt (rejected calls, metadata).
-  const program = reconstruct(input, context, options.view === 'checked' ? 'checked' : 'source');
+  const program = reconstruct(
+    input,
+    context,
+    options.view === 'checked' ? 'checked' : 'source',
+    language,
+  );
   const plans: AttemptPlans = {};
   let validated = false;
   const attempt = (metadata: 'full' | 'omitted'): EmissionResult => {

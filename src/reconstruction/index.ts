@@ -45,6 +45,7 @@ import { normalizeSourceRanges } from './source-ranges.js';
 import { constantRotationOperands } from './source-shifts.js';
 import { projectLikelyTypes } from './source-likely.js';
 import { STACK_PROTECTOR_PREMISE } from './source-protector.js';
+import { classifyDivisionTraps, type DivisionTrap } from './source-division-traps.js';
 import { projectSourceTypes } from './source-types.js';
 import {
   permitsVoidSourceSignature,
@@ -78,10 +79,11 @@ export function reconstruct(
   input: EmissionInput,
   context: OperationContext,
   view: PresentationView = 'checked',
+  language: 'c-like' | 'python-like' = 'c-like',
 ): Reconstruction {
   return (
-    (view === 'source' ? reconstructView(input, context, view, true) : null) ??
-    reconstructView(input, context, view, false)!
+    (view === 'source' ? reconstructView(input, context, view, true, language) : null) ??
+    reconstructView(input, context, view, false, language)!
   );
 }
 
@@ -91,6 +93,7 @@ function reconstructView(
   context: OperationContext,
   view: PresentationView,
   extended: boolean,
+  language: 'c-like' | 'python-like',
 ): Reconstruction | null {
   context.checkpoint(0);
   const blocks = new Map<string, BlockRegion>(),
@@ -338,6 +341,38 @@ function reconstructView(
     );
     for (const [store, call] of outgoing?.consumed ?? []) argumentStores.set(store, call);
   }
+  // Source view: x86 divide-error guards of a narrow division are its trap
+  // conditions in the dialect; the low halves become the narrow division, the
+  // guards and their trap blocks print nothing (`classifyDivisionTraps`).
+  const divisionTraps: DivisionTrap[] = [];
+  if (sourcePlan && view === 'source')
+    for (const trap of classifyDivisionTraps(
+      blocks,
+      allTransfers,
+      values,
+      expressions,
+      context,
+      language === 'c-like',
+    )) {
+      if (
+        !localValidation.presentation(
+          'division_trap',
+          trap.block,
+          `x86 divide-error guards of a ${trap.bits}-bit ${trap.signed ? 'signed' : 'unsigned'} division whose dividend is the ${trap.signed ? 'sign' : 'zero'} extension of a ${trap.bits}-bit value: they trap exactly when the divisor is zero${trap.signed ? ' or the dividend is the minimum and the divisor -1' : ''}, the inputs on which the dialect's ${trap.bits}-bit quotient and remainder operators trap, and otherwise the low halves of the wide quotient and remainder are the ${trap.bits}-bit truncating quotient and remainder; the guards and trap blocks print nothing and the division prints at the guard`,
+          [...trap.guards.keys(), ...trap.results.map((item) => item.value.id)],
+        )
+      )
+        continue;
+      for (const result of [...trap.results, ...trap.slices])
+        expressions.set(result.value.id, result.expression);
+      divisionTraps.push(trap);
+    }
+  const divisionGuards = new Map(divisionTraps.flatMap((trap) => [...trap.guards])),
+    divisionOmitted = new Set(divisionTraps.flatMap((trap) => [...trap.omitted])),
+    // A trapping division prints where it is defined, never inside its reader.
+    divisionValues = new Set(
+      divisionTraps.flatMap((trap) => trap.results.map((item) => item.value.id)),
+    );
   let normalizationDemand: SourceExpressionDemand | undefined;
   if (sourcePlan) {
     // These roots deliberately overapproximate the liveness roots below, before
@@ -940,7 +975,7 @@ function reconstructView(
     semanticRoots.push(...operands.slice(0, operands.length - overlay.length));
   };
   for (const block of blocks.values()) {
-    if (protectorOmitted.has(block.id)) {
+    if (protectorOmitted.has(block.id) || divisionOmitted.has(block.id)) {
       roots.set(block.control.id, []);
       continue;
     }
@@ -973,7 +1008,10 @@ function reconstructView(
       }
       retain(node, block.id);
     }
-    rootControl(block, protectorGuards.has(block.control.id));
+    rootControl(
+      block,
+      protectorGuards.has(block.control.id) || divisionGuards.has(block.control.id),
+    );
   }
   // Incoming phi sources are demanded only when their destination is live.
   const incomingUses = new Map<string, { source: Value; block: string }[]>();
@@ -1011,6 +1049,14 @@ function reconstructView(
     }
   };
   propagate();
+  // An omitted division guard traps through the printed division: one of its
+  // results prints even when nothing reads it.
+  for (const trap of divisionTraps) {
+    context.checkpoint(1);
+    if (trap.results.some((result) => live.has(result.value.id))) continue;
+    use(trap.results[0]!.value, trap.block);
+    propagate();
+  }
   // Source view: a dead non-volatile frame load dominated by a store covering
   // its bytes cannot fault, so it is dropped; a live one is retained as usual.
   // A live stack-protector load restores the whole protector: its store, its
@@ -1185,6 +1231,7 @@ function reconstructView(
         expression.kind === 'address' ||
         (expression.kind !== 'indeterminate' &&
           !rotated.has(item.id) &&
+          !divisionValues.has(item.id) &&
           row?.count === 1 &&
           row.blocks.size === 1 &&
           row.blocks.has(owner.get(item.id)!));
@@ -1442,6 +1489,23 @@ function reconstructView(
               }
             : {}),
           ...(sourceStack.variadic ? { variadic: sourceStack.variadic } : {}),
+          ...(divisionTraps.length
+            ? {
+                division_traps: {
+                  guards: divisionGuards,
+                  omitted: divisionOmitted,
+                  values: divisionValues,
+                  checks: new Map(
+                    divisionTraps.flatMap((trap) =>
+                      trap.results.map((item) => [
+                        item.value.id,
+                        [...trap.guards.keys(), ...trap.omitted],
+                      ]),
+                    ),
+                  ),
+                },
+              }
+            : {}),
         }
       : undefined;
   const program: Reconstruction = {

@@ -370,6 +370,21 @@ export type SourceVariadic =
 export function variadicArea(variadic: SourceVariadic | undefined): Value | null {
   return variadic?.kind === 'area' ? variadic.area : null;
 }
+/** Source view: every omitted check (stack protector, division trap guards):
+ * each check `if` -> the block it continues to, and the blocks that print nothing. */
+export function omittedChecks(source: SourcePresentation | undefined): {
+  readonly guards: ReadonlyMap<string, string>;
+  readonly omitted: ReadonlySet<string>;
+} {
+  const protector = source?.stack_protector,
+    division = source?.division_traps;
+  if (!division) return protector ?? { guards: new Map(), omitted: new Set() };
+  if (!protector) return division;
+  return {
+    guards: new Map([...protector.guards, ...division.guards]),
+    omitted: new Set([...protector.omitted, ...division.omitted]),
+  };
+}
 /** The register outputs of a call or unknown effect as the source view prints
  * them: `register_outputs` may replace the cells of a root with one whole. */
 export function registerOutputs(
@@ -513,6 +528,17 @@ export interface SourcePresentation {
     readonly guards: ReadonlyMap<string, string>;
     readonly omitted: ReadonlySet<string>;
     readonly offsets: readonly bigint[];
+  };
+  /** Source view only: omitted x86 divide-error guards (`classifyDivisionTraps`):
+   * each guard `if` -> the block it continues to, the trap blocks that print
+   * nothing, and the narrowed quotient/remainder values, whose dialect operators
+   * trap on exactly the guarded inputs. */
+  readonly division_traps?: {
+    readonly guards: ReadonlyMap<string, string>;
+    readonly omitted: ReadonlySet<string>;
+    readonly values: ReadonlySet<string>;
+    /** Each narrowed value -> the guard `if`s and trap blocks it stands for. */
+    readonly checks: ReadonlyMap<string, readonly string[]>;
   };
   readonly addresses: readonly SourceAddress[];
   /** Whole source-call results may be assembled from multiple SSA register cells. */
