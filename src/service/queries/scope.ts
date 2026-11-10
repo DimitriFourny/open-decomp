@@ -41,7 +41,8 @@ export function loadImage(store: ProjectStore, revision: number, id: string): Lo
     );
   return store.readLoadedImage(id, slices[0]!.selected_slice_id, revision);
 }
-/** Completed record scans per store, by revision, image and kind (most recent last). */
+/** Completed record scans per store, by image, kind and the record scope's version token
+ * (`readRecordScopeVersion`), most recent last. */
 const scans = new WeakMap<
   ProjectStore,
   Map<
@@ -50,12 +51,19 @@ const scans = new WeakMap<
   >
 >();
 const MAX_SCANS_PER_STORE = 32;
+/** Version tokens of record scopes per store, by revision, image and kind. A committed
+ * revision's records never change, so neither does its token. */
+const scopeTokens = new WeakMap<ProjectStore, Map<string, string>>();
+const MAX_TOKENS_PER_STORE = 4096;
 
 /** Every record of a kind at a revision. The records of a committed revision never change, so
  * a completed scan is kept per store and a repeat (every `xrefs_get` reads all references:
  * seconds per query on a 160 KB binary) costs one dependency read: the one `rereadScopes`
  * makes, with the same work charges as the scan, so readsets, budgets and results are
- * unchanged. */
+ * unchanged. A scan is kept under its scope's version token, which names the latest record
+ * revision, index state and image metadata revision at or below the scanned revision: a later
+ * revision with an equal token (an annotation commit writes no records) holds exactly the
+ * same records, so it is served the same scan. */
 export function records<K extends keyof StoredRecordKinds>(
   scope: ReadScope,
   revision: number,
@@ -64,7 +72,16 @@ export function records<K extends keyof StoredRecordKinds>(
 ): { items: StoredRecordKinds[K][]; state: IndexState } {
   let kept = scans.get(scope.store);
   if (!kept) scans.set(scope.store, (kept = new Map()));
-  const key = `${revision}:${image_id}:${kind}`;
+  let tokens = scopeTokens.get(scope.store);
+  if (!tokens) scopeTokens.set(scope.store, (tokens = new Map()));
+  const at = `${revision}:${image_id}:${kind}`;
+  let token = tokens.get(at);
+  if (token === undefined) {
+    token = scope.store.readRecordScopeVersion(image_id, kind, revision);
+    if (tokens.size >= MAX_TOKENS_PER_STORE) tokens.clear();
+    tokens.set(at, token);
+  }
+  const key = `${image_id}:${kind}:${token}`;
   const hit = kept.get(key);
   if (hit) {
     scope.store.queryRecords({ kind, image_id, revision, limit: 1 });
