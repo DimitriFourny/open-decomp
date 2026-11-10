@@ -170,6 +170,9 @@ const annotationActorSchema = annotationSchema.pick({ author: true, origin: true
 const MAX_IMAGE_BYTES = 512 * 1024 * 1024;
 const MAX_ARTIFACT_BYTES = 64 * 1024 * 1024;
 const MAX_LOADED_IMAGE_CACHE_BYTES = 64 * 1024 * 1024;
+/** Artifact files verified in this connection whose bytes are kept to compare later reads with
+ * (`readArtifactBytes`), bounded by their total size. */
+const MAX_VERIFIED_ARTIFACT_BYTES = 32 * 1024 * 1024;
 const MAX_LOADED_IMAGE_CACHE_ENTRIES = 4;
 const RECORD_SCHEMAS = {
   function: functionSchema,
@@ -388,6 +391,12 @@ export class SqliteProjectStore implements ProjectStore {
   // Analysis artifacts delivered with analysis caching disabled: memory only, newest kept.
   readonly #transientArtifacts = new Map<string, { artifact: Artifact; bytes: Uint8Array }>();
   #transientBytes = 0;
+  // Artifact files this connection verified against their published digest, by artifact ID,
+  // as private copies: a later read (every 512 KiB page of a delivered artifact reads the whole
+  // file) compares the file with them instead of hashing it again, exactly as a warm image
+  // read does. Least recently used first.
+  readonly #verifiedArtifacts = new Map<string, { sha256: string; bytes: ImmutableBytes }>();
+  #verifiedArtifactBytes = 0;
   // A request snapshot (`openSnapshot`): the main connection is a read-only immutable copy of
   // the owner's database, and written summaries go to this private database instead.
   readonly #outbox: DatabaseSync | undefined;
@@ -1655,6 +1664,8 @@ export class SqliteProjectStore implements ProjectStore {
       sha256: contentHash(input.bytes),
       schema_version: SCHEMA_VERSION,
     };
+    // The bytes as hashed (no await in between): later reads of the file compare with them.
+    const verified = new ImmutableBytes(input.bytes);
     encodeArtifact(artifact);
     const path = this.#storagePath('artifacts', artifact.id);
     writeImmutable(path, input.bytes);
@@ -1689,6 +1700,7 @@ export class SqliteProjectStore implements ProjectStore {
       unlinkSync(path);
       throw error;
     }
+    this.#rememberVerifiedArtifact(artifact, verified);
     this.releaseNativeSummaries();
     return { state: 'published', artifact };
   }
@@ -1744,9 +1756,36 @@ export class SqliteProjectStore implements ProjectStore {
       this.#storagePath('artifacts', artifactIdSchema.parse(artifact.id)),
       MAX_ARTIFACT_BYTES,
     );
+    const verified = this.#verifiedArtifacts.get(artifact.id);
+    if (verified?.sha256 === artifact.sha256 && verified.bytes.equals(bytes)) {
+      this.#verifiedArtifacts.delete(artifact.id);
+      this.#verifiedArtifacts.set(artifact.id, verified);
+      return bytes;
+    }
     if (BigInt(bytes.length) !== artifact.size || contentHash(bytes) !== artifact.sha256)
       fail('invalid_input', 'Artifact integrity check failed');
+    this.#rememberVerifiedArtifact(artifact, bytes);
     return bytes;
+  }
+
+  /** Keep a private copy of artifact bytes just checked against `artifact.sha256`. */
+  #rememberVerifiedArtifact(artifact: Artifact, bytes: Uint8Array | ImmutableBytes): void {
+    const prior = this.#verifiedArtifacts.get(artifact.id);
+    if (prior) {
+      this.#verifiedArtifacts.delete(artifact.id);
+      this.#verifiedArtifactBytes -= prior.bytes.length;
+    }
+    if (bytes.length > MAX_VERIFIED_ARTIFACT_BYTES / 2) return;
+    for (const [id, old] of this.#verifiedArtifacts) {
+      if (this.#verifiedArtifactBytes + bytes.length <= MAX_VERIFIED_ARTIFACT_BYTES) break;
+      this.#verifiedArtifacts.delete(id);
+      this.#verifiedArtifactBytes -= old.bytes.length;
+    }
+    this.#verifiedArtifacts.set(artifact.id, {
+      sha256: artifact.sha256,
+      bytes: bytes instanceof ImmutableBytes ? bytes : new ImmutableBytes(bytes),
+    });
+    this.#verifiedArtifactBytes += bytes.length;
   }
 
   async readArtifact(
@@ -2262,6 +2301,8 @@ export class SqliteProjectStore implements ProjectStore {
     this.#loadedImageBytes = 0;
     this.#transientArtifacts.clear();
     this.#transientBytes = 0;
+    this.#verifiedArtifacts.clear();
+    this.#verifiedArtifactBytes = 0;
   }
 }
 

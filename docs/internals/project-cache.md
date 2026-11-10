@@ -19,7 +19,7 @@ The container around the analysis pipeline. A binary becomes a content-addressed
 
 Entity IDs are content-derived and never renamed; project, job and artifact IDs are random.
 
-A loaded image's file is re-read on every use and compared with the bytes it was verified from; it is hashed again only when they differ. A complete scan of the records of one kind at one revision (`records` in `src/service/queries/scope.ts`; `xrefs_get` scans every reference) is kept per store, the 32 most recent: a repeat makes the scan's one-row dependency read and its work charges, without decoding the records again.
+A loaded image's file is re-read on every use and compared with the bytes it was verified from; it is hashed again only when they differ. Artifact files are treated alike: a connection keeps private copies of the artifact bytes it verified or published (32 MiB, least recently used first), and a read (each 512 KiB page of a delivered artifact reads the whole file) re-reads the file and compares; only a file that differs is hashed. A complete scan of the records of one kind at one revision (`records` in `src/service/queries/scope.ts`; `xrefs_get` scans every reference) is kept per store, the 32 most recent: a repeat makes the scan's one-row dependency read and its work charges, without decoding the records again.
 
 ## Algorithm
 
