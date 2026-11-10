@@ -3,6 +3,7 @@ import test, { type TestContext } from 'node:test';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { zstdCompressSync, zstdDecompressSync } from 'node:zlib';
 import { spawnSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import {
@@ -323,26 +324,37 @@ test('artifact publication binds job/project/revision and cancellation cannot pu
     }),
     { state: 'stale', current_revision: 2 },
   );
-  // Every read checks the file: a verified file is compared with the bytes it was verified
+  // Every read checks the file: a verified file is compared with the file it was verified
   // from, so a damaged file is refused even right after a verified read.
-  const file = join(state.path, 'artifacts', result.artifact.id);
-  assert.equal(
-    Buffer.from(state.store.readArtifactBytes(result.artifact)).toString(),
-    'return 42;',
-  );
-  writeFileSync(file, 'return 43;');
-  assert.throws(() => state.store.readArtifactBytes(result.artifact), { code: 'invalid_input' });
+  const file = join(state.path, 'artifacts', `${result.artifact.id}.zst`);
+  const stored = readFileSync(file);
+  assert.equal(zstdDecompressSync(stored).toString(), 'return 42;');
+  const read = () => Buffer.from(state.store.readArtifactBytes(result.artifact)).toString();
+  assert.equal(read(), 'return 42;');
+  writeFileSync(file, zstdCompressSync('return 43;'));
+  assert.throws(read, { code: 'invalid_input' });
   await assert.rejects(state.store.readArtifact(args), { code: 'invalid_input' });
+  // A file that is no zstd frame is refused as damaged.
   writeFileSync(file, 'return 42;');
+  assert.throws(read, { code: 'invalid_input' });
+  writeFileSync(file, stored);
   assert.equal((await state.store.readArtifact(args)).next_offset, '0x7');
+  // An artifact stored as it is (before artifacts were compressed) is read as it is.
+  rmSync(file);
+  writeFileSync(join(state.path, 'artifacts', result.artifact.id), 'return 42;');
+  assert.equal(read(), 'return 42;');
+  writeFileSync(join(state.path, 'artifacts', result.artifact.id), 'return 43;');
+  assert.throws(read, { code: 'invalid_input' });
+  rmSync(join(state.path, 'artifacts', result.artifact.id));
+  writeFileSync(file, stored);
   await state.store.close();
   state.store = SqliteProjectStore.open(state.path, 'resume');
   assert.equal(
     Buffer.from((await state.store.readArtifact(args)).bytes_hex, 'hex').toString(),
     'return ',
   );
-  writeFileSync(file, 'return 41;');
-  assert.throws(() => state.store.readArtifactBytes(result.artifact), { code: 'invalid_input' });
+  writeFileSync(file, zstdCompressSync('return 41;'));
+  assert.throws(read, { code: 'invalid_input' });
 });
 
 test('cache-hit jobs reuse published artifacts without losing scope or terminal-state checks', async (t) => {

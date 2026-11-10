@@ -3,6 +3,7 @@ import test, { type TestContext } from 'node:test';
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { zstdCompressSync, zstdDecompressSync } from 'node:zlib';
 import { DatabaseSync } from 'node:sqlite';
 import {
   DEFAULT_ANALYSIS_OPTIONS,
@@ -247,7 +248,7 @@ test('reopened analysis catalogs preserve opaque subjects and unsigned type size
   assert.equal(hit.result.state, 'partial');
   if (hit.result.state === 'partial') assert.equal(hit.result.reason, 'unsupported_subset');
   assert.deepEqual(p.state.store.readJob(hit.job.id)?.artifacts, [handle]);
-  assert.deepEqual(readdirSync(join(p.state.path, 'artifacts')), [handle.id]);
+  assert.deepEqual(readdirSync(join(p.state.path, 'artifacts')), [`${handle.id}.zst`]);
   assert.throws(() => p.state.store.readArtifactBytes({ ...handle, sha256: '0'.repeat(64) }), {
     code: 'invalid_input',
   });
@@ -706,8 +707,8 @@ test('stored hash corruption cannot complete cache-hit jobs or reconstruct trust
     first = await p.run();
   const artifact = p.state.store.readJob(first.job.id)!.artifacts[0]!;
   writeFileSync(
-    join(p.state.path, 'artifacts', artifact.id),
-    Buffer.alloc(Number(artifact.size), 0x20),
+    join(p.state.path, 'artifacts', `${artifact.id}.zst`),
+    zstdCompressSync(Buffer.alloc(Number(artifact.size), 0x20)),
   );
   const hit = p.job();
   await assert.rejects(
@@ -755,13 +756,20 @@ test('a payload parsed by an earlier hit is not served once its stored bytes are
   assert.ok('data' in served && served.data.cache === 'hit');
   const again = await hit();
   assert.ok('data' in again && again.data.cache === 'hit');
-  const original = readFileSync(join(p.state.path, 'artifacts', artifact.id));
+  const file = join(p.state.path, 'artifacts', `${artifact.id}.zst`);
+  const original = readFileSync(file);
+  const content = zstdDecompressSync(original);
+  // Damaged stored bytes, and well-formed stored bytes of other content, are both refused.
   const damaged = Buffer.from(original);
   damaged[damaged.length >> 1] = damaged[damaged.length >> 1]! ^ 0x01;
-  writeFileSync(join(p.state.path, 'artifacts', artifact.id), damaged);
+  writeFileSync(file, damaged);
+  await assert.rejects(hit(), { code: 'invalid_input' });
+  const altered = Buffer.from(content);
+  altered[altered.length >> 1] = altered[altered.length >> 1]! ^ 0x01;
+  writeFileSync(file, zstdCompressSync(altered));
   await assert.rejects(hit(), { code: 'invalid_input' });
   // Restoring the exact bytes serves again: damage was rejected, not remembered as a miss.
-  writeFileSync(join(p.state.path, 'artifacts', artifact.id), original);
+  writeFileSync(file, original);
   const restored = await hit();
   assert.ok('data' in restored && restored.data.cache === 'hit');
 });
@@ -1051,7 +1059,11 @@ test('artifacts store the readset and result proofs compactly, and format-2 arti
   };
   const computed = await p.run(p.identity, 65536, () => withProof(p.identity));
   const handle = computed.result.artifacts[0]!;
-  const stored = JSON.parse(readFileSync(join(p.state.path, 'artifacts', handle.id), 'utf8')) as {
+  const stored = JSON.parse(
+    zstdDecompressSync(readFileSync(join(p.state.path, 'artifacts', `${handle.id}.zst`))).toString(
+      'utf8',
+    ),
+  ) as {
     format_version: number;
     catalog: { evidence: unknown[]; subjects: unknown[] };
   };
