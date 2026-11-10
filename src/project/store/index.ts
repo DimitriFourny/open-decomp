@@ -2166,7 +2166,7 @@ export class SqliteProjectStore implements ProjectStore {
 
   saveJob(job: Job): void {
     this.#current();
-    encodeJob(job);
+    const wire = encodeJob(job);
     if (job.project_id !== this.project_id || job.input_revision > this.#current())
       fail('invalid_input', 'Job belongs to another project or future revision');
     const prior = this.readJob(job.id);
@@ -2191,7 +2191,20 @@ export class SqliteProjectStore implements ProjectStore {
       )
         fail('invalid_input', 'Job artifact has not been published');
     }
-    this.#prepare('INSERT OR REPLACE INTO jobs VALUES (?,?)').run(job.id, encodeStored(job));
+    // A save that changes only the progress of a job is status, not state: it commits without
+    // a sync (the WAL frame becomes durable with the next full commit, checkpoint or close).
+    // Losing it leaves the job's last durable state, which open terminalizes all the same.
+    const progressOnly =
+      prior !== null &&
+      !this.#db.isTransaction &&
+      this.#synchronous > 1 &&
+      JSON.stringify(encodeJob({ ...prior, progress: job.progress })) === JSON.stringify(wire);
+    if (progressOnly) this.#db.exec('PRAGMA synchronous=NORMAL');
+    try {
+      this.#prepare('INSERT OR REPLACE INTO jobs VALUES (?,?)').run(job.id, encodeStored(job));
+    } finally {
+      if (progressOnly) this.#db.exec(`PRAGMA synchronous=${this.#synchronous}`);
+    }
   }
 
   readJob(jobId: string): Job | null {

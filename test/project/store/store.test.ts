@@ -659,3 +659,32 @@ test('a schema-8 store migrates its text catalog index to fixed-width keys; look
     { code: 'invalid_input' },
   );
 });
+
+test('a progress-only job save is stored like any other save and cannot carry a state change', async (t) => {
+  const { state } = await project(t);
+  const job: Job = {
+    id: newIdentity('job'),
+    project_id: state.store.project_id,
+    input_revision: 1,
+    operation: 'function_decompile',
+    state: 'queued',
+    progress: { phase: 'queued', completed: 0, total: null },
+    artifacts: [],
+    diagnostics: [],
+    published_revision: null,
+  };
+  state.store.saveJob(job);
+  const running = { ...job, state: 'running' as const };
+  state.store.saveJob(running);
+  const progressed = { ...running, progress: { phase: 'analysis', completed: 3, total: 7 } };
+  state.store.saveJob(progressed);
+  assert.deepEqual(state.store.readJob(job.id), progressed);
+  assert.throws(() => state.store.saveJob({ ...progressed, state: 'queued' }), {
+    code: 'invalid_input',
+  });
+  const failed = { ...progressed, state: 'failed' as const };
+  state.store.saveJob(failed);
+  await state.store.close();
+  state.store = SqliteProjectStore.open(state.path, 'resume');
+  assert.deepEqual(state.store.readJob(job.id), failed);
+});
