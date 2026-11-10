@@ -2,7 +2,7 @@ import { OperationError, type OperationContext } from '../core/index.js';
 import { expressionOperands, type Origin, type Value } from '../ir/index.js';
 import type { BlockRegion, ParallelTransfer } from '../presentation/index.js';
 import type { Reconstruction } from './model.js';
-import { registerOutputs } from './source-model.js';
+import { omittedChecks, registerOutputs } from './source-model.js';
 
 /** The values a block's incoming edges bind. A block's own first source
  * definition `x = p` of one of its parameters x (a rotated loop header,
@@ -32,11 +32,11 @@ export function validateEmittedUses(
   const define = (value: Value, block: string, order: number): void => {
     if (!program.inline.has(value.id)) definitions.set(value.id, { block, order });
   };
-  // Omitted stack-protector checks read no condition; their failure blocks
-  // print nothing.
-  const protector = program.source?.stack_protector;
+  // Omitted stack-protector and division-trap checks read no condition; their
+  // failure blocks print nothing.
+  const protector = omittedChecks(program.source);
   for (const id of reachable) {
-    if (protector?.omitted.has(id)) continue;
+    if (protector.omitted.has(id)) continue;
     const block = program.blocks.get(id)!;
     // Edges bind first; the block's own definitions follow, then its statements.
     for (const parameter of boundParameters(program, block)) define(parameter, id, -2);
@@ -121,7 +121,7 @@ export function validateEmittedUses(
     }
   };
   for (const id of reachable) {
-    if (protector?.omitted.has(id)) continue;
+    if (protector.omitted.has(id)) continue;
     const block = program.blocks.get(id)!;
     for (const definition of program.source?.definitions?.get(id) ?? [])
       for (const operand of expressionOperands(definition.expression))
@@ -161,7 +161,7 @@ export function validateEmittedUses(
     if (control.kind === 'if') {
       if (
         (variadic?.kind !== 'va_list' || variadic.guard !== control.id) &&
-        !protector?.guards.has(control.id)
+        !protector.guards.has(control.id)
       )
         use(control.condition, id, order, control);
     } else if (control.kind === 'switch') use(control.value, id, order, control);

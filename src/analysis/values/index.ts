@@ -796,7 +796,9 @@ function rewrite(input: SSAForm, analysis: ValueAnalysis, budget: AnalysisBudget
       kept.push(node);
       if (
         node.kind === 'assign' &&
-        node.expression.kind === 'compare' &&
+        (node.expression.kind === 'compare' ||
+          (node.expression.kind === 'integer' &&
+            (node.expression.op === 'sub' || node.expression.op === 'xor'))) &&
         node.expression.left.id === node.expression.right.id
       )
         reflexive.push(node);

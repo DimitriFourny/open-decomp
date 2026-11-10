@@ -80,7 +80,7 @@ function libraryProgram(calls: readonly { name: string; chain?: boolean; second?
     previous = block.readRegister(register('rax', 64, 0, 'replace_root', 'x86_64:rax'));
   });
   // The last result is used twice, so it is a named local rather than an inline call.
-  block.return([block.int('add', previous, previous)]);
+  block.return([block.int('mul', previous, previous)]);
   const ir = constructSSA(b.finish(block, [i64])).value as SSAForm;
   const types = recoverTypes(ir, windowsX64Abi, createOperationContext(), {
     image_id: base.id,
