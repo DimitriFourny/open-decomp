@@ -1,11 +1,12 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import * as os from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   OperationError,
   decodeArtifact,
+  diskFull,
   decodeDiagnostic,
   decodeJob,
   encodeArtifact,
@@ -122,6 +123,46 @@ export async function publishPooled(
   }
 }
 
+/** Request directories (one per generation: the database snapshot and the workers'
+ * outboxes) live in `<project>/requests`, on the store's file system: the snapshot clone can
+ * be copy-on-write there, and a small temporary file system is never filled. Each is named
+ * `<host>-<pid>-<random>` after its owner process, so an owner can remove what a crashed one
+ * left. */
+const REQUESTS = 'requests';
+const host = (): string =>
+  // The browser build's `os` has no host name; its file system does not outlive the page.
+  fingerprint([typeof os.hostname === 'function' ? os.hostname() : '']).slice(-12);
+/** The name prefix of the request directories process `pid` of this host owns. */
+export const requestDirectoryPrefix = (pid = process.pid): string => `${host()}-${pid}-`;
+
+/** Whether process `pid` of this host is gone. Unknown (no `kill`, no permission) is alive. */
+function gone(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    return (error as { code?: unknown }).code === 'ESRCH';
+  }
+}
+
+/** Remove the request directories of `project` whose owner process (on this host) is gone. */
+export function removeStaleRequestDirectories(project: string): void {
+  const root = join(project, REQUESTS),
+    prefix = `${host()}-`;
+  let names: string[];
+  try {
+    names = readdirSync(root);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (!name.startsWith(prefix)) continue;
+    const pid = Number(name.slice(prefix.length).split('-')[0]);
+    if (Number.isSafeInteger(pid) && pid > 0 && pid !== process.pid && gone(pid))
+      rmSync(join(root, name), { recursive: true, force: true });
+  }
+}
+
 const entry = new URL(
   import.meta.url.endsWith('.ts') ? './request-entry.ts' : './request-entry.js',
   import.meta.url,
@@ -135,6 +176,10 @@ class RequestWorker {
     { resolve: (outcome: PooledOutcome) => void; onProgress: (job: Job) => void }
   >();
   #finished: (() => void) | undefined;
+  /** The end of its standard error (a V8 out-of-memory report), and how it exited. */
+  #stderr = '';
+  #exit: { code: number | null; signal: NodeJS.Signals | null } | undefined;
+  #killed = false;
   readonly exited: Promise<void>;
   constructor(readonly outbox: string) {
     const path = fileURLToPath(entry);
@@ -143,7 +188,9 @@ class RequestWorker {
       [...(path.endsWith('.ts') ? ['--import', 'tsx'] : []), path],
       { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true },
     );
-    this.#child.stderr.resume();
+    this.#child.stderr.on('data', (chunk: Buffer) => {
+      this.#stderr = (this.#stderr + chunk.toString('utf8')).slice(-4096);
+    });
     this.#child.stdin.on('error', () => {});
     const decoder = new FrameDecoder((value) => this.#receive(value as RequestEvent));
     this.#child.stdout.on('data', (chunk: Buffer) => {
@@ -153,7 +200,12 @@ class RequestWorker {
         this.kill();
       }
     });
-    this.exited = new Promise((resolve) => this.#child.on('close', () => resolve()));
+    this.exited = new Promise((resolve) =>
+      this.#child.on('close', (code, signal) => {
+        this.#exit = { code, signal };
+        resolve();
+      }),
+    );
     void this.exited.then(() => {
       for (const [id, run] of this.#runs) {
         this.#runs.delete(id);
@@ -163,7 +215,7 @@ class RequestWorker {
           error: {
             code: 'worker_failed',
             severity: 'error',
-            message: 'Request worker exited before its result',
+            message: this.#death(),
             evidence_ids: [],
           },
         });
@@ -227,6 +279,18 @@ class RequestWorker {
     run.resolve(outcome);
   }
 
+  /** Why the process ended before its result, so a user knows whether to lower `--jobs`. */
+  #death(): string {
+    const how = this.#exit?.signal
+      ? `signal ${this.#exit.signal}`
+      : `exit code ${this.#exit?.code ?? 'unknown'}`;
+    if (/heap out of memory|Reached heap limit|Allocation failed/.test(this.#stderr))
+      return `Request worker ran out of memory (V8 heap limit, ${how}) before its result; lower --jobs or decompile this function alone`;
+    if (this.#exit?.signal === 'SIGKILL' && !this.#killed)
+      return 'Request worker was killed (SIGKILL) before its result, most likely by the system out-of-memory killer; lower --jobs or decompile this function alone';
+    return `Request worker exited (${how}) before its result`;
+  }
+
   send(command: RequestCommand): void {
     this.#child.stdin.write(frame(command));
   }
@@ -273,6 +337,7 @@ class RequestWorker {
   }
 
   kill(): void {
+    this.#killed = true;
     this.#child.kill('SIGKILL');
   }
 }
@@ -301,6 +366,7 @@ export class RequestPool {
     readonly native_summary_bytes?: number;
   };
   #generation: Generation | undefined;
+  #swept = false;
   readonly #retired = new Set<Generation>();
   constructor(
     size: number,
@@ -327,12 +393,19 @@ export class RequestPool {
     if (typeof store.snapshotDatabase !== 'function')
       fail('invalid_input', 'The project store cannot be shared with request workers');
     if (this.#generation) this.#retire(this.#generation);
-    const directory = mkdtempSync(join(tmpdir(), 'open-decomp-requests-'));
+    const root = join(this.#options.project, REQUESTS);
+    if (!this.#swept) {
+      this.#swept = true;
+      removeStaleRequestDirectories(this.#options.project);
+    }
+    let directory: string | undefined;
     try {
-      const database = join(directory, 'project.sqlite');
+      mkdirSync(root, { recursive: true, mode: 0o700 });
+      const generation = (directory = mkdtempSync(join(root, requestDirectoryPrefix())));
+      const database = join(generation, 'project.sqlite');
       store.snapshotDatabase(database);
       const workers = Array.from({ length: this.size }, (_, index) => {
-        const worker = new RequestWorker(join(directory, `w${index}`));
+        const worker = new RequestWorker(join(generation, `w${index}`));
         worker.send({
           kind: 'open',
           project: this.#options.project,
@@ -346,15 +419,15 @@ export class RequestPool {
       });
       this.#generation = {
         revision,
-        directory,
+        directory: generation,
         workers,
         idle: [...workers].reverse(),
         waiting: [],
         retired: false,
       };
     } catch (error) {
-      rmSync(directory, { recursive: true, force: true });
-      throw error;
+      if (directory) rmSync(directory, { recursive: true, force: true });
+      throw diskFull(error, root) ?? error;
     }
   }
 
