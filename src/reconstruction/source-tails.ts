@@ -120,7 +120,11 @@ export function classifyIndirectTails(facts: {
       }
     } else if (link) {
       const bits = { root: link.root, low: link.offset_bits, width: link.width_bits };
-      if (facts.frameSaves.restores(block, bits, new Set()))
+      // No cell of the link register at an exit: no instruction reads or writes it.
+      if (
+        !block.register_exit.some((binding) => binding.register.root === link.root) ||
+        facts.frameSaves.restores(block, bits, new Set())
+      )
         route = `${link.root} holds its entry value`;
       else {
         save = facts.frameSaves

@@ -339,6 +339,18 @@ test('sysv-amd64: `add rsp, 8; jmp rax` is a tail call; a store to the entry SP 
   assert.match(emit(indexed.ir, indexed.extra).emission.text, /indirect_exit/);
 });
 
+test('darwin-arm64: a stub-like `ldr x16, [slot]; br x16` that never touches sp or x30 is a tail call', () => {
+  const abi = darwinArm64Abi;
+  const x16 = named(abi.unknown_call_clobbers.registers, 'x16');
+  const b = builder('indirect-tail-arm64-frameless'),
+    block = b.block('entry');
+  block.writeRegister(x16, block.load(u64, block.constant(u64, 0x8020n)));
+  block.terminate({ kind: 'indirect', target: block.readRegister(x16), reason: REASON });
+  const { ir, extra, source } = prepare(b.finish(block, []), abi);
+  assert.ok(accepted(source));
+  assert.doesNotMatch(emit(ir, extra).emission.text, /indirect_exit/);
+});
+
 test('sysv-amd64: `mov rdi, [rdi+0x20]; jmp [rdi+0x70]` without any stack access is a tail call', () => {
   const abi = sysvAMD64Abi;
   const [rdi] = argumentRegisters(abi, 1);
