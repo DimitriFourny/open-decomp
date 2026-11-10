@@ -819,6 +819,17 @@ test('a root whose every path ends in a trap or a noreturn call never returns, a
     assert.equal(unproven.f.function.noreturn, undefined);
     assert.equal(unproven.f.function.boundary, 'conflicting');
   }
+  // Code after a call to a proven root that nothing else reaches roots its own candidate.
+  // f (+0): call die (+11); h (+5): mov eax, 1; ret; die (+11): ud2
+  const hidden = raw([0xe8, 0x06, 0, 0, 0, 0xb8, 0x01, 0, 0, 0, 0xc3, 0x0f, 0x0b]);
+  const swept = discover(hidden, { assertions: [assertion(hidden, 11)] });
+  const h = swept.graphs.find((graph) => graph.function.entry.value === 0x1005n)!;
+  assert.equal(h.function.boundary, 'candidate');
+  assert.equal(h.instructions.length, 2);
+  assert.equal(swept.enumeration, 'complete');
+  assert.ok(
+    swept.graphs.find((graph) => graph.function.entry.value === 0x1000n)!.function.noreturn,
+  );
   // Two roots that only jump to each other: a least fixpoint proves neither.
   const loop = raw([0xeb, 0x00, 0xeb, 0xfc]);
   const cycle = discover(loop, { assertions: [assertion(loop, 2)] });

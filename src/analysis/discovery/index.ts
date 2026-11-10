@@ -189,6 +189,28 @@ export function discoverFunctions(
   input: DiscoveryInput,
   context: OperationContext,
 ): DiscoveryResult {
+  // A root proven never to return (2d) is proven after the traversal followed the continuations
+  // of calls to it. When such a continuation is real code no root now owns, the traversal was
+  // misled: run again knowing the proofs, so that code roots its own function.
+  let proven: ProvenNoreturn = { entries: new Map(), evidence: [] };
+  for (let run = 1; ; run++) {
+    const { result, rerun } = discoverOnce(input, proven, context);
+    if (!rerun || run === 3) return result;
+    proven = rerun;
+  }
+}
+
+/** Roots already proven never to return, with the evidence records of their proofs. */
+interface ProvenNoreturn {
+  readonly entries: ReadonlyMap<bigint, readonly string[]>;
+  readonly evidence: readonly Evidence[];
+}
+
+function discoverOnce(
+  input: DiscoveryInput,
+  proven: ProvenNoreturn,
+  context: OperationContext,
+): { readonly result: DiscoveryResult; readonly rerun: ProvenNoreturn | null } {
   context.checkpoint(0);
   const { image, decoder, revision } = input;
   if (decoder.architecture !== image.target.architecture)
@@ -342,7 +364,8 @@ export function discoverFunctions(
    * (itself or through a thunk at its target) a noreturn import slot; undefined otherwise. */
   const thunks = new Map<bigint, readonly string[] | null>();
   /** Roots this traversal proved never to return (`provenNoreturn`), by entry. */
-  const neverReturns = new Map<bigint, readonly string[]>();
+  const neverReturns = new Map<bigint, readonly string[]>(proven.entries);
+  for (const item of proven.evidence) evidence.set(item.id, item);
   const noreturnOf = (call: DecodedInstruction): readonly string[] | undefined => {
     const flow = call.flow;
     if (call.validity !== 'valid' || flow.kind !== 'call') return undefined;
@@ -1023,6 +1046,7 @@ export function discoverFunctions(
     };
     let open = roots.filter(
       (item) =>
+        !neverReturns.has(item.entry.value) &&
         !index.noreturn.has(item.entry.value) &&
         !input.noreturn_calls?.has(item.entry.value) &&
         walk(item.entry.value, true) !== undefined,
@@ -1625,7 +1649,7 @@ export function discoverFunctions(
       sweep: sweepCursor,
     };
   }
-  return {
+  const result: DiscoveryResult = {
     graphs: finalGraphs,
     references,
     evidence: [...evidence.values()],
@@ -1643,6 +1667,51 @@ export function discoverFunctions(
       reasons,
     },
   };
+  // A continuation of a call to a newly proven root that is decoded code (not fill, no root)
+  // and that no graph owns was only reached through that call.
+  let rerun: ProvenNoreturn | null = null;
+  if (neverReturns.size > proven.entries.size) {
+    const owned = new Set<bigint>();
+    for (const graph of finalGraphs)
+      for (const instruction of graph.instructions) {
+        context.checkpoint(1);
+        owned.add(instruction.address.value);
+      }
+    const lost = [...decoded.values()].some((instruction) => {
+      context.checkpoint(1);
+      const flow = instruction.flow;
+      if (
+        instruction.validity !== 'valid' ||
+        flow.kind !== 'call' ||
+        !flow.target ||
+        proven.entries.has(flow.target.value) ||
+        !neverReturns.has(flow.target.value)
+      )
+        return false;
+      const next = decoded.get(flow.fallthrough.value);
+      return (
+        next !== undefined &&
+        next.validity === 'valid' &&
+        !owned.has(next.address.value) &&
+        !seedAt(next.address.value) &&
+        !fill(next)
+      );
+    });
+    if (lost) {
+      const cited = new Map<string, Evidence>();
+      const pending = [...neverReturns.values()].flat();
+      for (let cursor = 0; cursor < pending.length; cursor++) {
+        context.checkpoint(1);
+        const id = pending[cursor]!;
+        const item = evidence.get(id);
+        if (!item || cited.has(id)) continue;
+        cited.set(id, item);
+        pending.push(...item.derived_from);
+      }
+      rerun = { entries: new Map(neverReturns), evidence: [...cited.values()] };
+    }
+  }
+  return { result, rerun };
 }
 
 /** Prepare grounded roots and immutable interval indexes without decoding bodies. */
