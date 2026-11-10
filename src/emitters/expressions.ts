@@ -495,6 +495,8 @@ const simplifications = {
     'adding a constant in the upper half of the result width is subtracting its two-complement magnitude: the same value modulo 2^width',
   native_division:
     'division or remainder by a constant divisor other than zero (and, signed, other than -1) is the native truncating operator: no zero-divisor or minimum/-1 case is reachable; Python-like prints only unsigned operands natively (floor division equals truncation for non-negative values)',
+  sign_bit_test:
+    "bit N-1 of a value (N = 8, 16, 32, 64) is 1 exactly when the two's-complement interpretation of its low N bits is negative: (intN_t)x < 0, an int 0 or 1",
   trapping_division:
     'division or remainder whose omitted x86 divide-error guards (division_trap) are exactly its undefined inputs prints as the native operator, which the dialect defines to trap on a zero divisor and, for C int32_t/int64_t operands, on minimum / -1 and minimum % -1, as the machine does; Python-like prints only unsigned operands natively (// and % raise on a zero divisor)',
   mask_insert:
@@ -1270,7 +1272,8 @@ export function expressionText(
             if (range(left, width).signed) left = printer.cast(width, false, left);
             let right =
               divisor !== undefined ? printer.literal(divisor, width) : operand(expression.right);
-            if (range(right, width).signed) right = printer.cast(width, false, right);
+            if (divisor === undefined && range(right, width).signed)
+              right = printer.cast(width, false, right);
             const known = range(left, width);
             return printer.binary(
               op,
@@ -1495,6 +1498,22 @@ export function expressionText(
       let value = operand(expression.value);
       if (!expression.offset && value.ctype && !value.ctype.signed && value.ctype.bits <= width)
         return value;
+      // The sign bit of a C integer width is the signed test against zero.
+      if (
+        !python &&
+        width === 1 &&
+        [8, 16, 32, 64].includes(expression.offset + 1) &&
+        printer.simplify('sign_bit_test', [expression.value.id])
+      )
+        return printer.binary(
+          '<',
+          printer.cast(expression.offset + 1, true, value),
+          printer.literal(0n, expression.offset + 1),
+          {
+            bits: 1,
+            signed: false,
+          },
+        );
       // A narrowed printed zero-extension still needs a wide C shift operand
       // when extracting high bits; shifting a uint32_t by 32 is undefined.
       if (!python && expression.offset >= promote(range(value, source)).bits)
