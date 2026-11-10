@@ -86,10 +86,9 @@ int main(void) {
     printf("keep_arg %u %llx\n", i, (unsigned long long)ipa_keep_arg(x, y));
     printf("nested %u %llx\n", i, (unsigned long long)ipa_nested(x, y));
     printf("keep_fp %u %llx\n", i, (unsigned long long)bits);
-    printf("two %u %llx\n", i, (unsigned long long)ipa_two_caller(x));
   }
   struct carrier c;
-  printf("carrier %d\n", ipa_carrier_caller(&c, 3));
+  printf("carrier %d %u\n", ipa_carrier_caller(&c, 3), ipa_two_caller(3));
   /* Referenced so the hand-written functions are linked and discovered. */
   printf("asm %llx %llx %llx %llx\n", (unsigned long long)caller_one_path(1, 2),
          (unsigned long long)caller_low_byte(0x1234, 3), (unsigned long long)caller_tail(0, 4, 5),

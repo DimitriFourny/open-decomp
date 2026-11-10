@@ -1,6 +1,13 @@
 import type { OperationContext } from '../../core/index.js';
 import type { StackRecoveryResult } from '../../analysis/stack/index.js';
-import { bitWidth, type Instruction, type SSAForm, type Value } from '../../ir/index.js';
+import {
+  bitWidth,
+  computeDominance,
+  type Dominance,
+  type Instruction,
+  type SSAForm,
+  type Value,
+} from '../../ir/index.js';
 import {
   preservedCallOutputs,
   writesRegister,
@@ -114,16 +121,20 @@ export function nativeWrittenRegisters(
         through.set(output.id, input);
   }
   // A restore: a little-endian load of an exact frame slot that exactly one store of
-  // the body writes (same offset and width, no other store touching its bytes), whose
-  // bytes the stack recovery still holds from that store at the load, in order, on
-  // every path (initialized, no alias barrier before it), reads that store's value.
+  // the body writes (same offset and width, no other store touching its bytes), that
+  // store dominating the load, whose bytes the stack recovery still holds from that
+  // store at the load, in order, with no alias barrier (call, unknown or dynamic
+  // store) on any path before it, reads that store's value.
   const slotStore = new Map<bigint, string | null>(),
-    stores = new Map<string, Extract<Instruction, { kind: 'store' }>>();
+    stores = new Map<string, Extract<Instruction, { kind: 'store' }>>(),
+    sites = new Map<string, { readonly block: string; readonly index: number }>();
   if (stack?.state === 'complete')
     for (const block of ir.blocks)
-      for (const node of block.instructions) {
-        if (node.kind !== 'store') continue;
+      for (const [index, node] of block.instructions.entries()) {
+        if (node.kind !== 'store' && node.kind !== 'load') continue;
         context.checkpoint(1);
+        sites.set(node.id, { block: block.id, index });
+        if (node.kind !== 'store') continue;
         stores.set(node.id, node);
         const address = stack.values.get(node.address.id)?.value;
         if (address?.kind !== 'stack') continue;
@@ -133,6 +144,14 @@ export function nativeWrittenRegisters(
           slotStore.set(at, slotStore.has(at) ? null : node.id);
         }
       }
+  let dominance: Dominance | undefined;
+  const before = (store: string, load: string): boolean => {
+    const from = sites.get(store)!,
+      to = sites.get(load)!;
+    if (from.block === to.block) return from.index < to.index;
+    dominance ??= computeDominance(ir, (work) => context.checkpoint(work));
+    return dominance.dominates(from.block, to.block);
+  };
   const restored = (value: Value): Value | undefined => {
     const id = prepared.load_nodes.get(value.id);
     const load = id === undefined ? undefined : prepared.loads.get(id);
@@ -148,15 +167,15 @@ export function nativeWrittenRegisters(
       stored.offset !== address.offset ||
       bitWidth(store.value.type) !== bitWidth(value.type) ||
       store.access.endian !== 'little' ||
-      load.access.endian !== 'little'
+      load.access.endian !== 'little' ||
+      !before(store.id, load.id)
     )
       return undefined;
     for (let byte = 0n; byte < size; byte++) {
       const held = snapshot.memory.get(address.offset + byte);
       if (
         slotStore.get(address.offset + byte) !== store.id ||
-        held?.fact.initialization !== 'initialized' ||
-        !held.fact.value_ids.includes(store.value.id) ||
+        !held?.fact.value_ids.includes(store.value.id) ||
         held.value_offset_bits !== Number(byte) * 8
       )
         return undefined;

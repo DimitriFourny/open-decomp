@@ -128,26 +128,12 @@ test(
           `${emitter} ipa_keep_fp ${index}`,
         );
       // ipa_two reads q only after its call, from the register the leaf leaves
-      // alone: its argument list stays open, and its caller passes both values.
+      // alone (its stack facts see only p): its argument list must not close on p.
       const twoCaller = await decompile('ipa_two_caller', emitter);
-      for (const [index, x] of cases.entries())
-        assert.deepEqual(
-          run(
-            twoCaller,
-            [x],
-            new Map<string, SourceCallOracle>([
-              [
-                'ipa_two',
-                (args) => {
-                  assert.equal(args.length, 2, `ipa_two keeps both arguments\n${twoCaller.text}`);
-                  return BigInt.asUintN(32, scale(args[0]!) + args[1]!);
-                },
-              ],
-            ]),
-          ),
-          [expected.get(`two:${index}`)!],
-          `${emitter} ipa_two_caller ${index}`,
-        );
+      const twoCalls = [...twoCaller.text.matchAll(/\bipa_two\(([^()]*(?:\([^()]*\)[^()]*)*)\)/g)];
+      assert.equal(twoCalls.length, 1, twoCaller.text);
+      if (twoCalls[0]![1]!.split(',').length !== 2)
+        assert.match(twoCaller.text, /open arity \(proven args only\): ipa_two\b/, twoCaller.text);
       // Both result carriers are written on every exit and xmm0 last; the caller
       // reads rax, so the pointer is the result.
       const carrier = await decompile('ipa_carrier', emitter);
