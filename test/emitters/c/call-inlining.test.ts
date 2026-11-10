@@ -26,7 +26,7 @@ function shaped(shape: Shape) {
   if (shape === 'nested') result = entry.call(target(0x5000n), [result], [i64], writing)[0]!;
   if (shape === 'store') entry.store(entry.constant(i64, 0x3000n), entry.constant(integer(8), 7n));
   if (shape === 'pure_between') entry.int('add', pointer, entry.constant(i64, 8n));
-  if (shape === 'twice') result = entry.int('add', result, result);
+  if (shape === 'twice') result = entry.int('mul', result, result);
   if (shape === 'load') result = entry.int('add', result, entry.load(i64, pointer));
   if (shape === 'jump') {
     const next = b.block('next');

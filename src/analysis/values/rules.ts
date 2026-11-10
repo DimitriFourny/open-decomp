@@ -97,8 +97,12 @@ const reflexive: Readonly<Record<IntegerPredicate, boolean>> = {
 /** Value-level rules of the expression pool: exact for every bit pattern and
  * applied by simplifySSA, so both views and every analysis consume the result.
  * - zext(trunc_w(v)) is v when v is proven below 2^w (same type).
- * - x OP x of one determinate SSA value is OP's reflexive truth value; a value
- *   whose definitions can reach an explicit unknown/undefined keeps its form.
+ * - x OP x of one determinate SSA value is OP's reflexive truth value, and
+ *   x - x and x ^ x are 0; a value whose definitions can reach an explicit
+ *   unknown/undefined keeps its form.
+ * - x <u 0 is 0 and x >=u 0 is 1, and the flags of x ± 0 without carry-in are
+ *   constant for every bit pattern of x: no overflow, no borrow, no carry out
+ *   of the addition, and the subtraction's carry (its "no borrow" flag) is 1.
  * These make guards like x86's quotient-overflow check, which no operand value
  * can satisfy, constant so the unreachable trap disappears. */
 export function foldValueRule(
@@ -122,5 +126,37 @@ export function foldValueRule(
     !mayBeIndeterminate(expression.left, scope)
   )
     return { kind: 'constant', bits: reflexive[expression.op] ? 1n : 0n };
+  // No bit pattern of x is unsigned-below 0, and x ± 0 without a carry-in
+  // never borrows or overflows (`cmp x, 0` flags). The carry of a subtraction
+  // is its inverted borrow (the IR's arm64 convention), so it is 1 there.
+  if (
+    expression.kind === 'compare' &&
+    (expression.op === 'ult' || expression.op === 'uge') &&
+    scope.constant(expression.right.id) === 0n
+  )
+    return { kind: 'constant', bits: expression.op === 'uge' ? 1n : 0n };
+  if (
+    expression.kind === 'flag' &&
+    (expression.flag === 'overflow' ||
+      expression.flag === 'carry' ||
+      expression.flag === 'borrow') &&
+    scope.constant(expression.right.id) === 0n &&
+    scope.constant(expression.carry.id) === 0n
+  )
+    return {
+      kind: 'constant',
+      bits: expression.flag === 'carry' && expression.op === 'sub' ? 1n : 0n,
+    };
+  // x - x and x ^ x of one determinate value (`sub reg, reg`, the `x - x` of
+  // `sbb reg, reg`) are 0 for every bit pattern of x, an unwritten entry
+  // register included: it holds one fixed (unknown) pattern.
+  if (
+    expression.kind === 'integer' &&
+    (expression.op === 'sub' || expression.op === 'xor') &&
+    expression.left.id === expression.right.id &&
+    type.kind === 'integer' &&
+    !mayBeIndeterminate(expression.left, scope)
+  )
+    return { kind: 'constant', bits: 0n };
   return null;
 }

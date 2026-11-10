@@ -495,6 +495,10 @@ const simplifications = {
     'adding a constant in the upper half of the result width is subtracting its two-complement magnitude: the same value modulo 2^width',
   native_division:
     'division or remainder by a constant divisor other than zero (and, signed, other than -1) is the native truncating operator: no zero-divisor or minimum/-1 case is reachable; Python-like prints only unsigned operands natively (floor division equals truncation for non-negative values)',
+  sign_bit_test:
+    "bit N-1 of a value (N = 8, 16, 32, 64) is 1 exactly when the two's-complement interpretation of its low N bits is negative: (intN_t)x < 0, an int 0 or 1",
+  trapping_division:
+    'division or remainder whose omitted x86 divide-error guards (division_trap) are exactly its undefined inputs prints as the native operator, which the dialect defines to trap on a zero divisor and, for C int32_t/int64_t operands, on minimum / -1 and minimum % -1, as the machine does; Python-like prints only unsigned operands natively (// and % raise on a zero divisor)',
   mask_insert:
     'replacing bits [offset, offset+n) of a value is (base & ~(ones_n << offset)) | (value_n << offset) reduced to the result width: the kept mask clears exactly the replaced bits and the n-bit value occupies exactly them',
   rotate_inline:
@@ -779,6 +783,11 @@ export interface ExpressionOptions {
   readonly floatLiterals?: boolean;
   /** The pure IR definition of an operand's value, if any. */
   readonly definition?: (value: Value) => Expression | undefined;
+  /** Source view: a division whose undefined inputs (zero divisor, signed
+   * minimum / -1) are exactly the machine's trap conditions, which the
+   * dialect's `/` and `%` share (`division_trap`): it prints natively for any
+   * divisor. */
+  readonly trapping?: boolean;
 }
 
 /** Whether the IR defines `value` as a zero or sign extension of a value of
@@ -1230,6 +1239,10 @@ export function expressionText(
       // the undefined zero divisor nor the minimum/-1 overflow: the native
       // truncating operator is the bit-vector operation. Python floors, so only
       // unsigned operands (where flooring is truncation) print natively there.
+      // A trapping division (`division_trap`) prints natively for any divisor:
+      // its undefined inputs are the dialect operator's trap conditions (C
+      // signed only at 32/64 bits, where `int`/`long` division overflows on
+      // minimum / -1 as the machine does).
       if (
         (expression.op === 'udiv' ||
           expression.op === 'urem' ||
@@ -1243,28 +1256,38 @@ export function expressionText(
           signed = expression.op === 'sdiv' || expression.op === 'srem',
           op = expression.op.endsWith('rem') ? '%' : python ? '//' : '/';
         const negative = divisor === undefined ? 0n : BigInt.asIntN(width, divisor);
+        const trapping = options.trapping === true && (!signed || (!python && width >= 32));
         if (
-          divisor !== undefined &&
-          divisor !== 0n &&
-          (!signed || (!python && negative !== -1n)) &&
-          printer.simplify('native_division', [expression.left.id, expression.right.id])
+          (trapping ||
+            (divisor !== undefined &&
+              divisor !== 0n &&
+              (!signed || (!python && negative !== -1n)))) &&
+          printer.simplify(trapping ? 'trapping_division' : 'native_division', [
+            expression.left.id,
+            expression.right.id,
+          ])
         ) {
           if (!signed) {
             let left = operand(expression.left);
             if (range(left, width).signed) left = printer.cast(width, false, left);
-            const right = printer.literal(divisor, width),
-              known = range(left, width);
+            let right =
+              divisor !== undefined ? printer.literal(divisor, width) : operand(expression.right);
+            if (divisor === undefined && range(right, width).signed)
+              right = printer.cast(width, false, right);
+            const known = range(left, width);
             return printer.binary(
               op,
               left,
               right,
-              python ? known : usualArithmetic(promote(known), right.ctype!),
+              python ? known : usualArithmetic(promote(known), promote(range(right, width))),
             );
           }
           const right =
-            negative >= -(1n << 31n) && negative < 1n << 31n
-              ? printer.signedLiteral(negative)
-              : printer.cast(width, true, printer.literal(divisor, width));
+            divisor === undefined
+              ? printer.cast(width, true, operand(expression.right))
+              : negative >= -(1n << 31n) && negative < 1n << 31n
+                ? printer.signedLiteral(negative)
+                : printer.cast(width, true, printer.literal(divisor, width));
           return printer.reduce(
             width,
             printer.binary(
@@ -1475,6 +1498,22 @@ export function expressionText(
       let value = operand(expression.value);
       if (!expression.offset && value.ctype && !value.ctype.signed && value.ctype.bits <= width)
         return value;
+      // The sign bit of a C integer width is the signed test against zero.
+      if (
+        !python &&
+        width === 1 &&
+        [8, 16, 32, 64].includes(expression.offset + 1) &&
+        printer.simplify('sign_bit_test', [expression.value.id])
+      )
+        return printer.binary(
+          '<',
+          printer.cast(expression.offset + 1, true, value),
+          printer.literal(0n, expression.offset + 1),
+          {
+            bits: 1,
+            signed: false,
+          },
+        );
       // A narrowed printed zero-extension still needs a wide C shift operand
       // when extracting high bits; shifting a uint32_t by 32 is undefined.
       if (!python && expression.offset >= promote(range(value, source)).bits)

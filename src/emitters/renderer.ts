@@ -48,6 +48,7 @@ import { validateReconstruction, validateRenderedTransfers } from '../reconstruc
 import { foldSourceCondition } from '../reconstruction/source-conditions.js';
 import { constantRotationOperands } from '../reconstruction/source-shifts.js';
 import {
+  omittedChecks,
   registerOutputs,
   stackEntry,
   variadicArea,
@@ -1588,8 +1589,41 @@ export class Renderer {
       nativeFp: this.fpPresentation.expressions.has(expression),
       floatLiterals: this.fpPresentation.expressions.has(expression),
       ...(this.sourceView ? { definition: this.definition } : {}),
+      ...(this.trappingDivisions.has(expression) ? { trapping: true } : {}),
     });
   }
+
+  /** Source view: the omitted guards and trap blocks a printed trapping
+   * division stands for map to its statement (an empty span: the header). */
+  private mapDivisionChecks(value: string, start: number, end: number): void {
+    const checks = this.sourceView
+      ? this.program.source?.division_traps?.checks.get(value)
+      : undefined;
+    for (const id of checks ?? []) {
+      this.context.checkpoint(1);
+      const control = this.controls.get(id),
+        block = this.program.blocks.get(id);
+      if (control && !this.mappedControls.has(id)) this.map(control, start, [], end);
+      if (block && !this.mappedControls.has(block.control.id)) {
+        this.map(block, start, [], end);
+        this.map(block.control, start, [], end);
+      }
+    }
+  }
+
+  /** Source view: the definitions of divisions whose omitted x86 divide-error
+   * guards are the dialect operator's own trap conditions. */
+  private get trappingDivisions(): ReadonlySet<Expression> {
+    if (this.trappingCache) return this.trappingCache;
+    const values = this.sourceView ? this.program.source?.division_traps?.values : undefined;
+    const expressions = new Set<Expression>();
+    for (const id of values ?? []) {
+      const expression = this.program.expressions.get(id);
+      if (expression) expressions.add(expression);
+    }
+    return (this.trappingCache = expressions);
+  }
+  private trappingCache: ReadonlySet<Expression> | undefined;
 
   /** The pure IR definition of the value `printed` prints for `value`. */
   private definition = (value: Value): Expression | undefined => {
@@ -4999,7 +5033,13 @@ export class Renderer {
         `Exact ${type.bits}-bit little-endian storage view whose address must be ${access.alignment}-byte aligned (misalignment faults); no strict-aliasing or padding assumption.`,
       );
     }
-    return `*(${access.volatile ? 'volatile ' : ''}${name} *)${this.printer.group(address, UNARY)}`;
+    // `(uintptr_t)&object` converted straight back to a pointer is the pointer
+    // itself: the access type states the alignment the machine access needs.
+    const direct =
+      address.pointer && address.text === `(uintptr_t)${address.pointer.text}`
+        ? this.printer.primary(address.pointer.text)
+        : null;
+    return `*(${access.volatile ? 'volatile ' : ''}${name} *)${direct ? (/^&?[\w.]+(?:\[\w+\])?$/.test(direct.text) ? direct.text : `(${direct.text})`) : this.printer.group(address, UNARY)}`;
   }
 
   private storage(node: Extract<Instruction, { kind: 'load' | 'store' }>): string {
@@ -5772,6 +5812,7 @@ export class Renderer {
     }
     this.writer.statement(depth, text);
     this.inferenceSites.set(node.id, { start, end: this.writer.offset });
+    if (node.kind === 'assign') this.mapDivisionChecks(node.result.id, start, this.writer.offset);
     if (this.program.source && node.kind === 'call') {
       const projection = this.program.calls.get(node.id)!;
       const returned = new Set(projection.results.map((value) => value.id));
@@ -6748,19 +6789,19 @@ export class Renderer {
     }
   }
 
-  /** Source view: the body without the omitted stack-protector checks. */
+  /** Source view: the body without the omitted stack-protector and division-trap checks. */
   private omitProtector(body: Region): Region {
-    const protector = this.sourceView ? this.program.source?.stack_protector : undefined;
-    return protector
-      ? omitStackProtector(body, protector.guards, protector.omitted, this.context)
+    const checks = this.sourceView ? omittedChecks(this.program.source) : undefined;
+    return checks?.guards.size
+      ? omitStackProtector(body, checks.guards, checks.omitted, this.context)
       : body;
   }
 
-  /** Blocks that print nothing: FP-guard and stack-protector failure paths. */
+  /** Blocks that print nothing: FP-guard, stack-protector and division-trap failure paths. */
   private get omittedBlocks(): ReadonlySet<string> {
-    const protector = this.sourceView ? this.program.source?.stack_protector : undefined;
-    return protector?.omitted.size
-      ? new Set([...this.fpPresentation.omitted, ...protector.omitted])
+    const checks = this.sourceView ? omittedChecks(this.program.source) : undefined;
+    return checks?.omitted.size
+      ? new Set([...this.fpPresentation.omitted, ...checks.omitted])
       : this.fpPresentation.omitted;
   }
 
@@ -7156,24 +7197,58 @@ export class Renderer {
 
   /** An inlined zero extension does not change which case matches when every
    * case value fits its operand, so that narrower operand is the selector. */
-  private switchSelector(control: Extract<Control, { kind: 'switch' }>): Value {
+  private switchSelector(control: Extract<Control, { kind: 'switch' }>): {
+    readonly value: Value;
+    /** Added to each case value (modulo the selector width) for its label. */
+    readonly offset: bigint;
+  } {
     const expression = this.inline.has(control.value.id)
       ? this.program.expressions.get(control.value.id)
       : undefined;
+    let selector = control.value;
     if (
-      expression?.kind !== 'cast' ||
-      expression.op !== 'zero_extend' ||
-      expression.value.type.kind !== 'integer' ||
-      !control.cases.every((item) => item.bits < 1n << BigInt(bitWidth(expression.value.type))) ||
-      !this.localValidation.presentation(
+      expression?.kind === 'cast' &&
+      expression.op === 'zero_extend' &&
+      expression.value.type.kind === 'integer' &&
+      control.cases.every((item) => item.bits < 1n << BigInt(bitWidth(expression.value.type))) &&
+      this.localValidation.presentation(
         'switch_selector_extension',
         control.id,
         'a zero-extended selector whose case values all fit the unextended operand is switched on that operand; the same case matches for every value',
         [control.value.id, expression.value.id],
       )
     )
-      return control.value;
-    return expression.value;
+      selector = expression.value;
+    // An inline `x - c` / `x + c` selector of x's width switches on x: x - c == k
+    // exactly when x == k + c modulo 2^width, a bijection, so every case and
+    // the default select the same arm (the range guard was folded already).
+    const rebased = this.inline.has(selector.id)
+      ? this.program.expressions.get(selector.id)
+      : undefined;
+    if (
+      rebased?.kind === 'integer' &&
+      (rebased.op === 'sub' || rebased.op === 'add') &&
+      selector.type.kind === 'integer' &&
+      sameType(rebased.left.type, selector.type) &&
+      this.constantOf(rebased.left) === undefined
+    ) {
+      const constant = this.constantOf(rebased.right);
+      if (
+        constant !== undefined &&
+        constant !== 0n &&
+        this.localValidation.presentation(
+          'switch_selector_rebase',
+          control.id,
+          'a selector x - c (x + c) at the width of x is switched on x with every case label k printed as k + c (k - c) modulo 2^width: x - c == k exactly when x == k + c, so each case and the default select the same arm',
+          [selector.id, rebased.left.id],
+        )
+      )
+        return {
+          value: rebased.left,
+          offset: rebased.op === 'sub' ? constant : BigInt.asUintN(selector.type.bits, -constant),
+        };
+    }
+    return { value: selector, offset: 0n };
   }
 
   /** Source-view case layout. A copy-free, bodiless case arm reaching another
@@ -7234,7 +7309,11 @@ export class Renderer {
    * grouped and omitted case edges land where the arm printed for them does.
    * An empty `default` is dropped and an arm that cannot fall through ends
    * without `break`. */
-  private sourceSwitch(control: Extract<Control, { kind: 'switch' }>, depth: number): void {
+  private sourceSwitch(
+    control: Extract<Control, { kind: 'switch' }>,
+    depth: number,
+    label: (bits: bigint) => bigint = (bits) => bits,
+  ): void {
     const c = this.language === 'c-like';
     const landing = (arm: ControlArm): EmittedEdge | undefined =>
       arm.body
@@ -7244,7 +7323,7 @@ export class Renderer {
     let printed = 0;
     for (const group of plan.groups) {
       this.context.checkpoint(group.labels.length);
-      const labels = group.labels.map((bits) => bits.toString());
+      const labels = group.labels.map((bits) => label(bits).toString());
       const scoped = c && this.armDeclares(group.arm);
       if (c) {
         for (const label of labels.slice(0, -1)) this.writer.line(depth + 1, `case ${label}:`);
@@ -8360,7 +8439,11 @@ export class Renderer {
     const plan = planSourceInlining(
       program,
       this.context,
-      (value) => this.names.has(value.id) || rotated.has(value.id),
+      // A division whose guards were omitted traps where it is defined.
+      (value) =>
+        this.names.has(value.id) ||
+        rotated.has(value.id) ||
+        program.source?.division_traps?.values.has(value.id) === true,
       (node) => indices.get(node.id),
       (destination, expression) => {
         // Same presented storage: the same IEEE width (whole value, or its low
@@ -9526,14 +9609,29 @@ export class Renderer {
       }
       case 'switch': {
         ids.push(control.value.id);
-        const selector = this.sourceView ? this.switchSelector(control) : control.value;
+        const selector = this.sourceView
+          ? this.switchSelector(control)
+          : { value: control.value, offset: 0n };
+        const whole = this.printed(selector.value),
+          width = bitWidth(selector.value.type);
+        // A signed local read as its unsigned pattern switches on the local:
+        // the labels print in its signed range instead.
+        const printed =
+          this.sourceView &&
+          whole.unreduced?.ctype?.signed &&
+          whole.unreduced.ctype.bits === width &&
+          whole.ctype?.bits === width
+            ? whole.unreduced
+            : whole;
         this.writer.line(
           depth,
-          this.language === 'c-like'
-            ? `switch (${this.value(selector)}) {`
-            : `match ${this.value(selector)}:`,
+          this.language === 'c-like' ? `switch (${printed.text}) {` : `match ${printed.text}:`,
         );
-        if (this.sourceView) this.sourceSwitch(control, depth);
+        if (this.sourceView)
+          this.sourceSwitch(control, depth, (bits) => {
+            const label = BigInt.asUintN(width, bits + selector.offset);
+            return printed.ctype?.signed ? BigInt.asIntN(width, label) : label;
+          });
         else {
           for (const item of control.cases) {
             this.context.checkpoint(1);
@@ -10122,6 +10220,9 @@ export class Renderer {
         for (const node of block.statements) this.map(node, start, [], end);
       }
     }
+    // Omitted division-trap checks map to their printed division, else to the header.
+    for (const id of this.program.source?.division_traps?.values ?? [])
+      this.mapDivisionChecks(id, 0, 0);
     if (this.sourceView) {
       const renamed: string[] = [];
       for (const [id, spelling] of this.linkageNames)
@@ -10925,7 +11026,12 @@ function renderView(
   version: string,
 ): EmissionResult {
   // Reconstruction does not depend on the attempt (rejected calls, metadata).
-  const program = reconstruct(input, context, options.view === 'checked' ? 'checked' : 'source');
+  const program = reconstruct(
+    input,
+    context,
+    options.view === 'checked' ? 'checked' : 'source',
+    language,
+  );
   const plans: AttemptPlans = {};
   let validated = false;
   const attempt = (

@@ -49,7 +49,7 @@ test(
     const add = text(await session.decompile({ name: 'registry_add' }));
     assert.match(add, /void registry_add\(registry_t\* reg, shape\* s\)/);
     assert.match(add, /struct registry_t \{ shape\* head; uint64_t count; int64_t total_area; \}/);
-    assert.match(add, /reg->count = 1 \+ reg->count;/);
+    assert.match(add, /reg->count = reg->count \+ 1;/);
     const visit = text(await session.decompile({ name: 'registry_visit' }));
     assert.match(visit, /int32_t registry_visit\(registry_t\* reg, void\* cookie\)/);
     // -O0 locals take their declared names from their frame homes.

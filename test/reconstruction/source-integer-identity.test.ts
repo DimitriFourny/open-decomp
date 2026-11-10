@@ -122,6 +122,12 @@ for (const view of ['source', 'checked', 'record bound'] as const)
           : null;
       if (scenario.reduces !== null && view === 'source')
         assert.equal(reduced?.id, operands[scenario.reduces].id, JSON.stringify(rewritten));
+      // 0 - x stays an operation on x: the source view spells it -x.
+      else if (scenario.name === '0 - x stays' && view === 'source')
+        assert.ok(
+          rewritten.kind === 'integer_unary' && rewritten.op === 'neg',
+          JSON.stringify(rewritten),
+        );
       else assert.equal(rewritten.kind, 'integer', 'the integer operation stays');
       assert.ok(validation.records.every((record) => record.status !== 'rejected'));
       assert.equal(
