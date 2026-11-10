@@ -80,6 +80,23 @@ function unwindHandlerImage(): Buffer {
   b.writeUInt32LE(0x3300, file(0x1204));
   return b;
 }
+/** An optional directory that fails validation is dropped with a warning, not the image. */
+function degraded(bytes: Buffer, feature: string): LoadedImage {
+  const image = load(bytes);
+  assert.ok(
+    image.capabilities.some((c) => c.feature === feature && c.status === 'partial'),
+    `${feature} is partial`,
+  );
+  assert.ok(
+    image.diagnostics.some(
+      (d) => d.severity === 'warning' && d.message.startsWith(`${feature} dropped: `),
+    ),
+  );
+  return image;
+}
+function noUnwindRecords(image: LoadedImage): void {
+  assert.ok(!image.hints.some((h) => h.kind === 'unwind' || h.kind === 'function'));
+}
 function failure(bytes: Buffer, code: PELoadError['diagnostic']['code'] = 'malformed_image'): void {
   assert.throws(
     () => load(bytes),
@@ -485,7 +502,7 @@ test('reserved SET_FPREG bits do not relax frame, operand, ordering or mapped-re
     Buffer.from([9, 8, 2, 0x45, 8, 0x43, 4, 0x32]).copy(b, file(0x1200));
     b.writeUInt32LE(0x3300, file(0x1208));
     mutation(b);
-    failure(b);
+    noUnwindRecords(degraded(b, 'PE exception directory'));
   }
 });
 
@@ -519,19 +536,20 @@ test('unwind handler references still reject unmapped targets and truncated meta
   for (const rva of [0x2000, 0x4000, 0xffffffff]) {
     const b = unwindHandlerImage();
     b.writeUInt32LE(rva, file(0x1204));
-    failure(b);
+    noUnwindRecords(degraded(b, 'PE exception directory'));
   }
   const b = unwindHandlerImage();
   b.writeUInt32LE(0x1ffc, file(0x1108));
   b[file(0x1ffc)] = 1 | (1 << 3);
-  failure(b); // The header fits, but its required handler RVA crosses the file-backed mapping.
+  // The header fits, but its required handler RVA crosses the file-backed mapping.
+  noUnwindRecords(degraded(b, 'PE exception directory'));
 });
 
 test('non-executable handler metadata does not relax protected code range permissions', () => {
   const b = unwindHandlerImage();
   b.writeUInt32LE(0x3300, file(0x1100));
   b.writeUInt32LE(0x3340, file(0x1104));
-  failure(b);
+  noUnwindRecords(degraded(b, 'PE exception directory'));
 });
 
 test('TLS template and callback VA references are not interpreted as RVAs', () => {
@@ -586,17 +604,22 @@ test('RSDS debug references expose GUID bytes/age/path without opening the PDB',
     ),
   );
   b.writeUInt32LE(file(0x1210), file(0x1100) + 24);
-  failure(b);
+  assert.ok(!degraded(b, 'PE debug directory').headers.some((h) => h.kind === 'debug_record'));
 });
 
-for (const name of [
-  'pe-dos-truncated.bin',
-  'pe-header-overrun.bin',
-  'pe-section-overrun.bin',
-  'pe-directory-overrun.bin',
-]) {
+for (const name of ['pe-dos-truncated.bin', 'pe-header-overrun.bin', 'pe-section-overrun.bin']) {
   test(`malformed fixture ${name} fails explicitly`, () => failure(malformed(name)));
 }
+test('malformed fixture pe-directory-overrun.bin drops only the overrunning directory', () => {
+  const image = load(malformed('pe-directory-overrun.bin'));
+  assert.ok(
+    image.diagnostics.some(
+      (d) =>
+        d.severity === 'warning' && d.code === 'malformed_image' && d.message.includes('dropped'),
+    ),
+  );
+  assert.ok(image.capabilities.some((c) => c.status === 'partial'));
+});
 test('unsupported machine and managed images cannot masquerade as native empty images', () => {
   failure(malformed('pe-unsupported-machine.bin'), 'unsupported_target');
   const b = boundaryImage();
@@ -609,7 +632,7 @@ test('unsupported machine and managed images cannot masquerade as native empty i
   failure(b, 'unsupported_target');
 });
 
-test('adversarial headers/directories reject overflow, overlap, unbacked data and forged counts', () => {
+test('adversarial headers reject overflow, overlap and forged counts; directories degrade', () => {
   const mutations: ((b: Buffer) => void)[] = [
     (b) => b.writeUInt16LE(97, 0x86),
     (b) => b.writeUInt32LE(0xffffffff, OPTIONAL + 108),
@@ -617,26 +640,38 @@ test('adversarial headers/directories reject overflow, overlap, unbacked data an
     (b) => b.writeBigUInt64LE(0xffffffffffff0000n, OPTIONAL + 24), // valid base; enlarge image to overflow below
     (b) => b.writeUInt32LE(0x0000, SECTION + 12),
     (b) => b.writeUInt32LE(0x0200, SECTION + 20),
-    (b) => putDirectory(b, 1, 0x2ff0, 40),
-    (b) => putDirectory(b, 1, 0, 40),
-    (b) => putDirectory(b, 1, 0x1100, 0),
+    // A forged record count is a resource limit, which is never downgraded.
     (b) => {
       putDirectory(b, 0, 0x1100, 40);
       b.writeUInt32LE(0xffffffff, file(0x1100) + 20);
     },
-    (b) => {
-      putDirectory(b, 5, 0x1100, 8);
-      b.writeUInt32LE(0, file(0x1104));
-    },
-    (b) => putDirectory(b, 3, 0x1100, 11),
-    (b) => putDirectory(b, 6, 0x1100, 27),
-    (b) => putDirectory(b, 9, 0x1100, 39),
   ];
   for (const [i, mutation] of mutations.entries()) {
     const b = boundaryImage();
     mutation(b);
     if (i === 3) b.writeUInt32LE(0x20000, OPTIONAL + 56);
     assert.throws(() => load(b), PELoadError, `mutation ${i}`);
+  }
+  const directories: [string, (b: Buffer) => void][] = [
+    ['PE import directory', (b) => putDirectory(b, 1, 0x2ff0, 40)],
+    ['PE import directory', (b) => putDirectory(b, 1, 0, 40)],
+    ['PE import directory', (b) => putDirectory(b, 1, 0x1100, 0)],
+    [
+      'PE base relocations',
+      (b) => {
+        putDirectory(b, 5, 0x1100, 8);
+        b.writeUInt32LE(0, file(0x1104));
+      },
+    ],
+    ['PE exception directory', (b) => putDirectory(b, 3, 0x1100, 11)],
+    ['PE debug directory', (b) => putDirectory(b, 6, 0x1100, 27)],
+    ['PE TLS directory', (b) => putDirectory(b, 9, 0x1100, 39)],
+  ];
+  for (const [feature, mutation] of directories) {
+    const b = boundaryImage();
+    mutation(b);
+    const image = degraded(b, feature);
+    assert.equal(image.imports.length + image.exports.length + image.relocations.length, 0);
   }
 });
 
@@ -647,14 +682,15 @@ test('unterminated import tables/strings and invalid ordinal bits fail rather th
   b.writeUInt32LE(0x1300, file(0x1100) + 12);
   b.writeUInt32LE(0x1250, file(0x1100) + 16);
   b.write('x.dll\0', file(0x1300));
-  failure(b); // no null descriptor, even though thunk table is empty
+  // no null descriptor, even though thunk table is empty
+  assert.deepEqual(degraded(b, 'PE imports').imports, []);
   putDirectory(b, 1, 0x1100, 40);
   b.writeBigUInt64LE((1n << 63n) | 0x10000n, file(0x1200));
-  failure(b);
+  assert.deepEqual(degraded(b, 'PE imports').imports, []);
   b.writeBigUInt64LE(0n, file(0x1200));
   b.writeUInt32LE(0x2bff, file(0x1100) + 12);
   b[0x1fff] = 65;
-  failure(b);
+  assert.deepEqual(degraded(b, 'PE imports').imports, []);
 });
 
 test('unwind chain cycles and code operands outside CountOfCodes fail safely', () => {
@@ -667,13 +703,13 @@ test('unwind chain cycles and code operands outside CountOfCodes fail safely', (
   b.writeUInt32LE(0x1800, file(0x1204));
   b.writeUInt32LE(0x1840, file(0x1208));
   b.writeUInt32LE(0x1200, file(0x120c));
-  failure(b);
+  noUnwindRecords(degraded(b, 'PE exception directory'));
   b[file(0x1200)] = 1;
   b[file(0x1201)] = 8;
   b[file(0x1202)] = 1;
   b[file(0x1204)] = 4;
   b[file(0x1205)] = 1;
-  failure(b);
+  noUnwindRecords(degraded(b, 'PE exception directory'));
   b[file(0x1200)] = 2;
   const image = load(b);
   assert.ok(

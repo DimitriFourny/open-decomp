@@ -14,6 +14,7 @@ import {
   OperationError,
   contentHash,
   createOperationContext,
+  diskFull,
   encodeDiagnostic,
   encodeJob,
   imageIdentity,
@@ -90,12 +91,12 @@ export interface WorkerHandler {
 export function workerDiagnostic(error: unknown): Diagnostic {
   return error instanceof OperationError
     ? error.diagnostic
-    : {
+    : (diskFull(error)?.diagnostic ?? {
         code: 'internal_error',
         severity: 'error',
         message: (error instanceof Error ? error.message : String(error)).slice(0, 8192),
         evidence_ids: [],
-      };
+      });
 }
 function fail(code: Diagnostic['code'], message: string): never {
   throw new OperationError({ code, severity: 'error', message, evidence_ids: [] });
@@ -375,8 +376,12 @@ export function runProjectWorker(handler?: WorkerHandler, observer?: WorkerRunti
                       ? 'resource_limit'
                       : 'worker_failed',
                   severity: 'error',
+                  // Say what stopped the job: its own deadline (wall clock, so a loaded machine
+                  // can cause it) or the owner restarting under it for another reason.
                   message:
-                    'Worker ownership was lost before terminal acknowledgement; inspect the last committed snapshot. Operation was not retried.',
+                    interrupted === 'deadline'
+                      ? 'Worker ownership was lost before terminal acknowledgement: the request deadline (budget deadline_ms) passed, so the project worker was stopped; inspect the last committed snapshot. Operation was not retried.'
+                      : 'Worker ownership was lost before terminal acknowledgement: the project worker stopped (another job reached its deadline or was cancelled, or the process died) before this job finished; inspect the last committed snapshot. Operation was not retried.',
                   evidence_ids: [],
                 },
               ],
