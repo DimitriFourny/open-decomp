@@ -162,7 +162,8 @@ function arm64(shape: Arm64Shape) {
   return prepare(b.finish(entry, [u64]), abi);
 }
 
-type X86Shape = 'valid' | 'return-slot-store' | 'pointer-argument';
+type X86Shape =
+  'valid' | 'return-slot-store' | 'pointer-argument' | 'pointer-store' | 'frame-index-store';
 
 /** g(rdi, rsi, rdx): `push rdx; mov rdi, rdx; mov rax, rsi; add rsp, 8; jmp rax`,
  * optionally writing rdi over the return address at the entry SP first, or (`pointer-argument`)
@@ -179,6 +180,14 @@ function x86(shape: X86Shape) {
   block.writeRegister(sp, pushed);
   block.store(pushed, block.readRegister(rdx!));
   if (shape === 'return-slot-store') block.store(sp0, block.readRegister(rdi!));
+  // `mov [rdx], rsi`: a store through an incoming pointer.
+  if (shape === 'pointer-store') block.store(block.readRegister(rdx!), block.readRegister(rsi!));
+  // `mov [rsp+rsi*8], rdi`: a frame store at an unknown offset (it may hit the return address).
+  if (shape === 'frame-index-store')
+    block.store(
+      block.int('add', pushed, block.int('shl', block.readRegister(rsi!), block.constant(u64, 3n))),
+      block.readRegister(rdi!),
+    );
   block.writeRegister(rdi!, block.readRegister(rdx!));
   block.writeRegister(rax, block.readRegister(rsi!));
   if (shape === 'pointer-argument')
@@ -325,6 +334,46 @@ test('sysv-amd64: `add rsp, 8; jmp rax` is a tail call; a store to the entry SP 
   const blocked = x86('return-slot-store');
   assert.ok(!accepted(blocked.source));
   assert.match(emit(blocked.ir, blocked.extra).emission.text, /indirect_exit/);
+  const indexed = x86('frame-index-store');
+  assert.ok(!accepted(indexed.source));
+  assert.match(emit(indexed.ir, indexed.extra).emission.text, /indirect_exit/);
+});
+
+test('sysv-amd64: `mov rdi, [rdi+0x20]; jmp [rdi+0x70]` without any stack access is a tail call', () => {
+  const abi = sysvAMD64Abi;
+  const [rdi] = argumentRegisters(abi, 1);
+  const b = builder('indirect-tail-x86-frameless'),
+    block = b.block('entry');
+  const object = block.load(
+    u64,
+    block.int('add', block.readRegister(rdi!), block.constant(u64, 0x20n)),
+  );
+  block.writeRegister(rdi!, object);
+  const target = block.load(u64, block.int('add', object, block.constant(u64, 0x70n)));
+  block.terminate({ kind: 'indirect', target, reason: REASON });
+  const { ir, extra, source } = prepare(b.finish(block, []), abi);
+  assert.ok(accepted(source));
+  assert.doesNotMatch(emit(ir, extra).emission.text, /indirect_exit/);
+});
+
+test('sysv-amd64: a store through an incoming pointer before `jmp rax` keeps the tail call under an ABI premise', () => {
+  const { ir, extra, source } = x86('pointer-store');
+  assert.ok(accepted(source));
+  // The premise names the branch and the store.
+  const premise = source.local_validation_session?.abiConformance.find(
+    (site) => site.rule === 'indirect_tail_call',
+  );
+  assert.ok(premise);
+  // The branch and the pointer store, not the push into the frame.
+  const stores = ir.blocks[0]!.instructions.filter((node) => node.kind === 'store');
+  assert.equal(stores.length, 2);
+  assert.deepEqual(
+    stores.map((node) => premise.anchor_ids.includes(node.id)),
+    [false, true],
+  );
+  assert.equal(premise.anchor_ids.length, 2);
+  const output = emit(ir, extra).emission;
+  assert.doesNotMatch(output.text, /indirect_exit/, output.text);
 });
 
 test('sysv-amd64: a declared pointer local forwarded to a tail call prints as itself, and the open cast names the printed arguments', () => {

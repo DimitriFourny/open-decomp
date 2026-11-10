@@ -21,8 +21,11 @@ const TARGET_CONE_NODES = 128;
  *   the link register is its unmodified entry value, or a reload of a slot
  *   that qualifies as a frame save with this exit included (recorded under an
  *   `abi_conformance` requirement); on an ABI whose call pushes the return
- *   address, no store overlaps those bytes at the entry SP and no store has an
- *   unknown address;
+ *   address, no store overlaps those bytes at the entry SP and no store has a
+ *   frame-derived address of unknown offset; a store whose address derives
+ *   from no frame address (a global, the heap, an incoming pointer) never
+ *   writes the return-address slot, which is no object a caller can point to
+ *   (recorded under an `abi_conformance` requirement naming those stores);
  * - no frame address escapes: the frame is released before the transfer, so no
  *   pointer into it may outlive it.
  * Each accepted exit writes an `indirect_tail_call` presentation record. */
@@ -38,8 +41,10 @@ export function classifyIndirectTails(facts: {
   readonly frameEscapes: boolean;
   /** Stores at known entry-SP offsets. */
   readonly stores: readonly FrameAccess[];
-  /** Some store has an address that is not a known entry-SP offset. */
+  /** Some store has a frame-derived address that is not a known entry-SP offset. */
   readonly unknownStores: boolean;
+  /** Stores whose address derives from no frame address (globals, heap, incoming pointers). */
+  readonly foreignStores: readonly string[];
   /** Return and tail-call exits. */
   readonly exits: readonly BlockRegion[];
   readonly frameSaves: FrameSaveQualifier;
@@ -85,6 +90,9 @@ export function classifyIndirectTails(facts: {
     link = abi.link_register;
   const atEntrySp = (block: BlockRegion): boolean => {
     const bindings = block.register_exit.filter((binding) => binding.register.root === sp.root);
+    // An exit binds every cell the function has: none for the SP root means no instruction
+    // reads or writes it, so it still holds the entry SP (a frameless `jmp [rdi+0x70]`).
+    if (bindings.length === 0) return true;
     return (
       bindings.length === 1 &&
       bindings[0]!.register.offset_bits === sp.offset_bits &&
@@ -98,13 +106,18 @@ export function classifyIndirectTails(facts: {
     context.checkpoint(1);
     if (!atEntrySp(block) || switchLike(control.target)) continue;
     let route: string | undefined, save: FrameSave | undefined;
+    let foreign: readonly string[] = [];
     if (abi.stack_return_address_bytes > 0n) {
       const bytes = abi.stack_return_address_bytes;
       if (
         !facts.unknownStores &&
         !facts.stores.some((store) => store.offset < bytes && store.end > 0n)
-      )
-        route = `no store reaches the ${bytes}-byte return address at the entry SP: every store has a known entry-SP offset outside it`;
+      ) {
+        foreign = facts.foreignStores;
+        route = foreign.length
+          ? `no store reaches the ${bytes}-byte return address at the entry SP: every frame store has a known entry-SP offset outside it, and the other stores' addresses derive from no frame address`
+          : `no store reaches the ${bytes}-byte return address at the entry SP: every store has a known entry-SP offset outside it`;
+      }
     } else if (link) {
       const bits = { root: link.root, low: link.offset_bits, width: link.width_bits };
       if (facts.frameSaves.restores(block, bits, new Set()))
@@ -136,6 +149,12 @@ export function classifyIndirectTails(facts: {
       )
     )
       continue;
+    if (foreign.length)
+      facts.validation.requireAbi(
+        'indirect_tail_call',
+        [control.id, ...foreign].slice(0, 64),
+        "Presenting an indirect branch as a tail call while stores through addresses not derived from the frame precede it assumes ABI conformance: no pointer a caller passes or the program stores designates the callee's return-address slot. The branch and the stores remain in the checked view and the original mappings.",
+      );
     if (save)
       facts.validation.requireAbi(
         'indirect_tail_call',

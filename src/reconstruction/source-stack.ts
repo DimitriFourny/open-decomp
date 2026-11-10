@@ -1568,8 +1568,14 @@ export function planSourceStack(
             frameExposed || reachAll || reachFloor !== undefined || exposedOffsets.size > 0,
           stores: accesses.filter((access) => access.node.kind === 'store'),
           unknownStores: memory.some(
-            (node) => node.kind === 'store' && !addresses.has(node.address.id),
+            (node) =>
+              node.kind === 'store' &&
+              !addresses.has(node.address.id) &&
+              tainted.has(node.address.id),
           ),
+          foreignStores: memory
+            .filter((node) => node.kind === 'store' && !tainted.has(node.address.id))
+            .map((node) => node.id),
           exits: tailExits,
           frameSaves,
           validation,
