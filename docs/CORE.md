@@ -1239,7 +1239,31 @@ dividend by a constant thus folds and its unreachable trap disappears. The print
 prints division by a constant other than 0 (signed: other than -1) natively
 (`native_division`; Python-like keeps the helper for signed operands, whose floor
 division differs) and an integer insert as `(base & kept) | (value << offset)`
-(`mask_insert`). `test/reconstruction/source-division.test.ts` checks both magic
+(`mask_insert`). A variable-divisor x86 `div`/`idiv` keeps its explicit divide-error
+paths in the checked view; in the source view (`division_trap`,
+`src/reconstruction/source-division-traps.ts`) a division whose double-width dividend
+is the sign (signed) or zero (unsigned) extension of an N-bit value `a` (high half
+`a >> (N-1)` arithmetic, or zero) and whose divisor is the same extension of `b`
+(or a nonzero constant the N-bit type holds, whose zero-divisor guard folded away or is
+false for every dividend)
+traps exactly when `b == 0` or, signed, `a == MIN && b == -1` (the extension is never
+the double-width minimum, and |a / b| <= |a| fits N bits otherwise), and the low
+halves of its quotient and remainder are the N-bit truncating `a / b` and `a % b`.
+Both guards and their trap blocks print nothing, the low halves become the narrow
+operation (`trapping_division` prints the native operator for any divisor), and the
+division prints as its own statement where it was defined (never moved into a reader,
+printed even when unused), so stores before it happen and later effects do not on a
+trap. **Dialect definition:** in the source view an integer `/` or `%` traps (the
+machine's divide error, ending the function like `trap_exit`) when its right operand
+is zero, or when its operands are `int32_t`/`int64_t` and the quotient is not
+representable (`MIN / -1`, `MIN % -1`), where C leaves these undefined. Signed 8- and
+16-bit divisions keep the explicit form (C promotes them to `int`, where `MIN / -1`
+does not overflow), and so do signed divisions in the Python-like dialect (its `//`
+floors and `MIN // -1` does not raise); Python-like `//` and `%` raise on a zero
+divisor. `test/emitters/c/source-division-traps.test.ts` executes both dialects on
+every pair of edge operands (0, ±1, MIN, MAX, ...) at each width against the
+machine's quotient, remainder and trap.
+`test/reconstruction/source-division.test.ts` checks both magic
 divisor bounds against exhaustive 8-bit and sampled 16-bit search, compiler
 constants and off-by-one multipliers, and the narrowing/remainder/power-of-two
 lemmas at INT_MIN, -1 and width edges;

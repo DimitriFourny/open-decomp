@@ -2106,6 +2106,12 @@ export function execute(
     emission.local_validation?.some(
       (record) => record.kind === 'presentation' && record.rule === 'unaligned_access_permitted',
     ) ?? false;
+  // `division_trap`: the dialect's `/` and `%` trap (the machine's divide error)
+  // on a zero divisor and on a quotient its promoted type cannot hold.
+  const divisionTraps =
+    emission.local_validation?.some(
+      (record) => record.kind === 'presentation' && record.rule === 'division_trap',
+    ) ?? false;
   // C assignment (and argument passing) converts to the declared object type.
   const assign = (name: string, value: Data, source?: CType): void => {
     const type = parser.symbols.get(name);
@@ -2713,6 +2719,8 @@ export function execute(
     }
     if (lt.kind === 'math' || rt.kind === 'math') {
       if (comparisons[op]) return BigInt(comparisons[op](left, right));
+      if (divisionTraps && right === 0n && (op === '/' || op === '//' || op === '%'))
+        throw new Boundary('trap_exit', []);
       switch (op) {
         case '+':
           return left + right;
@@ -2779,6 +2787,15 @@ export function execute(
         return range(type, a ^ b);
       case '/':
       case '%':
+        if (
+          divisionTraps &&
+          (b === 0n ||
+            (type.kind === 'int' &&
+              type.signed &&
+              a === -(1n << BigInt(type.bits - 1)) &&
+              b === -1n))
+        )
+          throw new Boundary('trap_exit', []);
         if (b === 0n) ub(`${op} by zero`);
         return range(type, op === '/' ? a / b : a % b);
     }
