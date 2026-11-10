@@ -5584,7 +5584,7 @@ export class Renderer {
       case 'memory_fence':
         text = this.call(
           'memory_fence',
-          'DMB ISH ordering event: all explicit memory reads/writes before this statement are ordered before subsequent reads/writes within the inner-shareable domain. No memory bytes or registers are modified. acquire_release does not claim sequentially-consistent total order or DSB completion; never elide, duplicate, or move memory accesses across this event.',
+          'Memory ordering event (A64 DMB ISH; x86 MFENCE/LFENCE/SFENCE or either side of a LOCK-prefixed instruction): all explicit memory reads/writes before this statement are ordered before subsequent reads/writes within the inner-shareable domain. No memory bytes or registers are modified. acquire_release does not claim sequentially-consistent total order or DSB completion; never elide, duplicate, or move memory accesses across this event.',
           [
             this.writer.quote(node.scope),
             this.writer.quote(node.ordering),

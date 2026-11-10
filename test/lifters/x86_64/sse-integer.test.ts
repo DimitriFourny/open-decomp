@@ -300,3 +300,30 @@ test('an m128 source must be 16-byte aligned; a 64-bit half move need not be', (
   assert.equal(run(lifted('66 0f 70 02 1b'), { rdx: 0x2010n }, region).status, 'returned');
   assert.equal(run(lifted('0f 16 02'), { rdx: 0x2008n }, region).status, 'returned');
 });
+
+test('PACKSS/PACKUS saturate signed lanes to half width, destination lanes first', () => {
+  const saturate = (lane: bigint, size: number, unsigned: boolean): bigint => {
+    const value = signed(lane, size),
+      half = BigInt(size / 2);
+    const minimum = unsigned ? 0n : -(1n << (half - 1n)),
+      maximum = unsigned ? (1n << half) - 1n : (1n << (half - 1n)) - 1n;
+    return value < minimum ? minimum : value > maximum ? maximum : value;
+  };
+  for (const [opcode, size, unsigned] of [
+    ['66 0f 63', 16, false],
+    ['66 0f 6b', 32, false],
+    ['66 0f 67', 16, true],
+    ['66 0f 38 2b', 32, true],
+  ] as const) {
+    const ir = lifted(`${opcode} c1`);
+    for (const [a, b] of vectors())
+      assert.equal(
+        binary(ir, a, b),
+        join(
+          [...lanes(a, size), ...lanes(b, size)].map((lane) => saturate(lane, size, unsigned)),
+          size / 2,
+        ),
+        opcode,
+      );
+  }
+});

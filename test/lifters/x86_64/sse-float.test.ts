@@ -151,3 +151,28 @@ test('CMPSD/CMPSS/CMPPD/CMPPS predicates 0-7 write all-ones or zero lanes', () =
     }
   }
 });
+
+test('packed conversions: truncation to the indefinite value, exact widening, zeroed upper half', () => {
+  // cvttpd2dq xmm0, xmm1
+  let result = run(lifted('66 0f e6 c1'), { zmm0: -1n, zmm1: (nan64 << 64n) | f64(-7.9) });
+  assert.equal(register(result, 'zmm0', 128), (0x80000000n << 32n) | 0xfffffff9n);
+  // cvttps2dq xmm0, xmm1
+  result = run(lifted('f3 0f 5b c1'), {
+    zmm1: (f32(2 ** 31) << 96n) | (f32(-1.5) << 64n) | (f32(3.99) << 32n) | f32(-(2 ** 31)),
+  });
+  assert.equal(
+    register(result, 'zmm0', 128),
+    (0x80000000n << 96n) | (0xffffffffn << 64n) | (3n << 32n) | 0x80000000n,
+  );
+  // cvtdq2pd xmm0, xmm1 reads the low two doublewords
+  result = run(lifted('f3 0f e6 c1'), { zmm1: (0x1234n << 64n) | (0xfffffffen << 32n) | 7n });
+  assert.equal(register(result, 'zmm0', 128), (f64(-2) << 64n) | f64(7));
+  // cvtdq2ps rounds to nearest even: 16777217 -> 16777216
+  result = run(lifted('0f 5b c1'), { zmm1: 16777217n });
+  assert.equal(register(result, 'zmm0', 32), f32(16777216));
+  // cvtps2pd / cvtpd2ps
+  result = run(lifted('0f 5a c1'), { zmm1: (f32(0.1) << 32n) | f32(-2) });
+  assert.equal(register(result, 'zmm0', 128), (f64(Math.fround(0.1)) << 64n) | f64(-2));
+  result = run(lifted('66 0f 5a c1'), { zmm0: -1n, zmm1: (f64(1e300) << 64n) | f64(0.1) });
+  assert.equal(register(result, 'zmm0', 128), (f32(Infinity) << 32n) | f32(0.1));
+});

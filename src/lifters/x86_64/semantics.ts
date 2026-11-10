@@ -872,6 +872,29 @@ export class X86Semantics {
     );
   }
 
+  /**
+   * CVTT* truncation of one FP lane to a signed integer: NaN and out-of-range sources give the
+   * integer indefinite value (only the sign bit set). In range means
+   * -2^(n-1) - 1 < source < 2^(n-1).
+   */
+  truncateFloat(bits: Value, from: 32 | 64, to: number): Value {
+    const b = this.block,
+      source = b.cast('bitcast', floating(from), bits);
+    const bound = (value: number): Value => b.constant(floating(from), floatBits(value, from));
+    const limit = 2 ** (to - 1);
+    // -2^(n-1) - 1 is representable only when n + 1 bits fit the significand.
+    const low =
+      to + 1 <= (from === 64 ? 53 : 24)
+        ? b.fpCompare('gt', source, bound(-limit - 1))
+        : b.fpCompare('ge', source, bound(-limit));
+    const inRange = b.int('and', low, b.fpCompare('lt', source, bound(limit)));
+    return b.select(
+      inRange,
+      b.cast('float_to_signed', integer(to), source),
+      this.c(to, 1n << BigInt(to - 1)),
+    );
+  }
+
   immediate(operand: Operand | undefined): bigint {
     if (operand?.kind !== 'immediate') throw new Unsupported('Missing immediate operand');
     return operand.value;
@@ -1445,31 +1468,72 @@ export class X86Semantics {
     }
     const truncate = /^cvtt(ss|sd)2si$/.exec(m);
     if (truncate) {
-      // Truncating conversion; NaN and out-of-range sources give the integer indefinite value
-      // (only the sign bit set). In range means -2^(n-1) - 1 < source < 2^(n-1).
       if (dst?.kind !== 'register' || !src) throw new Unsupported('CVTT operands');
       this.fpEnvironment();
       b = this.block;
-      const from = truncate[1] === 'sd' ? 64 : 32,
-        to = this.width(dst);
-      const source = b.cast('bitcast', floating(from), this.read(src, from));
-      const bound = (value: number): Value => b.constant(floating(from), floatBits(value, from));
-      const limit = 2 ** (to - 1);
-      // -2^(n-1) - 1 is representable only when n + 1 bits fit the significand.
-      const low =
-        to + 1 <= (from === 64 ? 53 : 24)
-          ? b.fpCompare('gt', source, bound(-limit - 1))
-          : b.fpCompare('ge', source, bound(-limit));
-      const inRange = b.int('and', low, b.fpCompare('lt', source, bound(limit)));
-      this.write(
-        dst,
-        b.select(
-          inRange,
-          b.cast('float_to_signed', integer(to), source),
-          this.c(to, 1n << BigInt(to - 1)),
-        ),
-      );
+      const from = truncate[1] === 'sd' ? 64 : 32;
+      this.write(dst, this.truncateFloat(this.read(src, from), from, this.width(dst)));
       this.fpStatus();
+      return;
+    }
+    const packedConversion = /^(cvttpd2dq|cvttps2dq|cvtdq2pd|cvtdq2ps|cvtps2pd|cvtpd2ps)$/.test(m);
+    if (packedConversion) {
+      // Packed conversions; narrowing forms (from 64-bit lanes) zero the upper quadword.
+      // CVTDQ2PD and CVTPS2PD read only the low quadword (an m64 memory source).
+      this.fpEnvironment();
+      b = this.block;
+      const widening = m === 'cvtdq2pd' || m === 'cvtps2pd';
+      const source = widening
+        ? src?.kind === 'memory'
+          ? this.read(src, 64)
+          : b.extract(this.xmm(src), 0, 64)
+        : this.xmm(src);
+      const from = m === 'cvttpd2dq' || m === 'cvtpd2ps' ? 64 : 32,
+        to = from === 64 || m === 'cvtdq2ps' || m === 'cvttps2dq' ? 32 : 64;
+      const parts: Value[] = [];
+      for (let offset = 0; offset < bitWidth(source.type); offset += from) {
+        const lane = b.extract(source, offset, from);
+        if (m === 'cvttpd2dq' || m === 'cvttps2dq') parts.push(this.truncateFloat(lane, from, 32));
+        else {
+          const result = m.startsWith('cvtdq')
+            ? b.cast('signed_to_float', floating(to), lane)
+            : b.cast('float_convert', floating(to), b.cast('bitcast', floating(from), lane));
+          parts.push(b.cast('bitcast', integer(to), result));
+        }
+      }
+      if (from === 64 && to === 32) parts.push(this.c(64, 0n));
+      this.writeXmm(dst, b.concat(parts));
+      this.fpStatus();
+      return;
+    }
+    const pack = /^pack(ss|us)(wb|dw)$/.exec(m);
+    if (pack) {
+      // Saturate each signed source lane to half width (signed or unsigned), destination first.
+      const size = pack[2] === 'wb' ? 16 : 32,
+        half = size / 2,
+        unsigned = pack[1] === 'us';
+      const minimum = unsigned ? 0n : -(1n << BigInt(half - 1)),
+        maximum = unsigned ? (1n << BigInt(half)) - 1n : (1n << BigInt(half - 1)) - 1n;
+      const parts: Value[] = [];
+      for (const value of [this.xmm(dst), this.xmm(src)])
+        for (let offset = 0; offset < 128; offset += size) {
+          const lane = b.extract(value, offset, size);
+          parts.push(
+            this.resize(
+              b.select(
+                b.compare('slt', lane, this.c(size, minimum)),
+                this.c(size, minimum),
+                b.select(
+                  b.compare('sgt', lane, this.c(size, maximum)),
+                  this.c(size, maximum),
+                  lane,
+                ),
+              ),
+              half,
+            ),
+          );
+        }
+      this.writeXmm(dst, b.concat(parts));
       return;
     }
     const scalar = /^(cvtss2sd|cvtsd2ss|sqrtss|sqrtsd|minss|minsd|maxss|maxsd)$/.test(m);

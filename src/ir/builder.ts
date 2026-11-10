@@ -307,7 +307,8 @@ export class BlockBuilder {
     });
   }
 
-  /** The observed A64 DMB ISH: full read/write ordering within the inner-shareable domain. */
+  /** Full read/write ordering within the inner-shareable domain (A64 DMB ISH, x86 fences and
+   * LOCK-prefixed instructions; the x86 guarantees are stronger, this is their lower bound). */
   memoryFence(): void {
     this.budget?.nodes();
     this.#instructions.push({

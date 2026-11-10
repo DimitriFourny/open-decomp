@@ -40,9 +40,9 @@ export interface X86LiftResult {
  * size), BSF/BSR/TZCNT/LZCNT/POPCNT, LOCK read-modify-writes, memory XCHG,
  * CMPXCHG (memory) and XADD between memory fences, MFENCE/LFENCE/SFENCE, SSE
  * scalar/packed FP arithmetic, MIN/MAX/SQRT/CMP, CVTSI2SS/SD, CVTTSS/SD2SI and
- * CVTSS2SD/CVTSD2SS, and legacy SSE integer moves, add/sub/bitwise, unpacks,
+ * CVTSS2SD/CVTSD2SS and their packed forms, and legacy SSE integer moves, add/sub/bitwise, unpacks,
  * shuffles, lane compares/min/max, mask extraction, PINSRW/PEXTRW, shifts,
- * PMULUDQ/PMULLW and quadword half moves. Addresses use decoded RIP targets or
+ * PMULUDQ/PMULLW, saturating packs and quadword half moves. Addresses use decoded RIP targets or
  * explicit address-size wrapping, scale and segment bases (FS/GS base is physical
  * state). Decoder access/flags metadata never defines these instruction semantics;
  * it only bounds the effect of an unlifted one.
@@ -61,7 +61,7 @@ export interface X86LiftResult {
  * MOVD/MOVQ, which clear bits through 127; bits above XMM remain preserved.
  *
  * Unsupported: x87/MMX, string/REP operations, CMPXCHG8B/16B, RCL/RCR, BMI/ADX,
- * saturating/packing/other SIMD conversions, AVX and later encodings, crypto,
+ * saturating arithmetic, rounding FP-to-integer conversions, AVX and later encodings, crypto,
  * system/privileged/transactional instructions, CET enforcement and precise
  * memory-fault/exception delivery. ENDBR64 is a landing marker abstraction, not
  * CET enforcement. Unknown instructions emit an unknown effect bounded by the
