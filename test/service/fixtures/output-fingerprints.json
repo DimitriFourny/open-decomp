@@ -20,7 +20,7 @@
       }
     },
     "corpus-symbols.dll|c-like": {
-      "identity": "{\"abi\":\"windows-x64/3\",\"analysis\":\"pipeline/28;discovery/9;targets/2;ssa/5;values-effects/6;stack-calls/16;debug/4;library/12;types/19;annotations/3;structure/8;reconstruction/99\",\"backend\":\"open-decomp/1\",\"decoder\":\"1.21.0\",\"emitter\":\"reconstructed-c-113\",\"lifter\":\"x86-64 typed semantic lifter/5\",\"loader\":\"open-decomp-pe/1.0.1\"}",
+      "identity": "{\"abi\":\"windows-x64/3\",\"analysis\":\"pipeline/28;discovery/9;targets/2;ssa/5;values-effects/6;stack-calls/16;debug/4;library/12;types/19;annotations/3;structure/8;reconstruction/99\",\"backend\":\"open-decomp/1\",\"decoder\":\"1.21.0\",\"emitter\":\"reconstructed-c-113\",\"lifter\":\"x86-64 typed semantic lifter/7\",\"loader\":\"open-decomp-pe/1.0.1\"}",
       "functions": {
         "fixture_arithmetic": "complete:d9189487647d8c3707423034980ea9e66fb315ac59ffd74c9b8ec519b83e7ec4",
         "fixture_loop": "complete:b819985242d91e44f13d5f6861744ea69082826458dc09e1f7ddc97ab0a5e144",
@@ -29,7 +29,7 @@
       }
     },
     "corpus-symbols.dll|python-like": {
-      "identity": "{\"abi\":\"windows-x64/3\",\"analysis\":\"pipeline/28;discovery/9;targets/2;ssa/5;values-effects/6;stack-calls/16;debug/4;library/12;types/19;annotations/3;structure/8;reconstruction/99\",\"backend\":\"open-decomp/1\",\"decoder\":\"1.21.0\",\"emitter\":\"reconstructed-python-like-106\",\"lifter\":\"x86-64 typed semantic lifter/5\",\"loader\":\"open-decomp-pe/1.0.1\"}",
+      "identity": "{\"abi\":\"windows-x64/3\",\"analysis\":\"pipeline/28;discovery/9;targets/2;ssa/5;values-effects/6;stack-calls/16;debug/4;library/12;types/19;annotations/3;structure/8;reconstruction/99\",\"backend\":\"open-decomp/1\",\"decoder\":\"1.21.0\",\"emitter\":\"reconstructed-python-like-106\",\"lifter\":\"x86-64 typed semantic lifter/7\",\"loader\":\"open-decomp-pe/1.0.1\"}",
       "functions": {
         "fixture_arithmetic": "complete:02cb8d392f22643fe98bd6f5d8413f157851e7acda2b10f695876485515dd8b3",
         "fixture_loop": "complete:aefc7602ce033eb6b294459f6ff99aa4904d5b6f1543d16ff6d9f4a8520d6c51",
@@ -38,7 +38,7 @@
       }
     },
     "elf-x86_64-symbols|c-like": {
-      "identity": "{\"abi\":\"sysv-amd64/2\",\"analysis\":\"pipeline/28;discovery/9;targets/2;ssa/5;values-effects/6;stack-calls/16;debug/4;library/12;types/19;annotations/3;structure/8;reconstruction/99\",\"backend\":\"open-decomp/1\",\"decoder\":\"1.21.0\",\"emitter\":\"reconstructed-c-113\",\"lifter\":\"x86-64 typed semantic lifter/5\",\"loader\":\"open-decomp-elf/1.0.1\"}",
+      "identity": "{\"abi\":\"sysv-amd64/2\",\"analysis\":\"pipeline/28;discovery/9;targets/2;ssa/5;values-effects/6;stack-calls/16;debug/4;library/12;types/19;annotations/3;structure/8;reconstruction/99\",\"backend\":\"open-decomp/1\",\"decoder\":\"1.21.0\",\"emitter\":\"reconstructed-c-113\",\"lifter\":\"x86-64 typed semantic lifter/7\",\"loader\":\"open-decomp-elf/1.0.1\"}",
       "functions": {
         "fixture_arithmetic": "partial:3e410e80284ae25a672c1a9550f3b63fe2846d4d5f079feeb823cbe3457bfda3",
         "fixture_loop": "partial:ff15bf94c99a48f244362efe9c9b7015d4653d03510adf2f26b693a064522ef6",
@@ -47,7 +47,7 @@
       }
     },
     "elf-x86_64-symbols|python-like": {
-      "identity": "{\"abi\":\"sysv-amd64/2\",\"analysis\":\"pipeline/28;discovery/9;targets/2;ssa/5;values-effects/6;stack-calls/16;debug/4;library/12;types/19;annotations/3;structure/8;reconstruction/99\",\"backend\":\"open-decomp/1\",\"decoder\":\"1.21.0\",\"emitter\":\"reconstructed-python-like-106\",\"lifter\":\"x86-64 typed semantic lifter/5\",\"loader\":\"open-decomp-elf/1.0.1\"}",
+      "identity": "{\"abi\":\"sysv-amd64/2\",\"analysis\":\"pipeline/28;discovery/9;targets/2;ssa/5;values-effects/6;stack-calls/16;debug/4;library/12;types/19;annotations/3;structure/8;reconstruction/99\",\"backend\":\"open-decomp/1\",\"decoder\":\"1.21.0\",\"emitter\":\"reconstructed-python-like-106\",\"lifter\":\"x86-64 typed semantic lifter/7\",\"loader\":\"open-decomp-elf/1.0.1\"}",
       "functions": {
         "fixture_arithmetic": "partial:fcd081dc2b1dccab599dc0ec90c0f3b708cfb9a092ee381b06975a8100f96df0",
         "fixture_loop": "partial:165b33b3372500384bb90b7dfb72b87b0da44012973af10b3683d2ffe2cc8959",
