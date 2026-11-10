@@ -25,13 +25,30 @@ export function boundIR(ir: FunctionIR, context: OperationContext): number {
   for (const block of ir.blocks) {
     context.checkpoint(1 + block.instructions.length + block.parameters.length);
     nodes += 3 + block.parameters.length + block.instructions.length;
-    if (nodes > context.budget.ir_nodes || ir.blocks.length > context.budget.blocks)
+    if (nodes > context.budget.ir_nodes || ir.blocks.length > context.budget.blocks) {
+      const blocks = ir.blocks.length > context.budget.blocks;
+      // The exhausted capacity, so a caller that bounded it (a native context specialization
+      // under the worklist's remaining capacity) can recognize its own limit.
       throw new OperationError({
         code: 'resource_limit',
         severity: 'error',
         message: 'Lifted/SSA graph exceeds the operation node or block budget',
         evidence_ids: [],
+        details: blocks
+          ? {
+              kind: 'limit',
+              resource: 'blocks',
+              limit: context.budget.blocks,
+              consumed: ir.blocks.length,
+            }
+          : {
+              kind: 'limit',
+              resource: 'ir_nodes',
+              limit: context.budget.ir_nodes,
+              consumed: nodes,
+            },
       });
+    }
   }
   assertValidIR(ir, (work) => context.checkpoint(work));
   return nodes;
