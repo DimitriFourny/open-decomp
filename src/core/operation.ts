@@ -13,6 +13,30 @@ export class OperationError extends Error {
   }
 }
 
+/** Message prefix of the diagnostic for a full disk (`diskFull`): an environment failure that
+ * every later request would meet too, so drivers stop instead of failing each function. */
+export const DISK_FULL_MESSAGE = 'No space left on device';
+
+/** `error` as the one clear disk-full diagnostic (resource_limit naming `directory` and the
+ * remedy) when it is ENOSPC/EDQUOT from the file system or SQLITE_FULL; otherwise undefined. */
+export function diskFull(error: unknown, directory?: string): OperationError | undefined {
+  const code = (error as { code?: unknown } | null)?.code;
+  const message = error instanceof Error ? error.message : '';
+  if (
+    code !== 'ENOSPC' &&
+    code !== 'EDQUOT' &&
+    !/\bENOSPC\b|database or disk is full/.test(message)
+  )
+    return undefined;
+  const path = directory ?? (error as { path?: unknown }).path;
+  return new OperationError({
+    code: 'resource_limit',
+    severity: 'error',
+    message: `${DISK_FULL_MESSAGE}${typeof path === 'string' ? ` for ${path}` : ''}: free space on that file system or put the project cache on a larger one (--cache PATH); the analysis itself did not fail (${message.slice(0, 200)})`,
+    evidence_ids: [],
+  });
+}
+
 /** One use of a per-process structure (`buildOnce`): its name, unique among the structures
  * one operation can use, and its recorded build cost. Serializable, so work replayed from a
  * persisted result can make the payments the original computation made. */

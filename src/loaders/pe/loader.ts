@@ -281,6 +281,58 @@ class Parser extends Reader {
     });
   }
 
+  /** Parses one optional directory (not needed to map code). A malformed or unsupported one is
+   * dropped as a whole: every record it added is rolled back and a warning plus a partial
+   * format capability remain. Budget and cancellation errors are never downgraded. */
+  optional(feature: string, parse: () => void): boolean {
+    const lengths = [
+      this.headers.length,
+      this.imports.length,
+      this.exports.length,
+      this.symbols.length,
+      this.relocations.length,
+      this.hints.length,
+      this.entries.length,
+    ];
+    const sections = [...this.sections];
+    try {
+      parse();
+      return true;
+    } catch (error) {
+      if (
+        !(error instanceof PELoadError) ||
+        (error.code !== 'malformed_image' && error.code !== 'unsupported_target')
+      )
+        throw error;
+      [
+        this.headers,
+        this.imports,
+        this.exports,
+        this.symbols,
+        this.relocations,
+        this.hints,
+        this.entries,
+      ].forEach((records, index) => (records.length = lengths[index]!));
+      this.sections.splice(0, this.sections.length, ...sections);
+      this.degraded(feature, error);
+      return false;
+    }
+  }
+
+  degraded(feature: string, error: PELoadError): void {
+    if (this.capabilities.length >= 1000)
+      throw new PELoadError('resource_limit', 'PE capability count exceeds 1000');
+    const message = `${feature} dropped: ${error.message}`;
+    this.capabilities.push({ layer: 'format', feature, status: 'partial', limitations: [message] });
+    this.diagnostics.push({
+      code: error.code,
+      severity: 'warning',
+      message,
+      evidence_ids: [],
+      ...(error.diagnostic.address ? { address: error.diagnostic.address } : {}),
+    });
+  }
+
   /** Metadata reads must be backed by one contiguous mapping, never by virtual zero-fill. */
   file(rva: bigint, size: bigint): bigint {
     if (rva < 0n || rva + size > this.imageSize) this.fail('PE RVA range exceeds SizeOfImage');
@@ -545,9 +597,6 @@ class Parser extends Reader {
       const field = h.optional + 112n + BigInt(i * 8),
         rva = BigInt(this.u32(field)),
         size = BigInt(this.u32(field + 4n));
-      if (!rva && size) this.fail('Nonempty PE data directory has a null address', field);
-      if (rva && !size && i !== 8) this.fail('PE data directory address has no size', field);
-      this.directories.push({ index: i, rva, size, field });
       this.header('data_directory', DIRECTORY_NAMES[i] ?? `unknown_${i}`, field, 8n, [
         {
           kind: 'address',
@@ -556,9 +605,20 @@ class Parser extends Reader {
         },
         integer('Size', size),
       ]);
+      const validate = (): void => {
+        if (!rva && size) this.fail('Nonempty PE data directory has a null address', field);
+        if (rva && !size && i !== 8) this.fail('PE data directory address has no size', field);
+        if (size) {
+          if (i === 4) this.bounds(rva, size);
+          else this.file(rva, size);
+        }
+      };
+      // A directory whose body is not backed is ignored, except the CLR header: a managed
+      // image must never be analysed as native code.
+      if (i === 14) validate();
+      else if (!this.optional(`PE ${DIRECTORY_NAMES[i] ?? i} directory`, validate)) continue;
+      this.directories.push({ index: i, rva, size, field });
       if (size) {
-        if (i === 4) this.bounds(rva, size);
-        else this.file(rva, size);
         this.hints.push({
           kind: 'data',
           range: this.range(i === 4 ? 'file' : 'va', i === 4 ? rva : this.base + rva, size),
@@ -579,17 +639,18 @@ class Parser extends Reader {
         'Managed CLR image: native body analysis is not supported',
       );
     const entry = BigInt(this.u32(h.optional + 16n));
-    if (entry) {
-      const address = this.memory(entry, 1n, true);
-      this.file(entry, 1n);
-      this.entries.push(address);
-      this.hints.push({
-        kind: 'function',
-        address,
-        size: null,
-        evidence_ids: this.fact(h.optional + 16n, 4n, 'Native PE entry point'),
+    if (entry)
+      this.optional('PE entry point', () => {
+        const address = this.memory(entry, 1n, true);
+        this.file(entry, 1n);
+        this.entries.push(address);
+        this.hints.push({
+          kind: 'function',
+          address,
+          size: null,
+          evidence_ids: this.fact(h.optional + 16n, 4n, 'Native PE entry point'),
+        });
       });
-    }
     this.capabilities.push({
       layer: 'format',
       feature: 'pe32+ x86_64 native EXE/DLL',
@@ -1184,14 +1245,16 @@ class Parser extends Reader {
   load(sha256: string): LoadedImage {
     const h = this.basic();
     this.parseHeaders(h);
-    this.parseImports(false);
-    this.parseImports(true);
-    this.parseExports();
-    this.parseRelocations();
-    this.parseExceptions();
-    this.parseTls();
-    this.parseDebug();
-    this.parseSymbols(h);
+    // Every directory below only adds names, seeds or provenance: one that fails validation
+    // is dropped with a diagnostic instead of rejecting an image whose code maps cleanly.
+    this.optional('PE imports', () => this.parseImports(false));
+    this.optional('PE delay imports', () => this.parseImports(true));
+    this.optional('PE exports', () => this.parseExports());
+    this.optional('PE base relocations', () => this.parseRelocations());
+    this.optional('PE exception directory', () => this.parseExceptions());
+    this.optional('PE TLS directory', () => this.parseTls());
+    this.optional('PE debug directory', () => this.parseDebug());
+    this.optional('PE COFF symbols', () => this.parseSymbols(h));
     this.context.progress('PE metadata', 1, 1);
     return {
       id: this.image,

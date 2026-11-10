@@ -2308,7 +2308,13 @@ export class Renderer {
       if (this.statements.has(contributor.id)) this.mappedStatements.add(contributor.id);
       if (this.controls.has(contributor.id)) this.mappedControls.add(contributor.id);
     }
-    for (const site of this.inlineSites.get(origin.id) ?? []) {
+    this.mapInlineSites(origin.id, start, end);
+  }
+
+  /** Maps the loads, pure definitions and calls printed inline in the reader `anchor`'s
+   * span: each with its own origins. */
+  private mapInlineSites(anchor: string, start: number, end: number): void {
+    for (const site of this.inlineSites.get(anchor) ?? []) {
       if (site.origin) {
         this.mapped(this.dataOrigin(site.origin), start, [site.node.result.id], [], end);
         if (this.statements.has(site.origin)) this.mappedStatements.add(site.origin);
@@ -2317,7 +2323,7 @@ export class Renderer {
         this.mapMemory(site.node, start, end);
       }
     }
-    for (const site of this.inlinedCallSites.get(origin.id) ?? []) {
+    for (const site of this.inlinedCallSites.get(anchor) ?? []) {
       const proof = this.sourceEvidence.get(site.node.id);
       this.map(site.node, start, [], end);
       this.mapped(
@@ -9857,6 +9863,8 @@ export class Renderer {
         }`,
       );
       this.mapped(this.dataOrigin(anchor), start, [value.id]);
+      // A single-use load or expression read by this definition prints inside it.
+      this.mapInlineSites(value.id, start, this.writer.offset);
     }
   }
 
@@ -10876,6 +10884,48 @@ const FULL_RENDER_WORK = 330;
  * one, the text renders first, without provenance metadata (omitted with reason
  * `budget`): the text is the one the full render prints. */
 export function renderSource(
+  input: EmissionInput,
+  options: ConstructorParameters<typeof Renderer>[1],
+  context: OperationContext,
+  language: 'c-like' | 'python-like',
+  version: string,
+): EmissionResult {
+  if (options.view === 'checked') return renderView(input, options, context, language, version);
+  try {
+    return renderView(input, options, context, language, version);
+  } catch (error) {
+    // A source-view invariant that fails (a rewrite the validators reject, a statement the
+    // text does not map) costs the function its source presentation, not its text: the
+    // checked view prints every machine fact explicitly, and the result says why.
+    if (!sourceInvariantFailure(error)) throw error;
+    const checked = renderView(input, { ...options, view: 'checked' }, context, language, version);
+    return {
+      ...checked,
+      diagnostics: [
+        {
+          code: 'unavailable_semantics',
+          severity: 'warning',
+          message: `Source view unavailable, checked view printed: ${error.message}`.slice(0, 4096),
+          evidence_ids: [],
+        },
+        ...checked.diagnostics,
+      ],
+    };
+  }
+}
+
+/** An internal invariant of source reconstruction or rendering, never a budget,
+ * cancellation or input failure. */
+function sourceInvariantFailure(error: unknown): error is OperationError {
+  return (
+    error instanceof OperationError &&
+    ((error.code === 'unavailable_semantics' &&
+      error.message.startsWith('Reconstruction invariant failed')) ||
+      (error.code === 'invalid_input' && error.message.startsWith('Reconstructed coverage')))
+  );
+}
+
+function renderView(
   input: EmissionInput,
   options: ConstructorParameters<typeof Renderer>[1],
   context: OperationContext,

@@ -123,6 +123,11 @@ type PendingJob = {
   onProgress: ((job: WireJob) => void) | undefined;
 };
 
+/** Grace between a job's deadline and the host stopping its owner: a quarter of the
+ * deadline, between 1 and 10 seconds. */
+const deadlineGrace = (deadline: number): number =>
+  Math.min(10_000, Math.max(1_000, Math.floor(deadline / 4)));
+
 /** One persistent child per canonical project; idle owners count against max_workers.
  * Queue capacity is reserved before source authorization; no unbounded admission backlog.
  * Capacity exhaustion rejects immediately. Close an idle project to release its worker slot.
@@ -426,9 +431,15 @@ export class ProjectWorker {
         accepted = deferred<WireJob>(),
         outcome = deferred<JobOutcome>();
       const deadline = Date.now() + budgetSchema.parse(request.budget).deadline_ms;
-      const timer = setTimeout(() => {
-        void this.#interrupt(id, 'deadline').catch(() => {});
-      }, request.budget.deadline_ms);
+      // The job's own context stops it at `deadline` and fails it alone. Stopping the owner
+      // (every job in flight with it) is the backstop for a loop that cannot reach a
+      // checkpoint, so it waits a grace period past the deadline.
+      const timer = setTimeout(
+        () => {
+          void this.#interrupt(id, 'deadline').catch(() => {});
+        },
+        request.budget.deadline_ms + deadlineGrace(request.budget.deadline_ms),
+      );
       const onAbort = (): void => {
         void this.#interrupt(id, 'cancelled').catch(() => {});
       };

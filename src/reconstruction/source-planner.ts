@@ -1775,6 +1775,17 @@ export function planSource(
       });
     }
   }
+  // One exit's result does not type the function when another exit returns nothing or
+  // a value of another type.
+  if (
+    !functionSignature &&
+    returnType &&
+    [...returns.values()].some(
+      (boundary) =>
+        boundary.results.length !== 1 || !sameType(boundary.results[0]!.type, returnType!),
+    )
+  )
+    returnType = null;
   // Tails into proven-void callees contribute no result; the renderer declares
   // the function void only when no return path yields one either.
   if (!functionSignature && tails.size && [...tails.values()].every((tail) => tail.result_void))
@@ -1817,7 +1828,9 @@ export function planSource(
     if (
       first &&
       types.every((type) => type !== null && sameType(type, first)) &&
-      (!returnType || sameType(returnType, first)) &&
+      // Without an integer type every exit agrees on, an exit returns nothing (or
+      // something else): a tail's result type is not the function's.
+      (returnType ? sameType(returnType, first) : returns.size === 0) &&
       (!demandedType ||
         validation.presentation(
           'tail_result_width',

@@ -800,7 +800,8 @@ export async function executeDecompilation(
         context,
         types: semanticTypes.types,
         optional: [types.associations, types.signatures, types.shapes],
-        required: [uniqueDiagnostics, active.annotations, signature],
+        required: [active.annotations, signature],
+        diagnostics: uniqueDiagnostics,
         emission: emitted.emission,
       });
       // Every image global the function names is a data subject an LLM may annotate by the
@@ -844,7 +845,7 @@ export async function executeDecompilation(
         options: args.options,
         budget: args.budget,
         coverage,
-        diagnostics: uniqueDiagnostics.map(encodeDiagnostic),
+        diagnostics: bounded.diagnostics.map(encodeDiagnostic),
         evidence: args.options.include_evidence ? evidence.map(encodeEvidence) : [],
         artifacts: [],
       };

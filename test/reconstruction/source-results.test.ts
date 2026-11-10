@@ -1794,3 +1794,74 @@ for (const incidental of [true, false])
       assert.deepEqual(observed.values, incidental ? [] : [0x77n]);
     }
   });
+
+/** Darwin `g(p) { if (p == 1) return 7; if (!p) return; return h(p); }` as luaO_chunkid
+ * compiles: one exit writes x0, one leaves it untouched (no result), and a tail calls a callee
+ * whose interface returns x0. No single integer type is every exit's result, so the
+ * function has no inferred return type, and neither the written exit nor the tail's
+ * callee type the function (the source view used to fail its return invariant). */
+test('exits that disagree on a result give no inferred return type, even beside a typed tail', () => {
+  const abi = darwinArm64Abi;
+  const x0 = register(
+    abi.classifyCall({
+      returns: word,
+      parameters: [word],
+      variadic: false,
+      fixed_parameter_count: 1,
+    }).returns[0],
+  );
+  const b = builder('disagreeing-exits'),
+    entry = b.block('entry'),
+    second = b.block('second'),
+    literal = b.block('literal'),
+    plain = b.block('plain'),
+    tail = b.block('tail');
+  const p = entry.readRegister(x0);
+  entry.branch(
+    entry.compare('eq', p, entry.constant(u64, 1n)),
+    entry.edge(literal),
+    entry.edge(second),
+  );
+  const q = second.readRegister(x0);
+  second.branch(
+    second.compare('eq', q, second.constant(u64, 0n)),
+    second.edge(plain),
+    second.edge(tail),
+  );
+  literal.writeRegister(x0, literal.constant(u64, 7n));
+  literal.return([]);
+  plain.return([]);
+  tail.terminate({
+    kind: 'indirect',
+    target: tail.address({ image_id: image, space: 'va', value: 0x2000n }),
+    tail_call: true,
+    reason: 'Discovered tail-call exit',
+  });
+  const ir = constructSSA(b.finish(entry, [])).value as SSAForm;
+  const control = ir.blocks.find((block) => block.terminator.kind === 'indirect')!.terminator;
+  const source: SourceEvidence = {
+    abi,
+    addresses: [],
+    callees: [
+      {
+        call_id: control.id,
+        target: { image_id: image, space: 'va', value: 0x2000n },
+        parameters: [x0],
+        returns: [x0],
+        argument_list_complete: true,
+        evidence_ids: [],
+      },
+    ],
+  };
+  const program = reconstruct(
+    { function: structureControlFlow(ir, createOperationContext()).value!, source },
+    createOperationContext(),
+    'source',
+  );
+  assert.equal(program.source?.return_type ?? null, null);
+  for (const language of ['c-like', 'python-like'] as const) {
+    const { emission, diagnostics } = emit(ir, { source }, language);
+    assert.ok(emission.text.length > 0);
+    assert.ok(!diagnostics.some((item) => item.message.startsWith('Source view unavailable')));
+  }
+});
