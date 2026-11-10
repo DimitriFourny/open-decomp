@@ -16,6 +16,19 @@ import type { AnnotationSubject } from '../../project/annotations/index.js';
 const CATALOG_EVIDENCE_BOUND = 10000;
 /** Proofs one stored catalog type cites (`evidence_ids` of the cache catalog). */
 const TYPE_EVIDENCE_BOUND = 1000;
+/** Encoded size of the proofs one published catalog holds (`proofBytes`): half of the
+ * 16 MiB artifact bound, so a few thousand proofs of a thousand parents each (a body
+ * whose callee shapes reach many caller fields: `checkTreePage`, 16.7 MB of proofs)
+ * leave the text, subjects and types their room. */
+const CATALOG_EVIDENCE_BYTES = 8 * 1024 * 1024;
+
+/** A deterministic upper estimate of one proof's encoded size. */
+function proofBytes(proof: Evidence): number {
+  let bytes = 256 + proof.id.length + proof.claim.length;
+  for (const id of proof.derived_from) bytes += id.length + 4;
+  for (const id of proof.conflicts_with) bytes += id.length + 4;
+  return bytes;
+}
 
 /** A proof set past the catalog bound. A decompilation publishes its text without
  * the proof references that do not fit (`boundedEvidence`). */
@@ -126,8 +139,9 @@ export interface BoundedEvidence {
 }
 
 /** The proofs a decompilation publishes: the closure of everything it cites. When
- * that exceeds a catalog bound (more than `CATALOG_EVIDENCE_BOUND` proofs, or a type
- * citing more than `TYPE_EVIDENCE_BOUND`), the text is still published: the proofs
+ * that exceeds a catalog bound (more than `CATALOG_EVIDENCE_BOUND` proofs or
+ * `CATALOG_EVIDENCE_BYTES` of them, or a type citing more than `TYPE_EVIDENCE_BOUND`),
+ * the text is still published: the proofs
  * `required` cites (annotations, the signature) close first, then the emission's proof
  * table as a whole, then each diagnostic's (one that does not fit is published without
  * citations), then each type's citations and the `optional`
@@ -157,25 +171,26 @@ export function boundedEvidence(input: {
         context,
       );
       emissionEvidenceReferences(input.emission, context, ids);
-      return {
-        evidence: closeEvidence(store, revision, ids, available, context),
-        types,
-        emission: true,
-        diagnostics,
-        omitted: 0,
-      };
+      const evidence = closeEvidence(store, revision, ids, available, context);
+      let bytes = 0;
+      // Charged with the closure that visited each proof.
+      for (const proof of evidence) bytes += proofBytes(proof);
+      if (bytes <= CATALOG_EVIDENCE_BYTES)
+        return { evidence, types, emission: true, diagnostics, omitted: 0 };
     } catch (error) {
       if (!(error instanceof CatalogBoundError)) throw error;
     }
   const source = new Map(available.map((proof) => [proof.id, proof])),
     admitted = new Map<string, Evidence>();
-  let full = false;
+  let full = false,
+    admittedBytes = 0;
   // Closes `seeds` into the admitted proofs, all or nothing; after the first closure
   // that does not fit, nothing more is admitted.
   const admit = (seeds: Iterable<string>): boolean => {
     if (full) return false;
     const added = new Map<string, Evidence>(),
       pending = [...seeds];
+    let bytes = admittedBytes;
     for (let offset = 0; offset < pending.length; offset++) {
       context.checkpoint(1);
       const id = pending[offset]!;
@@ -186,11 +201,17 @@ export function boundedEvidence(input: {
       }
       const proof = source.get(id) ?? store.readEvidence([id], revision)[0];
       if (!proof || proof.revision > revision) unavailableProof(id);
+      bytes += proofBytes(proof);
+      if (bytes > CATALOG_EVIDENCE_BYTES) {
+        full = true;
+        return false;
+      }
       added.set(id, proof);
       context.checkpoint(proof.derived_from.length + proof.conflicts_with.length);
       pending.push(...proof.derived_from, ...proof.conflicts_with);
     }
     for (const [id, proof] of added) admitted.set(id, proof);
+    admittedBytes = bytes;
     return true;
   };
   if (!admit(evidenceReferences(input.required, context)))
