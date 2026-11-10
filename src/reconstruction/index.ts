@@ -8,6 +8,7 @@ import {
 import type { EmissionInput } from '../emitters/model.js';
 import {
   expressionOperands,
+  integer,
   type Instruction,
   type Origin,
   type RegisterBinding,
@@ -357,6 +358,11 @@ function reconstructView(
       expressions,
       context,
       language === 'c-like',
+      (bits, bits_, key) =>
+        sourcePlan.make(key, integer(bits), input.function.entry, {
+          kind: 'constant',
+          bits: bits_,
+        }),
     )) {
       if (
         !localValidation.presentation('division_trap', trap.block, DIVISION_TRAP_SCOPE, [

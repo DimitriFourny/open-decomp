@@ -29,7 +29,7 @@ export interface DivisionTrap {
 
 /** Presentation record scope of `division_trap`. */
 export const DIVISION_TRAP_SCOPE =
-  'x86 divide-error guards of a division whose double-width dividend is the sign (zero) extension of an N-bit value and whose divisor is the same extension of an N-bit value: they trap exactly when the divisor is zero or (signed) the dividend is the minimum and the divisor -1, the inputs on which the N-bit quotient and remainder operators of the dialect trap (C-like: signed only at N = 32 and 64, whose int32_t/int64_t operands are not promoted; Python-like: unsigned only), and otherwise the low halves of the wide quotient and remainder are the N-bit truncating quotient and remainder; the guards and trap blocks print nothing and the division prints as a statement where it is defined';
+  'x86 divide-error guards of a division whose double-width dividend is the sign (zero) extension of an N-bit value and whose divisor is the same extension of an N-bit value or a nonzero constant the N-bit type holds: they trap exactly when the divisor is zero or (signed) the dividend is the minimum and the divisor -1, the inputs on which the N-bit quotient and remainder operators of the dialect trap (C-like: signed only at N = 32 and 64, whose int32_t/int64_t operands are not promoted; Python-like: unsigned only), and otherwise the low halves of the wide quotient and remainder are the N-bit truncating quotient and remainder; the guards and trap blocks print nothing and the division prints as a statement where it is defined';
 
 type Division = Extract<Expression, { kind: 'integer' }> & {
   readonly op: 'sdiv' | 'udiv' | 'srem' | 'urem';
@@ -54,6 +54,8 @@ export function classifyDivisionTraps(
   expressions: ReadonlyMap<string, Expression>,
   context: OperationContext,
   signedTraps: boolean,
+  /** A `bits`-wide constant value (a narrowed constant divisor). */
+  literal: (bits: number, value: bigint, key: string) => Value,
 ): readonly DivisionTrap[] {
   const trapBlocks: BlockRegion[] = [];
   for (const block of blocks.values()) {
@@ -213,6 +215,44 @@ export function classifyDivisionTraps(
       );
     });
   };
+  /** Whether the zero-divisor guard is false for every dividend when the
+   * divisor is the constant `c` (nonzero): a formula of constants, `D == k`
+   * (decided by c) and `N == MIN` (false: N extends a narrower value). */
+  const never = (condition: Value, n: Value, d: Value, c: bigint, wide: number): boolean => {
+    const truth = (value: Value, depth: number): boolean | null => {
+      if (depth > 8) return null;
+      const known = constant(value);
+      if (known !== null) return known !== 0n;
+      const expression = definition(value);
+      if (expression?.kind === 'integer' && (expression.op === 'or' || expression.op === 'and')) {
+        const left = truth(expression.left, depth + 1),
+          right = truth(expression.right, depth + 1);
+        if (expression.op === 'or')
+          return left === true || right === true
+            ? true
+            : left === false && right === false
+              ? false
+              : null;
+        return left === false || right === false
+          ? false
+          : left === true && right === true
+            ? true
+            : null;
+      }
+      if (expression?.kind !== 'compare' || expression.op !== 'eq') return null;
+      for (const [x, y] of [
+        [expression.left, expression.right],
+        [expression.right, expression.left],
+      ] as const) {
+        const k = constant(y);
+        if (k === null) continue;
+        if (same(x, d)) return BigInt.asUintN(wide, c) === k;
+        if (same(x, n) && k === 1n << BigInt(wide - 1)) return false;
+      }
+      return null;
+    };
+    return truth(condition, 0) === false;
+  };
   /** The arm of an `if` into a trap block it alone enters, and the other arm. */
   const trapArm = (
     control: Control,
@@ -277,25 +317,51 @@ export function classifyDivisionTraps(
     if (![8, 16, 32, 64].includes(bits) || (signed && (!signedTraps || bits < 32))) continue;
     const n = division.left,
       d = division.right;
+    // A constant divisor (SCCP folded the extension) is the narrow constant
+    // it extends.
+    const divisor = constant(d),
+      narrowDivisor = divisor === null ? null : signed ? BigInt.asIntN(wide, divisor) : divisor;
+    if (
+      narrowDivisor !== null &&
+      (narrowDivisor === 0n ||
+        (signed
+          ? narrowDivisor < -(1n << BigInt(bits - 1)) || narrowDivisor >= 1n << BigInt(bits - 1)
+          : narrowDivisor >= 1n << BigInt(bits)))
+    )
+      continue;
     const a = dividend(n, bits, signed),
-      b = extended(d, bits, signed);
+      b =
+        narrowDivisor === null
+          ? extended(d, bits, signed)
+          : literal(bits, BigInt.asUintN(bits, narrowDivisor), `division-trap-divisor:${d.id}`);
     if (!a || !b) continue;
-    // The zero-divisor guard: the only edge into this block.
+    // The zero-divisor guard: the only edge into this block. A constant
+    // nonzero divisor may have folded it away (the block is then entered by a
+    // jump), or left a condition that is false for every dividend.
     const incoming = entries.get(block.id) ?? [];
     if (incoming.length !== 1 || incoming[0]!.copies.length !== 0) continue;
     const previous = sources.get(incoming[0]!)!;
     const zero = trapArm(previous.control);
     if (
-      !zero ||
-      previous.control.kind !== 'if' ||
-      zero.kept !== incoming[0] ||
-      zero.trap.id === overflow.trap.id ||
-      claimed.has(previous.id) ||
-      claimed.has(block.id)
+      claimed.has(block.id) ||
+      (zero &&
+        (previous.control.kind !== 'if' ||
+          zero.kept !== incoming[0] ||
+          zero.trap.id === overflow.trap.id ||
+          claimed.has(previous.id)))
     )
       continue;
+    if (!zero && narrowDivisor === null) continue;
     // The lifter branches to the trap on a true condition.
-    if (!zero.onTrue || !zeroGuard(previous.control.condition, n, d, signed)) continue;
+    if (
+      zero &&
+      previous.control.kind === 'if' &&
+      (!zero.onTrue ||
+        !(narrowDivisor === null
+          ? zeroGuard(previous.control.condition, n, d, signed)
+          : never(previous.control.condition, n, d, narrowDivisor, wide)))
+    )
+      continue;
     // Every read of the wide quotient and remainder: the overflow test and
     // low-half truncations in this block, nothing else (checked below).
     const remainderOp = signed ? 'srem' : 'urem';
@@ -384,14 +450,14 @@ export function classifyDivisionTraps(
       ...slices.map((item) => item.value.id),
     ]);
     if (!onlyReadBy(wideValues, allowed, blocks, expressions, context)) continue;
-    claimed.add(previous.id);
+    if (zero) claimed.add(previous.id);
     claimed.add(block.id);
     found.push({
       guards: new Map([
-        [previous.control.id, block.id],
+        ...(zero ? [[previous.control.id, block.id] as const] : []),
         [block.control.id, overflow.kept.target],
       ]),
-      omitted: new Set([zero.trap.id, overflow.trap.id]),
+      omitted: new Set([...(zero ? [zero.trap.id] : []), overflow.trap.id]),
       block: block.id,
       results,
       slices,

@@ -221,3 +221,27 @@ test('division trap: bytes of the test sequences decode as documented', () => {
   );
   assert.ok(ops.includes('sdiv') && ops.includes('srem'));
 });
+
+test('division trap: a constant divisor (folded extension) narrows to the constant', () => {
+  // mov eax, ecx; mov r8d, 12; cdq; idiv r8d; mov [r9], eax; mov [r9+4], edx; ret
+  // mov rax, rcx; mov r8, -1; cqo; idiv r8; mov [r9], rax; mov [r9+8], rdx; ret
+  for (const [hex, bits, divisor] of [
+    ['89c841b80c0000009941f7f841890141895104c3', 32, 12n],
+    ['4889c849c7c0ffffffff489949f7f849890149895108c3', 64, -1n],
+  ] as const) {
+    const { ir, emission } = emitted(hex, 'c-like');
+    assert.ok(!emission.text.includes('trap_exit'), emission.text);
+    const bytes = bits / 8,
+      mask = (1n << BigInt(bits)) - 1n,
+      minimum = -(1n << BigInt(bits - 1));
+    for (const a of edges(bits)) {
+      const x = BigInt.asIntN(bits, a);
+      const observed = run(ir, emission, a, 0n);
+      const trap = x === minimum && divisor === -1n;
+      assert.equal(observed.trap, trap, `${x} / ${divisor}\n${emission.text}`);
+      if (trap) continue;
+      assert.equal(word(observed.memory, 0x2000n, bytes), (x / divisor) & mask);
+      assert.equal(word(observed.memory, 0x2000n + BigInt(bytes), bytes), (x % divisor) & mask);
+    }
+  }
+});

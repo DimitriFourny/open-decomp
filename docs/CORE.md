@@ -1236,6 +1236,8 @@ paths in the checked view; in the source view (`division_trap`,
 `src/reconstruction/source-division-traps.ts`) a division whose double-width dividend
 is the sign (signed) or zero (unsigned) extension of an N-bit value `a` (high half
 `a >> (N-1)` arithmetic, or zero) and whose divisor is the same extension of `b`
+(or a nonzero constant the N-bit type holds, whose zero-divisor guard folded away or is
+false for every dividend)
 traps exactly when `b == 0` or, signed, `a == MIN && b == -1` (the extension is never
 the double-width minimum, and |a / b| <= |a| fits N bits otherwise), and the low
 halves of its quotient and remainder are the N-bit truncating `a / b` and `a % b`.
