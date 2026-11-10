@@ -44,6 +44,7 @@ import {
 import { normalizeSourceRanges } from './source-ranges.js';
 import { constantRotationOperands } from './source-shifts.js';
 import { projectLikelyTypes } from './source-likely.js';
+import { STACK_PROTECTOR_PREMISE } from './source-protector.js';
 import { projectSourceTypes } from './source-types.js';
 import {
   permitsVoidSourceSignature,
@@ -859,6 +860,9 @@ function reconstructView(
     node: Extract<Instruction, { kind: 'load' }>;
     block: string;
     table: boolean;
+    protector?: true;
+    /** The load of a hidden write-back (`frame_write_back`). */
+    writeBack?: true;
   }[] = [];
   // Source view: reads of proven jump-table bytes in their switch block are in
   // bounds under the dominating guard, immutable and relocation-free.
@@ -874,51 +878,49 @@ function reconstructView(
         )
           tableLoads.add(node.id);
     }
-  for (const block of blocks.values()) {
-    for (const node of block.statements) {
-      context.checkpoint(1);
-      if (
-        node.kind === 'assign' ||
-        constantLoads.has(node.id) ||
-        sourceStack?.hidden.has(node.id) ||
-        argumentStores.has(node.id) ||
-        (node.kind === 'load' && sourceStack?.returnAddressLoads.has(node.result.id))
-      )
-        continue;
-      if (node.kind === 'load' && sourceStack?.deadReloadCandidates.has(node.id)) {
-        deferredReloads.push({ node, block: block.id, table: false });
-        continue;
-      }
-      if (node.kind === 'load' && tableLoads.has(node.id)) {
-        deferredReloads.push({ node, block: block.id, table: true });
-        continue;
-      }
-      retained.add(node.id);
-      const operands: Value[] = [];
-      if (node.kind === 'write_register') operands.push(node.value);
-      if (node.kind === 'load' || node.kind === 'store') {
-        if (!sourceStack?.locals.has(node.id)) operands.push(node.address);
-        if (node.kind === 'store') operands.push(node.value);
-      }
-      if (node.kind === 'call') {
-        const projection = calls.get(node.id)!;
-        operands.push(
-          ...projection.arguments,
-          ...projection.inputs.map((binding) => binding.value),
-        );
-        if (node.target.kind === 'indirect') operands.push(node.target.value);
-      } else if ('register_inputs' in node)
-        operands.push(...(physical_inputs.get(node.id) ?? []).map((binding) => binding.value));
-      roots.set(node.id, operands);
-      for (const value of operands) use(value, block.id);
-      semanticRoots.push(...operands);
+  // Source view: stack-protector canaries (`classifyStackProtector`). Their
+  // store, checks and failure blocks are no roots; their loads are dropped
+  // when dead. A live load restores the whole protector below.
+  let protector = sourceStack?.protector ?? [];
+  if (
+    protector.length &&
+    !localValidation.presentation(
+      'stack_protector',
+      input.function.id,
+      'stack-protector canary: a frame slot whose only store writes a load of the guard word and dominates every other access, each other access an exact reload checked for equality with a second load of the same guard address, the unequal arm a block entered only from its check that calls the established noreturn __stack_chk_fail after nothing observable, and every block after it entered only from such blocks; no other access overlaps the slot, no escaped base designates it and no frame address of unknown offset exists; the store, the checks and the failure paths print nothing, the loads only when dead',
+      protector.flatMap((item) => [item.store, ...item.guards.keys()]).slice(0, 64),
+    )
+  )
+    protector = [];
+  const protectorStores = new Set(protector.map((item) => item.store)),
+    protectorLoads = new Set(protector.flatMap((item) => [...item.loads])),
+    protectorGuards = new Map(protector.flatMap((item) => [...item.guards])),
+    protectorOmitted = new Set(protector.flatMap((item) => [...item.omitted]));
+  const retain = (node: Instruction, block: string): void => {
+    retained.add(node.id);
+    const operands: Value[] = [];
+    if (node.kind === 'write_register') operands.push(node.value);
+    if (node.kind === 'load' || node.kind === 'store') {
+      if (!sourceStack?.locals.has(node.id)) operands.push(node.address);
+      if (node.kind === 'store') operands.push(node.value);
     }
+    if (node.kind === 'call') {
+      const projection = calls.get(node.id)!;
+      operands.push(...projection.arguments, ...projection.inputs.map((binding) => binding.value));
+      if (node.target.kind === 'indirect') operands.push(node.target.value);
+    } else if ('register_inputs' in node)
+      operands.push(...(physical_inputs.get(node.id) ?? []).map((binding) => binding.value));
+    roots.set(node.id, operands);
+    for (const value of operands) use(value, block);
+    semanticRoots.push(...operands);
+  };
+  const rootControl = (block: BlockRegion, guarded: boolean): void => {
     const control = block.control,
       operands: Value[] = [];
     // Source view (S7): the dropped `al` guard of a SysV va_start prints nothing.
     if (control.kind === 'if') {
       const variadic = sourceStack?.variadic;
-      if (variadic?.kind !== 'va_list' || variadic.guard !== control.id)
+      if ((variadic?.kind !== 'va_list' || variadic.guard !== control.id) && !guarded)
         operands.push(control.condition);
     } else if (control.kind === 'switch') operands.push(control.value);
     else if (control.kind === 'indirect') operands.push(control.target);
@@ -936,6 +938,42 @@ function reconstructView(
     roots.set(control.id, operands);
     for (const value of operands) use(value, block.id);
     semanticRoots.push(...operands.slice(0, operands.length - overlay.length));
+  };
+  for (const block of blocks.values()) {
+    if (protectorOmitted.has(block.id)) {
+      roots.set(block.control.id, []);
+      continue;
+    }
+    for (const node of block.statements) {
+      context.checkpoint(1);
+      if (
+        node.kind === 'assign' ||
+        constantLoads.has(node.id) ||
+        sourceStack?.hidden.has(node.id) ||
+        argumentStores.has(node.id) ||
+        protectorStores.has(node.id) ||
+        (node.kind === 'load' && sourceStack?.returnAddressLoads.has(node.result.id))
+      )
+        continue;
+      if (node.kind === 'load' && protectorLoads.has(node.id)) {
+        deferredReloads.push({ node, block: block.id, table: false, protector: true });
+        continue;
+      }
+      if (node.kind === 'load' && sourceStack?.writeBackLoads.has(node.id)) {
+        deferredReloads.push({ node, block: block.id, table: false, writeBack: true });
+        continue;
+      }
+      if (node.kind === 'load' && sourceStack?.deadReloadCandidates.has(node.id)) {
+        deferredReloads.push({ node, block: block.id, table: false });
+        continue;
+      }
+      if (node.kind === 'load' && tableLoads.has(node.id)) {
+        deferredReloads.push({ node, block: block.id, table: true });
+        continue;
+      }
+      retain(node, block.id);
+    }
+    rootControl(block, protectorGuards.has(block.control.id));
   }
   // Incoming phi sources are demanded only when their destination is live.
   const incomingUses = new Map<string, { source: Value; block: string }[]>();
@@ -975,6 +1013,34 @@ function reconstructView(
   propagate();
   // Source view: a dead non-volatile frame load dominated by a store covering
   // its bytes cannot fault, so it is dropped; a live one is retained as usual.
+  // A live stack-protector load restores the whole protector: its store, its
+  // checks and failure blocks print again.
+  let protectorKept = protector.length > 0;
+  const restoreProtector = (): void => {
+    protectorKept = false;
+    for (const block of blocks.values()) {
+      context.checkpoint(1);
+      const omitted = protectorOmitted.has(block.id);
+      for (const node of block.statements)
+        if (
+          protectorStores.has(node.id) ||
+          (omitted &&
+            node.kind !== 'assign' &&
+            !constantLoads.has(node.id) &&
+            !sourceStack?.hidden.has(node.id) &&
+            !argumentStores.has(node.id))
+        )
+          retain(node, block.id);
+      if (omitted) {
+        roots.delete(block.control.id);
+        rootControl(block, false);
+      } else if (protectorGuards.has(block.control.id) && block.control.kind === 'if') {
+        roots.get(block.control.id)!.push(block.control.condition);
+        use(block.control.condition, block.id);
+        semanticRoots.push(block.control.condition);
+      }
+    }
+  };
   if (deferredReloads.length) {
     const restore = ({ node, block }: (typeof deferredReloads)[number]): void => {
       retained.add(node.id);
@@ -986,7 +1052,11 @@ function reconstructView(
     let pending = deferredReloads;
     for (let changed = true; changed;) {
       context.checkpoint(pending.length);
-      const live_ = pending.filter((item) => live.has(item.node.result.id));
+      let live_ = pending.filter((item) => live.has(item.node.result.id));
+      if (protectorKept && live_.some((item) => item.protector)) {
+        restoreProtector();
+        live_ = pending.filter((item) => item.protector || live.has(item.node.result.id));
+      }
       changed = live_.length > 0;
       live_.forEach(restore);
       pending = pending.filter(
@@ -994,7 +1064,7 @@ function reconstructView(
       );
       propagate();
     }
-    const frame = pending.filter((item) => !item.table),
+    const frame = pending.filter((item) => !item.table && !item.protector && !item.writeBack),
       table = pending.filter((item) => item.table);
     if (
       frame.length &&
@@ -1021,6 +1091,12 @@ function reconstructView(
       propagate();
     }
   }
+  if (protectorKept)
+    localValidation.requireAbi(
+      'stack_protector',
+      protector.flatMap((item) => [item.store, ...item.guards.keys()]).slice(0, 64),
+      STACK_PROTECTOR_PREMISE,
+    );
   // An uncertain return overlay preserves machine state; reaching an ABI input
   // register only through it is not evidence that the register is a source input.
   if (sourcePlan && overlayOutputs.length) {
@@ -1356,6 +1432,15 @@ function reconstructView(
           stack_addresses: sourceStack.addresses,
           forwarded_reloads: sourceStack.forwardedReloads,
           ...(view === 'source' ? { frame_saves: sourceStack.saves } : {}),
+          ...(protectorKept
+            ? {
+                stack_protector: {
+                  guards: protectorGuards,
+                  omitted: protectorOmitted,
+                  offsets: protector.map((item) => item.offset),
+                },
+              }
+            : {}),
           ...(sourceStack.variadic ? { variadic: sourceStack.variadic } : {}),
         }
       : undefined;
