@@ -41,6 +41,7 @@ import { planSourceRequirements } from './source-requirements.js';
 import { possibleAbiReturnStorage } from '../analysis/calls/return-storage.js';
 import { LocalValidationSession } from './local-validation.js';
 import { selectSourcePrimaryResult, type SourcePrimaryResult } from './source-results.js';
+import { preservedCallOutputs } from '../analysis/calls/preserved.js';
 import { createVariadicCallBinder } from './source-variadic.js';
 
 /** Source ABI abstraction: architectural snapshots are retained in the input,
@@ -408,6 +409,34 @@ export function planSource(
     return { arguments: bound.arguments, missing: false };
   };
   const inferred = new Map(evidence.callees.map((callee) => [callee.call_id, callee]));
+  // Source view: an unprojected general-register output of a call is the value the
+  // cell held before the call when the callee's complete summary proves that no
+  // returning path writes any of its bits (`InferredCallee.written_registers`, the
+  // native dependency record; a source-only interface carries no such set).
+  const writtenByCall = new Map(
+    evidence.callees.flatMap((callee) =>
+      callee.written_registers ? [[callee.call_id, callee.written_registers] as const] : [],
+    ),
+  );
+  const preserveThroughCall = (node: Extract<Instruction, { kind: 'call' }>): void => {
+    const written = writtenByCall.get(node.id);
+    if (!written) return;
+    context.checkpoint(node.register_outputs.length);
+    const preserved = preservedCallOutputs(node, written).filter(
+      ([value]) => !expressions.has(value.id),
+    );
+    if (
+      preserved.length &&
+      validation.presentation(
+        'callee_preserved_register',
+        node.id,
+        'a call output cell that the established callee (a single direct target) leaves unwritten on every returning path, by its complete native body and the written-register sets of everything it calls or tail-calls, is the value the cell held before the call',
+        [node.id],
+      )
+    )
+      for (const [value, input] of preserved)
+        alias(value, { kind: 'cast', op: 'bitcast', value: input });
+  };
   if (view === 'source')
     for (const callee of evidence.source_callees ?? []) inferred.set(callee.call_id, callee);
   const facts = new Map(input.types?.calls?.calls.map((fact) => [fact.node_id, fact]) ?? []);
@@ -734,6 +763,7 @@ export function planSource(
       };
       calls.set(node.id, projection);
       callResults.set(node.id, projection.results);
+      if (view === 'source') preserveThroughCall(node);
     }
   for (const block of blocks.values()) {
     const control = block.control,

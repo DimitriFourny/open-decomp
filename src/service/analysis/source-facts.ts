@@ -143,6 +143,7 @@ import { nativeLibraryTails } from './native-library-tails.js';
 import { objcSourceFacts } from './objc-messages.js';
 import { calleeReadsGuess, likelyArities } from './likely-arity.js';
 import { nativeVariadicInterface } from './native-variadic.js';
+import { nativeWrittenRegisters } from './native-written.js';
 import { likelyTypes } from './likely-types.js';
 import { namingAnnotations } from '../../project/annotations/naming.js';
 
@@ -1949,6 +1950,12 @@ function observeNativeUnit(
         : {}),
     };
   }
+  // What the body may leave changed for its callers, closed over its callees'
+  // sets; a truncated body has none.
+  const written = unit.budget_truncated
+    ? undefined
+    : nativeWrittenRegisters(unit.ir, interfaces, context, unit.interface_index);
+  if (written) observed = { ...observed, written_registers: written };
   if (unit.budget_truncated) {
     const { argument_list_closure: _closure, ...truncated } = observed;
     observed = {
@@ -2480,8 +2487,10 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
         abi,
         context,
       );
-      // Unfinished worklists never close an argument list.
+      // Unfinished worklists never close an argument list, and a cut call keeps
+      // its whole ABI clobber set.
       const {
+        written_registers: _writtenRegisters,
         parameter_shapes: _shapes,
         written_result: _written,
         argument_list_closure: _closure,

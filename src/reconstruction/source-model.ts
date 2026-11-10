@@ -9,6 +9,7 @@ import type {
 } from '../core/index.js';
 import type { DataType, Instruction, RegisterBinding, Value } from '../ir/index.js';
 import type { MemoryShapeTransfer } from '../analysis/types/memory-shapes.js';
+import type { RegisterSlice } from '../analysis/calls/preserved.js';
 import type { SuppliedTypeRecord } from '../analysis/types/model.js';
 import type { LikelyHeuristic, Requirement } from '../core/inference.js';
 import type { NativeContext } from '../service/analysis/native-context.js';
@@ -115,6 +116,11 @@ export interface InferredCallee {
    * path to a return or tail exit (an explicit write, an opaque effect, a writer
    * import or a writer callee). Its caller keeps its environment guards. */
   readonly fp_environment_writer?: true;
+  /** Register bits the callee may leave changed on some returning path, closed over
+   * everything it calls or tail-calls (`nativeWrittenRegisters`): its complete body
+   * and its callees' sets prove every other bit unchanged. Absent: unknown, the call
+   * clobbers its whole ABI set. Flags are never listed and never refined. */
+  readonly written_registers?: readonly RegisterSlice[];
   readonly evidence_ids: readonly string[];
 }
 export interface SourceAddress {
