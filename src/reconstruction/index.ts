@@ -859,6 +859,8 @@ function reconstructView(
     node: Extract<Instruction, { kind: 'load' }>;
     block: string;
     table: boolean;
+    /** The load of a hidden write-back (`frame_write_back`). */
+    writeBack?: true;
   }[] = [];
   // Source view: reads of proven jump-table bytes in their switch block are in
   // bounds under the dominating guard, immutable and relocation-free.
@@ -885,6 +887,10 @@ function reconstructView(
         (node.kind === 'load' && sourceStack?.returnAddressLoads.has(node.result.id))
       )
         continue;
+      if (node.kind === 'load' && sourceStack?.writeBackLoads.has(node.id)) {
+        deferredReloads.push({ node, block: block.id, table: false, writeBack: true });
+        continue;
+      }
       if (node.kind === 'load' && sourceStack?.deadReloadCandidates.has(node.id)) {
         deferredReloads.push({ node, block: block.id, table: false });
         continue;
@@ -994,7 +1000,7 @@ function reconstructView(
       );
       propagate();
     }
-    const frame = pending.filter((item) => !item.table),
+    const frame = pending.filter((item) => !item.table && !item.writeBack),
       table = pending.filter((item) => item.table);
     if (
       frame.length &&
