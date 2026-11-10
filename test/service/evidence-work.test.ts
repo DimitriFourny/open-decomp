@@ -12,6 +12,7 @@ import { integer } from '../../src/ir/index.js';
 import type { Expression, Value } from '../../src/ir/index.js';
 import {
   boundedEvidence,
+  boundedSubjects,
   emissionEvidenceReferences,
   evidenceReferences,
 } from '../../src/service/analysis/catalog.js';
@@ -284,4 +285,41 @@ test('proofs past the catalog byte bound are omitted and counted, not failed', (
   for (const record of bounded.types)
     for (const id of record.evidence_ids) assert.ok(published.has(id));
   assert.deepEqual(boundedEvidence({ ...input, context: createOperationContext() }), bounded);
+});
+
+test('value subjects past the catalog subject bound are omitted and counted; others stay', () => {
+  const subject = (kind: 'value' | 'call' | 'function', index: number) => ({
+    id: entityIdentity(slice, kind, `subject-${index}`),
+    kind,
+    image_id: image,
+    slice_id: slice,
+    abi: 'sysv-amd64' as const,
+  });
+  const small = [subject('function', 0), subject('value', 1), subject('call', 2)];
+  assert.deepEqual(boundedSubjects(small, createOperationContext()), {
+    subjects: small,
+    omitted: 0,
+  });
+  // 30,000 values (with calls among them): past the 3 MiB the stored form allows.
+  const many = Array.from({ length: 30_000 }, (_, index) =>
+    subject(index % 100 === 99 ? 'call' : 'value', index),
+  );
+  const bounded = boundedSubjects(many, createOperationContext());
+  assert.ok(bounded.omitted > 0);
+  assert.equal(bounded.subjects.length + bounded.omitted, many.length);
+  // Every call stays; the kept values are a prefix of the values, in order.
+  const calls = many.filter((item) => item.kind === 'call');
+  assert.deepEqual(
+    bounded.subjects.filter((item) => item.kind === 'call'),
+    calls,
+  );
+  const values = many.filter((item) => item.kind === 'value');
+  const kept = bounded.subjects.filter((item) => item.kind === 'value');
+  assert.deepEqual(kept, values.slice(0, kept.length));
+  assert.equal(values.length - kept.length, bounded.omitted);
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(bounded.subjects)) <= 3 * 1024 * 1024,
+    'the kept subjects fit the bound in their stored form',
+  );
+  assert.deepEqual(boundedSubjects(many, createOperationContext()), bounded);
 });

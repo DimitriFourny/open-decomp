@@ -15,6 +15,7 @@ import {
   type CanonicalValue,
   type DecodedInstruction,
   type Diagnostic,
+  type EmissionOmission,
   type LoadedImage,
   type OperationContext,
   type ProjectStore,
@@ -67,7 +68,7 @@ import {
   nativeCallIndex,
   resolveCalls,
 } from './calls.js';
-import { boundedEvidence, semanticCatalog } from './catalog.js';
+import { boundedEvidence, boundedSubjects, semanticCatalog } from './catalog.js';
 import { pipelineComponents, pipelineVersions } from './versions.js';
 import { reviewedSourceLookup } from './reviewed-source.js';
 import { boundIR, requirePass } from './passes.js';
@@ -819,23 +820,38 @@ export async function executeDecompilation(
           address: item.object.address,
         });
       }
-      const catalog = {
-        ...semanticTypes,
-        subjects: [...semanticTypes.subjects, ...dataSubjects.values()],
-        types: bounded.types,
-      };
+      const subjects = boundedSubjects(
+        [...semanticTypes.subjects, ...dataSubjects.values()],
+        context,
+      );
+      const catalog = { ...semanticTypes, subjects: subjects.subjects, types: bounded.types };
       const evidence = bounded.evidence;
       const encoded = encodeEmission(emitted.emission);
       const shed = bounded.emission
         ? encoded
         : shedEmissionMetadata(encoded, ['inferences', 'mappings', 'requirements']);
-      const emission = bounded.omitted
-        ? {
-            ...shed,
-            omitted: mergeOmissions(shed.omitted, [
-              { kind: 'evidence', reason: 'output_limit', omitted: bounded.omitted },
-            ]),
-          }
+      const omissions: EmissionOmission[] = [
+        ...(bounded.omitted
+          ? [
+              {
+                kind: 'evidence' as const,
+                reason: 'output_limit' as const,
+                omitted: bounded.omitted,
+              },
+            ]
+          : []),
+        ...(subjects.omitted
+          ? [
+              {
+                kind: 'subjects' as const,
+                reason: 'output_limit' as const,
+                omitted: subjects.omitted,
+              },
+            ]
+          : []),
+      ];
+      const emission = omissions.length
+        ? { ...shed, omitted: mergeOmissions(shed.omitted, omissions) }
         : shed;
       const metadata: ResultMetadata = {
         schema_version: SCHEMA_VERSION,

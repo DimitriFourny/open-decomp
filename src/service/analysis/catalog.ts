@@ -246,6 +246,45 @@ export function boundedEvidence(input: {
   };
 }
 
+/** Encoded size of the subjects one published catalog lists: about 12,000 value subjects
+ * (each repeats its image, slice and ABI in the stored form clients read). */
+const CATALOG_SUBJECT_BYTES = 3 * 1024 * 1024;
+
+/** The annotation subjects a decompilation publishes. Past `CATALOG_SUBJECT_BYTES`
+ * (`sqlite3_str_vappendf`: 41,000 SSA values, 10.4 MB, with the 8 MiB of proofs its
+ * artifact exceeded 16 MiB), SSA value subjects are left out from the first that does
+ * not fit, in catalog order, and counted; every other subject (the function, calls,
+ * fields, types, stack slots, data) stays. An omitted value cannot be annotated by its
+ * entity id. A function of the subjects alone. */
+export function boundedSubjects(
+  subjects: readonly AnnotationSubject[],
+  context: OperationContext,
+): { readonly subjects: readonly AnnotationSubject[]; readonly omitted: number } {
+  // The stored JSON form: field names and punctuation, then each value (an address
+  // takes less than the margin).
+  const size = (subject: AnnotationSubject): number =>
+    96 +
+    subject.id.length +
+    subject.kind.length +
+    subject.image_id.length +
+    subject.slice_id.length +
+    subject.abi.length;
+  let bytes = 0;
+  for (const subject of subjects) bytes += size(subject);
+  if (bytes <= CATALOG_SUBJECT_BYTES) return { subjects, omitted: 0 };
+  context.checkpoint(subjects.length);
+  for (const subject of subjects) if (subject.kind === 'value') bytes -= size(subject);
+  const kept: AnnotationSubject[] = [];
+  let omitted = 0;
+  for (const subject of subjects)
+    if (subject.kind !== 'value') kept.push(subject);
+    else if (!omitted && bytes + size(subject) <= CATALOG_SUBJECT_BYTES) {
+      bytes += size(subject);
+      kept.push(subject);
+    } else omitted++;
+  return { subjects: kept, omitted };
+}
+
 export function semanticCatalog(
   image: LoadedImage,
   ir: SSAForm,
