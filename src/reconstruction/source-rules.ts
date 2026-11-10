@@ -275,7 +275,7 @@ const checkedScaledSum: ExpressionRule = {
 const strengthReducedMultiply: ExpressionRule = {
   name: 'strength_reduced_multiply',
   scope:
-    'x + (x << k), x + x*c, (x << k) - x and x*c - x over one SSA value x of the result width are x*(2^k + 1), x*(c + 1), x*(2^k - 1) and x*(c - 1): distributivity modulo 2^width, so the printed width-bit product equals the sum or difference; both operands are the identical value x (no operand is duplicated or dropped), and the folded constant must lie in [2, 2^(width-1)) so it reads as a multiplier',
+    'x + x, x + (x << k), x + x*c, (x << k) - x and x*c - x over one SSA value x of the result width are x*2, x*(2^k + 1), x*(c + 1), x*(2^k - 1) and x*(c - 1): distributivity modulo 2^width, so the printed width-bit product equals the sum or difference; both operands are the identical value x (no operand is duplicated or dropped), and the folded constant must lie in [2, 2^(width-1)) so it reads as a multiplier',
   proof: 'own',
   views: ['source'],
   apply(site) {
@@ -286,6 +286,8 @@ const strengthReducedMultiply: ExpressionRule = {
     if (expression.op === 'add') {
       const sum = selfScaledSum(site, expression);
       if (sum) matched = { value: sum.value, coefficient: sum.coefficient + 1n };
+      else if (expression.left.id === expression.right.id)
+        matched = { value: expression.left, coefficient: 2n };
     } else if (expression.op === 'sub') {
       const product = site.observe(expression.left.id);
       const minuend =
@@ -305,6 +307,321 @@ const strengthReducedMultiply: ExpressionRule = {
           right: site.literal(value.type, coefficient, `integer-factor:${value.id}`),
         }
       : null;
+  },
+};
+
+/** (x*c1)*c2, (x*c1) << k and (x << k)*c of one value are x times the product of
+ * the constants: multiplication modulo 2^width is associative and x << k is
+ * x * 2^k. Only an operand that is itself a product folds, and the folded
+ * constant must read as a multiplier. */
+const constantProduct: ExpressionRule = {
+  name: 'constant_product',
+  scope:
+    '(x*c1)*c2, (x*c1) << k and (x << k)*c of one SSA value x at the result width are x*(c1*c2), x*(c1*2^k) and x*(2^k*c) modulo 2^width (associativity of modular multiplication; x << k is x*2^k for k < width); one operand is a constant-scaled product of x, and the folded constant lies in [2, 2^(width-1))',
+  proof: 'own',
+  views: ['source'],
+  apply(site) {
+    const { value, expression } = site;
+    if (
+      expression.kind !== 'integer' ||
+      value.type.kind !== 'integer' ||
+      (expression.op !== 'mul' && expression.op !== 'shl') ||
+      site.packingShifts.has(value.id)
+    )
+      return null;
+    const width = value.type.bits;
+    const constant =
+      expression.op === 'shl'
+        ? (() => {
+            const count = site.constant(expression.right);
+            return count === null || count >= BigInt(width) ? null : 1n << count;
+          })()
+        : site.constant(expression.right);
+    if (constant === null) return null;
+    const inner = site.observe(site.resolve(expression.left).id);
+    if (
+      inner?.kind !== 'integer' ||
+      (inner.op !== 'mul' && inner.op !== 'shl') ||
+      site.packingShifts.has(site.resolve(expression.left).id) ||
+      (expression.op === 'shl' && inner.op === 'shl')
+    )
+      return null;
+    const product = scaled(site, expression.left);
+    if (!product || bitWidth(product.value.type) !== width) return null;
+    const coefficient = BigInt.asUintN(width, product.coefficient * constant);
+    return multiplier(product.value, coefficient, width)
+      ? {
+          kind: 'integer',
+          op: 'mul',
+          left: product.value,
+          right: site.literal(value.type, coefficient, `integer-factor:${value.id}`),
+        }
+      : null;
+  },
+};
+
+/** (x & c1) & c2 is x & (c1 & c2): conjunction is associative. */
+const combinedMask: ExpressionRule = {
+  name: 'combined_mask',
+  scope:
+    '(x & c1) & c2 for constants c1, c2 at one width is x & (c1 & c2): bitwise conjunction is associative and commutative',
+  proof: 'own',
+  views: ['source'],
+  apply(site) {
+    const { value, expression } = site;
+    if (expression.kind !== 'integer' || expression.op !== 'and' || value.type.kind !== 'integer')
+      return null;
+    const outer = site.constant(expression.right);
+    if (outer === null) return null;
+    const inner = site.observe(site.resolve(expression.left).id);
+    if (inner?.kind !== 'integer' || inner.op !== 'and') return null;
+    const [masked, mask] =
+      site.constant(inner.right) !== null
+        ? [inner.left, site.constant(inner.right)!]
+        : site.constant(inner.left) !== null
+          ? [inner.right, site.constant(inner.left)!]
+          : [null, null];
+    if (!masked || mask === null || site.constant(masked) !== null) return null;
+    return {
+      kind: 'integer',
+      op: 'and',
+      left: masked,
+      right: site.literal(value.type, outer & mask, `combined-mask:${value.id}`),
+    };
+  },
+};
+
+/** Whether `part` provably equals the low `bits` bits of `whole`: a low slice
+ * of it, the same constant modulo 2^bits, or the same add/sub/mul/and/or/xor
+ * (or shift left by a constant below `bits`) of operands that are themselves
+ * the low bits of the whole operation's operands (carries and partial products
+ * only move upward), through extensions of a value at least `bits` wide. */
+function lowBitsOf(site: RuleSite, part: Value, whole: Value, bits: number, depth = 0): boolean {
+  site.context.checkpoint(1);
+  part = site.resolve(part);
+  whole = site.resolve(whole);
+  if (bitWidth(part.type) < bits || bitWidth(whole.type) < bits) return false;
+  if (part.id === whole.id) return true;
+  if (depth > 8) return false;
+  const constant = site.constant(part);
+  if (constant !== null) {
+    const other = site.constant(whole);
+    return other !== null && BigInt.asUintN(bits, constant) === BigInt.asUintN(bits, other);
+  }
+  const p = site.observe(part.id),
+    w = site.observe(whole.id);
+  if (
+    p &&
+    ((p.kind === 'extract' && p.offset === 0) || (p.kind === 'cast' && p.op === 'truncate')) &&
+    bitWidth(part.type) >= bits &&
+    lowBitsOf(site, p.value, whole, bits, depth + 1)
+  )
+    return true;
+  if (
+    w &&
+    ((w.kind === 'cast' && ['zero_extend', 'sign_extend', 'truncate'].includes(w.op)) ||
+      (w.kind === 'extract' && w.offset === 0)) &&
+    bitWidth(w.value.type) >= bits
+  )
+    return lowBitsOf(site, part, w.value, bits, depth + 1);
+  if (
+    p?.kind !== 'integer' ||
+    w?.kind !== 'integer' ||
+    p.op !== w.op ||
+    bitWidth(part.type) < bits ||
+    bitWidth(whole.type) < bits
+  )
+    return false;
+  if (['add', 'sub', 'mul', 'and', 'or', 'xor'].includes(p.op))
+    return (
+      lowBitsOf(site, p.left, w.left, bits, depth + 1) &&
+      lowBitsOf(site, p.right, w.right, bits, depth + 1)
+    );
+  if (p.op === 'shl') {
+    const count = site.constant(p.right);
+    return (
+      count !== null &&
+      count < BigInt(bits) &&
+      site.constant(w.right) === count &&
+      lowBitsOf(site, p.left, w.left, bits, depth + 1)
+    );
+  }
+  return false;
+}
+
+/** concat(L, slices [k, w) of v) where L is the low k bits of v recomputed at
+ * k bits (an x86 8-bit operation merged back into its register) is the low w
+ * bits of v. */
+const recomputedLowPart: ExpressionRule = {
+  name: 'recomputed_low_part',
+  scope:
+    'a join whose lowest part provably equals the low k bits of a value v (the same modular add/sub/mul/bitwise operations over the low bits of the same operands) and whose other parts are the consecutive slices of v from bit k is the low bits of v',
+  proof: 'own',
+  views: ['source'],
+  apply(site) {
+    const { value, expression } = site;
+    if (
+      expression.kind !== 'concat' ||
+      expression.values.length < 2 ||
+      value.type.kind !== 'integer'
+    )
+      return null;
+    const [low, ...rest] = expression.values as [Value, ...Value[]];
+    // A plain low slice is register-cell recombination's (exact wiring).
+    const lowDefinition = site.observe(site.resolve(low).id);
+    if (
+      !lowDefinition ||
+      lowDefinition.kind === 'extract' ||
+      (lowDefinition.kind === 'cast' && lowDefinition.op === 'truncate')
+    )
+      return null;
+    let base: Value | null = null,
+      offset = bitWidth(low.type);
+    for (const part of rest) {
+      const definition = site.observe(site.resolve(part).id);
+      if (
+        definition?.kind !== 'extract' ||
+        definition.offset !== offset ||
+        (base && site.resolve(base).id !== site.resolve(definition.value).id)
+      )
+        return null;
+      base = definition.value;
+      offset += bitWidth(part.type);
+    }
+    if (
+      !base ||
+      offset !== bitWidth(value.type) ||
+      bitWidth(base.type) < offset ||
+      !lowBitsOf(site, low, base, bitWidth(low.type))
+    )
+      return null;
+    return sameType(value.type, base.type)
+      ? bitcast(base)
+      : { kind: 'extract', value: base, offset: 0 };
+  },
+};
+
+/** Outcomes of comparing x with 0 (signed): less 1, equal 2, greater 4. */
+const SIGNED_ZERO_OUTCOMES: Partial<Record<IntegerPredicate, number>> = {
+  eq: 2,
+  ne: 5,
+  slt: 1,
+  sle: 3,
+  sgt: 4,
+  sge: 6,
+};
+
+/** a || b and a && b of two tests of one value against zero (signed
+ * comparisons, equality, or its sign bit: bit w-1 is x < 0) are the one
+ * comparison holding exactly on the union or intersection of their
+ * less/equal/greater outcomes (-O0 `jle` after `cmp x, 0` lifts as ZF || SF). */
+const signedZeroTests: ExpressionRule = {
+  name: 'signed_zero_test',
+  scope:
+    'a disjunction or conjunction of two tests of one value x against zero, each a signed comparison, an equality, or the sign bit (bit w-1 of x is 1 exactly when x < 0 signed), is the single signed comparison with zero whose less/equal/greater outcomes are their union or intersection, exact over all three outcomes',
+  proof: 'own',
+  views: ['source'],
+  apply(site) {
+    const { value, expression } = site;
+    if (
+      expression.kind !== 'integer' ||
+      (expression.op !== 'or' && expression.op !== 'and') ||
+      bitWidth(value.type) !== 1
+    )
+      return null;
+    /** A test of the low `bits` bits of `root` against zero: its outcomes and,
+     * from a comparison, that `bits`-bit operand. */
+    type Test = { root: string; bits: number; operand: Value | null; outcomes: number };
+    const test = (operand: Value, depth = 0): Test | null => {
+      const definition = site.observe(site.resolve(operand).id);
+      if (definition?.kind === 'integer_unary' && definition.op === 'not' && depth < 4) {
+        const inner = test(definition.value, depth + 1);
+        return inner && { ...inner, outcomes: 7 ^ inner.outcomes };
+      }
+      if (
+        definition?.kind === 'extract' &&
+        definition.value.type.kind === 'integer' &&
+        [8, 16, 32, 64].includes(definition.offset + 1)
+      )
+        return {
+          root: site.resolve(definition.value).id,
+          bits: definition.offset + 1,
+          operand:
+            definition.offset + 1 === definition.value.type.bits
+              ? site.resolve(definition.value)
+              : null,
+          outcomes: 1,
+        };
+      if (definition?.kind !== 'compare' || site.constant(definition.right) !== 0n) return null;
+      const outcomes = SIGNED_ZERO_OUTCOMES[definition.op];
+      if (outcomes === undefined) return null;
+      const x = site.resolve(definition.left),
+        slice = site.observe(x.id);
+      return {
+        root: slice?.kind === 'extract' && slice.offset === 0 ? site.resolve(slice.value).id : x.id,
+        bits: bitWidth(x.type),
+        operand: x,
+        outcomes,
+      };
+    };
+    const left = test(expression.left),
+      right = test(expression.right);
+    if (!left || !right || left.root !== right.root || left.bits !== right.bits) return null;
+    const x = left.operand ?? right.operand;
+    if (!x) return null;
+    const outcomes =
+      expression.op === 'or' ? left.outcomes | right.outcomes : left.outcomes & right.outcomes;
+    // Always or never: x may be indeterminate, so the tests stay.
+    if (outcomes === 0 || outcomes === 7) return null;
+    const op = (Object.keys(SIGNED_ZERO_OUTCOMES) as IntegerPredicate[]).find(
+      (key) => SIGNED_ZERO_OUTCOMES[key] === outcomes,
+    )!;
+    return {
+      kind: 'compare',
+      op,
+      left: x,
+      right: site.literal(x.type, 0n, `signed-zero:${value.id}`),
+    };
+  },
+};
+
+/** 0 - x is -x: two's-complement negation modulo 2^width. */
+const zeroMinus: ExpressionRule = {
+  name: 'zero_minus_negation',
+  scope: "0 - x is -x modulo 2^width (two's-complement negation is subtraction from zero)",
+  proof: 'own',
+  views: ['source'],
+  apply(site) {
+    const { expression } = site;
+    return expression.kind === 'integer' &&
+      expression.op === 'sub' &&
+      site.constant(expression.left) === 0n &&
+      site.constant(expression.right) === null
+      ? { kind: 'integer_unary', op: 'neg', value: expression.right }
+      : null;
+  },
+};
+
+/** c OP x for a commutative OP is x OP c: the constant reads on the right. */
+const constantRight: ExpressionRule = {
+  name: 'constant_operand_right',
+  scope:
+    'c + x (c below 0x1000), c * x, c & x, c | x and c ^ x with a constant c and a non-constant x are x + c, x * c, x & c, x | c and x ^ c: the operations are commutative over bit vectors',
+  proof: 'own',
+  views: ['source'],
+  apply(site) {
+    const { expression } = site;
+    const constant = expression.kind === 'integer' ? site.constant(expression.left) : null;
+    if (
+      expression.kind !== 'integer' ||
+      !['add', 'mul', 'and', 'or', 'xor'].includes(expression.op) ||
+      constant === null ||
+      site.constant(expression.right) !== null ||
+      // A large addend reads as a base address (`0x1000 + index`).
+      (expression.op === 'add' && constant >= 0x1000n)
+    )
+      return null;
+    return { ...expression, left: expression.right, right: expression.left };
   },
 };
 
@@ -631,6 +948,7 @@ const compareCanonical: ExpressionRule = {
  * applies at a site rewrites it, and the site is revisited to a fixpoint. */
 export const EXPRESSION_RULES: readonly ExpressionRule[] = [
   conditionFlags,
+  recomputedLowPart,
   cellRecombination,
   constantFold,
   castWiring,
@@ -638,6 +956,7 @@ export const EXPRESSION_RULES: readonly ExpressionRule[] = [
   checkedShiftProduct,
   checkedScaledSum,
   strengthReducedMultiply,
+  constantProduct,
   ...divisionRules,
   sliceWiring,
   lowBitsNarrowing,
@@ -649,6 +968,10 @@ export const EXPRESSION_RULES: readonly ExpressionRule[] = [
   compareCanonical,
   integerIdentityRule,
   extensionFold,
+  combinedMask,
+  signedZeroTests,
+  zeroMinus,
+  constantRight,
 ];
 
 /** Rules of one view, in pool order. */
