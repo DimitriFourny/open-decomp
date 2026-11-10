@@ -10928,7 +10928,10 @@ function renderView(
   const program = reconstruct(input, context, options.view === 'checked' ? 'checked' : 'source');
   const plans: AttemptPlans = {};
   let validated = false;
-  const attempt = (metadata: 'full' | 'omitted'): EmissionResult => {
+  const attempt = (
+    metadata: 'full' | 'omitted',
+    attemptContext: OperationContext = context,
+  ): EmissionResult => {
     const rejected = new Set<string>();
     // Each retry prints the failed calls as statements.
     for (let retry = 0; ; retry++) {
@@ -10936,7 +10939,7 @@ function renderView(
         const renderer = new Renderer(
           input,
           options,
-          context,
+          attemptContext,
           language,
           version,
           program,
@@ -10953,25 +10956,67 @@ function renderView(
       }
     }
   };
-  // A function of the request's own counters: deterministic under every budget.
-  const remaining = context.remainingWork?.();
-  if (
-    remaining !== undefined &&
-    remaining < (FULL_RENDER_WORK + TEXT_RENDER_WORK) * renderUnits(input.function)
-  ) {
+  /** The text without provenance metadata because the budget could not pay for it. */
+  const textOnly = (): EmissionResult => {
     const result = attempt('omitted');
     const omitted = result.emission.omitted?.map((item) => ({
       ...item,
       reason: 'budget' as const,
     }));
     return { ...result, emission: { ...result.emission, ...(omitted ? { omitted } : {}) } };
-  }
+  };
+  // A function of the request's own counters: deterministic under every budget.
+  const remaining = context.remainingWork?.();
+  const units = renderUnits(input.function);
+  if (remaining !== undefined && remaining < (FULL_RENDER_WORK + TEXT_RENDER_WORK) * units)
+    return textOnly();
+  // The full attempt runs in a share that leaves the text-only render's reserve: a goto
+  // search and metadata that together cost more than estimated end the attempt, not
+  // the request, and the text renders without metadata (as past the metadata bound).
+  const share = remaining === undefined ? undefined : remaining - TEXT_RENDER_WORK * units;
   try {
-    return attempt('full');
+    return attempt('full', share === undefined ? context : renderShare(context, share));
   } catch (error) {
+    if (share !== undefined && renderShareExhausted(error, share)) return textOnly();
     // Provenance metadata is bounded separately from the text. When it cannot be
     // held, render the same text without it and say so; never fail the pseudocode.
     if (!(error instanceof MetadataLimitError)) throw error;
     return attempt('omitted');
   }
+}
+
+const RENDER_SHARE_MESSAGE = 'Full render work share exhausted';
+
+/** `context` bounded to `share` more work, for an attempt that may fail alone. */
+export function renderShare(context: OperationContext, share: number): OperationContext {
+  let used = 0;
+  return {
+    ...context,
+    remainingWork: () => Math.max(0, Math.min(share - used, context.remainingWork?.() ?? 0)),
+    checkpoint(work) {
+      if (used + work > share)
+        throw new OperationError({
+          code: 'resource_limit',
+          severity: 'warning',
+          message: RENDER_SHARE_MESSAGE,
+          evidence_ids: [],
+          details: { kind: 'limit', resource: 'work', limit: share, consumed: used + work },
+        });
+      context.checkpoint(work);
+      used += work;
+    },
+  };
+}
+
+/** The share of `renderShare` ran out (also when a pass turned it into a partial
+ * result that a later stage raised again). */
+export function renderShareExhausted(error: unknown, share: number): boolean {
+  if (!(error instanceof OperationError) || error.code !== 'resource_limit') return false;
+  const details = error.diagnostic.details;
+  return (
+    error.message === RENDER_SHARE_MESSAGE &&
+    details?.kind === 'limit' &&
+    details.resource === 'work' &&
+    details.limit === share
+  );
 }
