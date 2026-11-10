@@ -151,17 +151,29 @@ export function bindPltEntries(
       section.virtual_range.size === 0n
     )
       continue;
-    const decoded = decoder.decode(
-      {
-        image,
-        regions: [section.virtual_range],
-        mode: 'long64',
-        features: image.target.features,
-      },
-      context,
-    );
+    // Linear decode in windows well under the operation's instruction limit (each decode is
+    // bounded by it); the next window starts after the last whole instruction.
+    const instructions: DecodedInstruction[] = [];
+    const start = section.virtual_range.start,
+      end = start.value + section.virtual_range.size;
+    for (let cursor = start.value; cursor < end;) {
+      const size = end - cursor < 1024n ? end - cursor : 1024n;
+      const window = decoder.decode(
+        {
+          image,
+          regions: [{ start: { ...start, value: cursor }, size }],
+          mode: 'long64',
+          features: image.target.features,
+        },
+        context,
+      ).instructions;
+      const last = window.at(-1);
+      if (!last || last.address.value + BigInt(last.size) <= cursor) break;
+      instructions.push(...window);
+      cursor = last.address.value + BigInt(last.size);
+    }
     let previous: DecodedInstruction | undefined;
-    for (const instruction of decoded.instructions) {
+    for (const instruction of instructions) {
       context.checkpoint(1);
       const before = previous;
       previous = instruction;

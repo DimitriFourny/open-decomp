@@ -31,6 +31,7 @@ import {
   type DiscoveryInput,
   type FunctionAssertion,
 } from '../../src/analysis/discovery/index.js';
+import { bindPltEntries } from '../../src/analysis/discovery/stubs.js';
 
 function load(path: string, loader: Loader): LoadedImage {
   const bytes = readFileSync(path);
@@ -788,8 +789,10 @@ test('a call through a noreturn import slot, directly or through a thunk, ends f
 
 test('a root whose every path ends in a trap or a noreturn call never returns, and calls to it end flow', () => {
   // f (+0): call die (+6); g (+5): ret; die (+6): BODY
-  const run = (body: readonly number[]) => {
-    const image = raw([0xe8, 0x01, 0, 0, 0, 0xc3, ...body]);
+  const run = (body: readonly number[], format: 'pe' | 'elf' = 'pe') => {
+    const pe = raw([0xe8, 0x01, 0, 0, 0, 0xc3, ...body]);
+    const image: LoadedImage =
+      format === 'pe' ? pe : { ...pe, target: { ...pe.target, format, abi: 'sysv-amd64' } };
     const result = discover(image, { assertions: [assertion(image, 5), assertion(image, 6)] });
     const at = (offset: number) =>
       result.graphs.find((graph) => graph.function.entry.value === 0x1000n + BigInt(offset))!;
@@ -805,13 +808,18 @@ test('a root whose every path ends in a trap or a noreturn call never returns, a
     proven.f.blocks.flatMap((block) => block.edges.map((edge) => edge.kind)),
     ['trap'],
   );
-  // f's proof cites die's.
+  // f's proof cites die's root, proven by the same fixpoint.
   const proofs = new Map(proven.result.evidence.map((item) => [item.id, item]));
   assert.ok(
     proven.f.function.noreturn!.some((id) =>
-      proofs.get(id)?.derived_from.some((parent) => proven.die.function.noreturn!.includes(parent)),
+      proofs
+        .get(id)
+        ?.derived_from.some((parent) => proven.die.function.evidence_ids.includes(parent)),
     ),
   );
+  // Windows `__fastfail` (`int 0x29`) never returns; on ELF the vector proves nothing.
+  assert.ok(run([0xcd, 0x29]).die.function.noreturn);
+  assert.equal(run([0xcd, 0x29], 'elf').die.function.noreturn, undefined);
   // int3 (a debugger may continue), a path to ret, an unresolved indirect branch: no proof.
   for (const body of [[0xcc], [0x74, 0x01, 0xc3, 0x0f, 0x0b], [0xff, 0xe0]]) {
     const unproven = run(body);
@@ -830,10 +838,21 @@ test('a root whose every path ends in a trap or a noreturn call never returns, a
   assert.ok(
     swept.graphs.find((graph) => graph.function.entry.value === 0x1000n)!.function.noreturn,
   );
-  // Two roots that only jump to each other: a least fixpoint proves neither.
+  // Recursion: f (+0) calls itself last and g (+5) returns; f never returns, g does.
+  const recursive = raw([0xe8, 0xfb, 0xff, 0xff, 0xff, 0xc3]);
+  const self = discover(recursive, { assertions: [assertion(recursive, 5)] });
+  assert.ok(self.graphs.find((graph) => graph.function.entry.value === 0x1000n)!.function.noreturn);
+  assert.equal(
+    self.graphs.find((graph) => graph.function.entry.value === 0x1005n)!.function.noreturn,
+    undefined,
+  );
+  // Two roots that only jump to each other never return; one that may also return does.
   const loop = raw([0xeb, 0x00, 0xeb, 0xfc]);
   const cycle = discover(loop, { assertions: [assertion(loop, 2)] });
-  assert.ok(cycle.graphs.every((graph) => graph.function.noreturn === undefined));
+  assert.ok(cycle.graphs.every((graph) => graph.function.noreturn));
+  const exit = raw([0xeb, 0x00, 0x74, 0xfc, 0xc3]);
+  const escapes = discover(exit, { assertions: [assertion(exit, 2)] });
+  assert.ok(escapes.graphs.every((graph) => graph.function.noreturn === undefined));
   // A published proof ends the call in a selected-entry graph.
   const image = raw([0xe8, 0x01, 0, 0, 0, 0xc3, 0xc3]);
   const record = (offset: number, noreturn?: readonly string[]) => ({
@@ -858,6 +877,95 @@ test('a root whose every path ends in a trap or a noreturn call never returns, a
       [noreturn ? 'trap' : 'fallthrough'],
     );
   }
+});
+
+test('IBT `.plt.sec` entries bind at their endbr64; weak, aliased or misaligned slots do not', () => {
+  const le32 = (value: number): number[] => [
+    value & 0xff,
+    (value >> 8) & 0xff,
+    (value >> 16) & 0xff,
+    (value >>> 24) & 0xff,
+  ];
+  // endbr64; bnd jmp qword [rip+disp]; nop5 — at +0 (slot +0x30) and +0x10 (slot +0x38);
+  // then at +0x24 a bare jmp (slot +0x30) that is not 8-byte aligned.
+  const entry = (jmp: number, slot: number) => [
+    0xf3,
+    0x0f,
+    0x1e,
+    0xfa,
+    0xf2,
+    0xff,
+    0x25,
+    ...le32(slot - (jmp + 7)),
+    0x0f,
+    0x1f,
+    0x44,
+    0,
+    0,
+  ];
+  const bytes = [
+    ...entry(0x1004, 0x1030),
+    ...entry(0x1014, 0x1038),
+    0x90,
+    0x90,
+    0x90,
+    0x90,
+    0xff,
+    0x25,
+    ...le32(0x1030 - 0x102a),
+    0x90,
+    0x90,
+    ...Array<number>(16).fill(0),
+  ];
+  const base = raw(bytes);
+  const va = (value: bigint): Address => ({ image_id: base.id, space: 'va', value });
+  const section = {
+    id: 'section-plt-sec',
+    name: '.plt.sec',
+    segment_id: null,
+    kind: 'section' as const,
+    virtual_range: { start: va(0x1000n), size: 0x2cn },
+    file_range: null,
+    permissions: ['read', 'execute'] as ('read' | 'execute')[],
+    flags: 0n,
+    evidence_ids: ['evidence_section'],
+  };
+  const slot = (name: string, value: bigint, weak = false) => ({
+    id: `import-${name}`,
+    original_name: name,
+    display_name: name,
+    library: 'libc.so.6',
+    ordinal: null,
+    slot: va(value),
+    callable_entry: null,
+    delayed: false,
+    weak,
+    evidence_ids: [`evidence_${name}`],
+  });
+  const bind = (imports: LoadedImage['imports']) => {
+    const image: LoadedImage = {
+      ...base,
+      target: { ...base.target, format: 'elf', abi: 'sysv-amd64' },
+      sections: [section],
+      imports,
+    };
+    const decoder = new X86Decoder({ formatting: false });
+    try {
+      return bindPltEntries(image, decoder, 0, createOperationContext())
+        .imports.filter((item) => item.callable_entry !== null)
+        .map((item) => [item.original_name, item.callable_entry!.value]);
+    } finally {
+      decoder.dispose();
+    }
+  };
+  assert.deepEqual(bind([slot('exit', 0x1030n), slot('puts', 0x1038n)]), [
+    ['exit', 0x1000n],
+    ['puts', 0x1010n],
+  ]);
+  assert.deepEqual(bind([slot('exit', 0x1030n), slot('puts', 0x1038n, true)]), [['exit', 0x1000n]]);
+  assert.deepEqual(bind([slot('exit', 0x1030n), slot('abort', 0x1030n), slot('puts', 0x1038n)]), [
+    ['puts', 0x1010n],
+  ]);
 });
 
 test("selected discovery publishes every proof its diagnostics cite, including another root's seed proofs", () => {

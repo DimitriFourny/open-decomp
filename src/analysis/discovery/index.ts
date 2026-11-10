@@ -977,47 +977,78 @@ function discoverOnce(
       seed(va(target), TAIL_TARGET_RULE, promoted.get(target)!, false);
     return promoted.size > 0;
   };
-  /** Least fixpoint over the decoded instructions: a root never returns when every path from
-   * its entry ends in an undefined-instruction trap (`ud2`, `udf`, `brk` other than the debugger
-   * break `#0xf000`) or a call that does not return (`noreturnOf`: library contracts, published
-   * or proven roots, noreturn import slots), or enters another root that never returns. A
-   * return, an indirect branch (jump tables included: their proof may not survive extraction),
-   * an unknown or invalid instruction, an undecoded address (gap, limit) or an entry into
-   * another root that may return makes it unproven. Calls of unproven targets are assumed to
-   * return, so each added root is proven from roots already proven: the result is sound for
-   * any iteration order and, being a least fixpoint, independent of it. */
+  /** Roots that never return, as the greatest fixpoint over the decoded instructions: starting
+   * from every root that could qualify, a root is dropped when some path from its entry reaches a
+   * return, any indirect branch (jump tables included: their proof may not survive extraction),
+   * an unknown or invalid instruction, an undecoded address (gap, limit), a trap other than an
+   * undefined-instruction trap (`ud0`-`ud2`, `udf`, `brk` other than the debugger break
+   * `#0xf000`; on PE also `__fastfail`, `int 0x29`), the entry of another root not in the set,
+   * or the continuation of a call that may return. A call ends a path when `noreturnOf` proves
+   * it (library contracts, published proofs, noreturn import slots) or its target is still in the
+   * set. Sound by induction on a returning execution: its deepest returning activation of a
+   * root in the set would have to return along a path that only ends in traps, calls that do not
+   * return, or calls of roots in the set that would have to return first. So recursion (luaD_throw
+   * calling itself last) and roots that only loop or jump to each other never return. */
   function provenNoreturn(): void {
     const terminal = (instruction: DecodedInstruction): boolean => {
       const payload = instruction.payload;
       if (instruction.flow.kind !== 'trap' || !payload) return false;
-      if (payload.architecture === 'x86_64') return /^ud[012]$/.test(payload.mnemonic);
+      if (payload.architecture === 'x86_64') {
+        if (/^ud[012]$/.test(payload.mnemonic)) return true;
+        // Windows `__fastfail` (`int 0x29`) terminates the process and never returns.
+        const vector = payload.operands[0];
+        return (
+          image.target.format === 'pe' &&
+          payload.mnemonic === 'int' &&
+          payload.operands.length === 1 &&
+          vector?.kind === 'immediate' &&
+          vector.value === 0x29n
+        );
+      }
       if (payload.encoding.startsWith('UDF_')) return true;
       return payload.encoding.startsWith('BRK_') && payload.fields.imm16 !== 0xf000n;
     };
     const roots = [...seeds.values()]
       .filter((item) => !resume || traversed.has(item.entry.value))
       .sort((a, b) => (a.entry.value < b.entry.value ? -1 : a.entry.value > b.entry.value ? 1 : 0));
-    /** The evidence of every path end, or undefined when some path may return. `optimistic`
-     * ends every path at a call or another root: a root that may return even then never
-     * qualifies. */
-    const walk = (entry: bigint, optimistic: boolean): readonly string[] | undefined => {
+    /** The evidence of every path end, or undefined when some path may return; a call of or an
+     * entry into a root in `group` ends a path. `group` null ends every path at a call or another
+     * root (a root that may return even then never qualifies). */
+    const walk = (
+      entry: bigint,
+      group: ReadonlySet<bigint> | null,
+      uses?: Set<bigint>,
+    ): readonly string[] | undefined => {
       const parents = new Set<string>();
       const visited = new Set<bigint>();
       const pending = [entry];
+      const ends = (target: bigint | null, proof: readonly string[] | undefined): boolean => {
+        let evidence = proof;
+        if (!evidence && target !== null && group?.has(target)) {
+          evidence = seedAt(target)?.evidence;
+          uses?.add(target);
+        }
+        if (!evidence) return false;
+        for (const id of evidence) parents.add(id);
+        return true;
+      };
       while (pending.length) {
         context.checkpoint(1);
         const address = pending.pop()!;
         if (visited.has(address)) continue;
         visited.add(address);
         if (address !== entry && seedAt(address)) {
-          if (optimistic) continue;
-          const proof =
-            input.noreturn_calls?.get(address) ??
-            index.noreturn.get(address) ??
-            neverReturns.get(address);
-          if (!proof) return undefined;
-          for (const id of proof) parents.add(id);
-          continue;
+          if (
+            group === null ||
+            ends(
+              address,
+              input.noreturn_calls?.get(address) ??
+                index.noreturn.get(address) ??
+                neverReturns.get(address),
+            )
+          )
+            continue;
+          return undefined;
         }
         const instruction = decoded.get(address);
         if (!instruction || instruction.validity !== 'valid') return undefined;
@@ -1033,44 +1064,54 @@ function discoverOnce(
           for (const id of instructionEvidence.get(instruction.id) ?? instruction.evidence_ids)
             parents.add(id);
         if (flow.kind === 'call') {
-          if (optimistic) continue;
-          const proof = noreturnOf(instruction);
-          if (proof) {
-            for (const id of proof) parents.add(id);
-            continue;
-          }
+          if (group === null) continue;
+          if (ends(flow.target?.value ?? null, noreturnOf(instruction))) continue;
         }
         for (const successor of instructionSuccessors(instruction)) pending.push(successor.value);
       }
       return [...parents];
     };
-    let open = roots.filter(
-      (item) =>
-        !neverReturns.has(item.entry.value) &&
-        !index.noreturn.has(item.entry.value) &&
-        !input.noreturn_calls?.has(item.entry.value) &&
-        walk(item.entry.value, true) !== undefined,
+    const group = new Set(
+      roots
+        .filter(
+          (item) =>
+            !neverReturns.has(item.entry.value) &&
+            !index.noreturn.has(item.entry.value) &&
+            !input.noreturn_calls?.has(item.entry.value) &&
+            walk(item.entry.value, null) !== undefined,
+        )
+        .map((item) => item.entry.value),
     );
-    for (let changed = true; changed && open.length;) {
-      changed = false;
-      const still: typeof open = [];
-      for (const item of open) {
-        const parents = walk(item.entry.value, false);
-        if (parents === undefined) {
-          still.push(item);
-          continue;
+    // Each root is walked again only when a member its last walk relied on leaves the set.
+    const proofs = new Map<bigint, readonly string[]>();
+    const users = new Map<bigint, Set<bigint>>();
+    const pending = [...group];
+    for (let cursor = 0; cursor < pending.length; cursor++) {
+      const entry = pending[cursor]!;
+      if (!group.has(entry)) continue;
+      const uses = new Set<bigint>();
+      const parents = walk(entry, group, uses);
+      if (parents) {
+        proofs.set(entry, parents);
+        for (const used of uses) {
+          const list = users.get(used) ?? new Set<bigint>();
+          list.add(entry);
+          users.set(used, list);
         }
+        continue;
+      }
+      group.delete(entry);
+      for (const user of users.get(entry) ?? []) if (group.has(user)) pending.push(user);
+    }
+    for (const item of roots)
+      if (group.has(item.entry.value))
         neverReturns.set(item.entry.value, [
           derive(
-            'every path from the entry ends in a trap or a call that does not return',
+            'every path from the entry ends in a trap, a call that does not return, or a call of a root that never returns by the same proof',
             item.entry,
-            [...item.evidence, ...parents],
+            [...item.evidence, ...proofs.get(item.entry.value)!],
           ),
         ]);
-        changed = true;
-      }
-      open = still;
-    }
   }
   drain();
   let enumerated = false;
