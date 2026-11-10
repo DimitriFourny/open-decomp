@@ -100,8 +100,9 @@ const reflexive: Readonly<Record<IntegerPredicate, boolean>> = {
  * - x OP x of one determinate SSA value is OP's reflexive truth value, and
  *   x - x and x ^ x are 0; a value whose definitions can reach an explicit
  *   unknown/undefined keeps its form.
- * - x <u 0 is 0 and x >=u 0 is 1, and the carry, borrow and overflow of
- *   x ± 0 without carry-in are 0, for every bit pattern of x.
+ * - x <u 0 is 0 and x >=u 0 is 1, and the flags of x ± 0 without carry-in are
+ *   constant for every bit pattern of x: no overflow, no borrow, no carry out
+ *   of the addition, and the subtraction's carry (its "no borrow" flag) is 1.
  * These make guards like x86's quotient-overflow check, which no operand value
  * can satisfy, constant so the unreachable trap disappears. */
 export function foldValueRule(
@@ -126,7 +127,8 @@ export function foldValueRule(
   )
     return { kind: 'constant', bits: reflexive[expression.op] ? 1n : 0n };
   // No bit pattern of x is unsigned-below 0, and x ± 0 without a carry-in
-  // never carries, borrows or overflows (`cmp x, 0` flags).
+  // never borrows or overflows (`cmp x, 0` flags). The carry of a subtraction
+  // is its inverted borrow (the IR's arm64 convention), so it is 1 there.
   if (
     expression.kind === 'compare' &&
     (expression.op === 'ult' || expression.op === 'uge') &&
@@ -141,7 +143,10 @@ export function foldValueRule(
     scope.constant(expression.right.id) === 0n &&
     scope.constant(expression.carry.id) === 0n
   )
-    return { kind: 'constant', bits: 0n };
+    return {
+      kind: 'constant',
+      bits: expression.flag === 'carry' && expression.op === 'sub' ? 1n : 0n,
+    };
   // x - x and x ^ x of one determinate value (`sub reg, reg`, the `x - x` of
   // `sbb reg, reg`) are 0 for every bit pattern of x, an unwritten entry
   // register included: it holds one fixed (unknown) pattern.

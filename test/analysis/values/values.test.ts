@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { analyzeValues, simplifySSA } from '../../../src/analysis/values/index.js';
-import { evaluateIR, integer, verifyIR } from '../../../src/ir/index.js';
+import { foldValueRule } from '../../../src/analysis/values/rules.js';
+import { evaluateExpression, evaluateIR, integer, verifyIR } from '../../../src/ir/index.js';
 import type { BlockBuilder, Edge, RegisterIR, Value } from '../../../src/ir/index.js';
 import { builder, register, returned } from '../../ir/support.js';
 import { equivalent, forms } from '../ssa/support.js';
@@ -530,4 +531,33 @@ test('incremental and full simplification agree on random graphs with constant t
   }
   // The sample does take incremental rounds.
   assert.ok(cheaper > 0);
+});
+
+test('zero-operand flag folds agree with the flag semantics of both operations', () => {
+  // Comparison recovery rewrites the subtraction's carry before this rule sees
+  // it, so the rule is pinned directly against the evaluator.
+  const x: Value = { id: 'value:x', type: i8 },
+    zero: Value = { id: 'value:zero', type: i8 },
+    none: Value = { id: 'value:none', type: i1 };
+  const scope = {
+    definition: () => undefined,
+    constant: (id: string) => (id === x.id ? undefined : 0n),
+    incoming: () => [],
+    charge: () => {},
+  };
+  for (const op of ['add', 'sub'] as const)
+    for (const flag of ['carry', 'borrow', 'overflow'] as const) {
+      const expression = { kind: 'flag', op, flag, left: x, right: zero, carry: none } as const;
+      const folded = foldValueRule(i1, expression, scope);
+      assert.equal(folded?.kind, 'constant', `${op} ${flag}`);
+      for (const bits of [0n, 1n, 0x7fn, 0x80n, 0xffn])
+        assert.deepEqual(
+          evaluateExpression(i1, expression, (value) => ({
+            kind: 'bits',
+            bits: value.id === x.id ? bits : 0n,
+          })),
+          { kind: 'bits', bits: folded.kind === 'constant' ? folded.bits : -1n },
+          `${op} ${flag} of ${bits}`,
+        );
+    }
 });
