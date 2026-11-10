@@ -502,8 +502,9 @@ that place aggregates below scalars (SQLite `renameColumnFunc`, brotli `main`),
 all slots above it stay explicit; a 21-function SQLite/brotli sample of the LLM task set
 showed no change. Only the frame object's layout uses a tighter reach (A3,
 below): a proven frame save ends an escaped object under `frame_save`. Unknown effects and unbounded escapes keep the whole frame
-explicit; a memory-free unknown effect (an ISA-bounded unlifted SIMD&FP
-instruction, see ARM64.md) is not an escape, except for a frame address in one
+explicit; a memory-free unknown effect (an ISA-bounded unlifted ARM64 SIMD&FP
+instruction, or an x86 one whose access sets name no memory and no
+general-register read; see ARM64.md and X86_64.md) is not an escape, except for a frame address in one
 of its vector inputs, so saves are elided across it. Accesses straddling a slot's end, outgoing argument slots and volatile
 accesses stay explicit. Same-width accesses of differing types (an O0
 integer/IEEE pun through memory) forward a bitcast of the reaching stored value;

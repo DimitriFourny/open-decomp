@@ -9,6 +9,7 @@ import {
   BlockBuilder,
   IRBuilder,
   bitWidth,
+  floatBits,
   floating,
   instructionProvenance,
   integer,
@@ -183,6 +184,43 @@ export function boundedUnknownClobbers(instruction: DecodedInstruction): CallClo
   return { registers: outputs, flags, memory };
 }
 export class Unsupported extends Error {}
+// CMPSS/CMPSD/CMPPS/CMPPD predicates 0-7: EQ, LT, LE, UNORD, NEQ, NLT, NLE, ORD. NEQ/NLT/NLE are
+// true for unordered operands (IR `ne` is unordered-or-unequal).
+const fpPredicates: readonly (readonly [
+  'eq' | 'lt' | 'le' | 'unordered' | 'ne' | 'ordered',
+  boolean,
+])[] = [
+  ['eq', false],
+  ['lt', false],
+  ['le', false],
+  ['unordered', false],
+  ['ne', false],
+  ['lt', true],
+  ['le', true],
+  ['ordered', false],
+];
+function laneSize(suffix: string): number {
+  return ({ b: 8, w: 16, d: 32, q: 64 } as Record<string, number>)[suffix]!;
+}
+const lockable = new Set([
+  'add',
+  'adc',
+  'and',
+  'btc',
+  'btr',
+  'bts',
+  'cmpxchg',
+  'dec',
+  'inc',
+  'neg',
+  'not',
+  'or',
+  'sbb',
+  'sub',
+  'xadd',
+  'xchg',
+  'xor',
+]);
 
 /** Architectural semantics, never inferred from decoder access metadata. */
 export class X86Semantics {
@@ -619,24 +657,27 @@ export class X86Semantics {
   }
 
   /**
-   * BTS: CF receives the selected bit, which is then set; OF/SF/AF/PF are undefined and ZF is
-   * unchanged. A register or immediate offset selects bit `offset mod width`. A memory operand with
-   * a register offset is a signed bit string: the access is the operand-width word at
-   * `address + floor(offset / width) * width / 8` (Intel SDM, BT), then bit `offset mod width`.
+   * BT/BTS/BTR/BTC: CF receives the selected bit, which BTS sets, BTR clears and BTC complements
+   * (BT writes nothing); OF/SF/AF/PF are undefined and ZF is unchanged. A register or immediate
+   * offset selects bit `offset mod width`. A memory operand with a register offset is a signed bit
+   * string: the access is the operand-width word at `address + floor(offset / width) * width / 8`
+   * (Intel SDM, BT), then bit `offset mod width`.
    */
-  bitTestAndSet(): void {
+  bitTest(op: 'bt' | 'bts' | 'btr' | 'btc'): void {
     const [dst, source] = this.p.operands,
-      b = this.block;
+      b = this.block,
+      name = op.toUpperCase();
     if (!dst || !source || (dst.kind !== 'register' && dst.kind !== 'memory'))
-      throw new Unsupported('BTS operands');
+      throw new Unsupported(`${name} operands`);
     const width = this.width(dst);
-    if (width !== 16 && width !== 32 && width !== 64) throw new Unsupported('BTS operand width');
+    if (width !== 16 && width !== 32 && width !== 64)
+      throw new Unsupported(`${name} operand width`);
     const offset = this.read(source, width),
       bit = b.int('and', offset, this.c(width, BigInt(width - 1)));
     let location: Value | undefined;
     if (dst.kind === 'memory' && source.kind === 'register') {
       if (dst.memory.address_bits !== 64)
-        throw new Unsupported('BTS register bit offset with a non-64-bit address size');
+        throw new Unsupported(`${name} register bit offset with a non-64-bit address size`);
       const words = this.resize(
         b.int('ashr', offset, this.c(width, BigInt(Math.log2(width)))),
         64,
@@ -651,12 +692,189 @@ export class X86Semantics {
     const old = location
       ? b.load(integer(width), location, { endian: 'little', alignment: 1, volatile: false })
       : this.read(dst, width);
-    const selected = b.extract(b.int('lshr', old, bit), 0, 1),
-      value = b.int('or', old, b.int('shl', this.c(width, 1n), bit));
-    if (location) b.store(location, value, { endian: 'little', alignment: 1, volatile: false });
-    else this.write(dst, value);
+    const selected = b.extract(b.int('lshr', old, bit), 0, 1);
+    if (op !== 'bt') {
+      const mask = b.int('shl', this.c(width, 1n), bit);
+      const value =
+        op === 'bts'
+          ? b.int('or', old, mask)
+          : op === 'btr'
+            ? b.int('and', old, b.unary('not', mask))
+            : b.int('xor', old, mask);
+      if (location) b.store(location, value, { endian: 'little', alignment: 1, volatile: false });
+      else this.write(dst, value);
+    }
     this.setFlag('cf', selected);
     this.undefinedFlags(['of', 'sf', 'af', 'pf']);
+  }
+
+  /**
+   * BSF/BSR/TZCNT/LZCNT/POPCNT. A zero BSF/BSR source leaves the destination undefined (Intel SDM;
+   * AMD documents it unchanged), including the upper half of a 32-bit destination's root, and sets
+   * ZF; CF/OF/SF/AF/PF are undefined. TZCNT/LZCNT are the BMI1/LZCNT instructions the decoder
+   * reports (on older processors the same bytes execute as BSF/BSR): the operand width for a zero
+   * source, CF = source is zero, ZF = result is zero, OF/SF/AF/PF undefined. POPCNT clears
+   * CF/OF/SF/AF/PF and sets ZF when the source is zero.
+   */
+  bitCount(m: 'bsf' | 'bsr' | 'tzcnt' | 'lzcnt' | 'popcnt'): void {
+    const [dst, src] = this.p.operands,
+      b = this.block;
+    if (dst?.kind !== 'register' || !src) throw new Unsupported(`${m} operands`);
+    const width = this.width(dst),
+      source = this.read(src, width),
+      zero = b.compare('eq', source, this.c(width, 0n));
+    if (m === 'bsf' || m === 'bsr') {
+      const index =
+        m === 'bsf'
+          ? b.unary('ctz', source)
+          : b.int('sub', this.c(width, BigInt(width - 1)), b.unary('clz', source));
+      const target = width === 16 ? dst.register : gpr(dst.register.root.slice('x86_64:'.length));
+      const bits = target.width_bits;
+      b.writeRegister(
+        target,
+        b.select(
+          zero,
+          b.indeterminate(integer(bits), 'undefined', `${m} destination for a zero source`),
+          this.resize(index, bits),
+        ),
+      );
+      this.setFlag('zf', zero);
+      this.undefinedFlags(['cf', 'of', 'sf', 'af', 'pf']);
+      return;
+    }
+    const result = b.unary(m === 'tzcnt' ? 'ctz' : m === 'lzcnt' ? 'clz' : 'popcount', source);
+    this.write(dst, result);
+    if (m === 'popcnt') {
+      this.setFlag('zf', zero);
+      for (const name of ['cf', 'of', 'sf', 'af', 'pf'] as const) this.setFlag(name, this.c(1, 0n));
+      return;
+    }
+    this.setFlag('cf', zero);
+    this.setFlag('zf', b.compare('eq', result, this.c(width, 0n)));
+    this.undefinedFlags(['of', 'sf', 'af', 'pf']);
+  }
+
+  /**
+   * SHLD/SHRD: the count is masked to 5 bits (6 for 64-bit operands); a zero count changes
+   * nothing. CF is the last bit shifted out of the destination, OF (count 1 only) whether the sign
+   * changed, SF/ZF/PF follow the result and AF is undefined. A 16-bit count above 16 leaves the
+   * result and every flag undefined.
+   */
+  doubleShift(left: boolean): void {
+    const [dst, src, count] = this.p.operands,
+      b = this.block;
+    if (!dst || src?.kind !== 'register' || !count) throw new Unsupported('SHLD/SHRD operands');
+    const width = this.width(dst),
+      wide = width * 2;
+    const value = this.read(dst),
+      fill = this.read(src, width),
+      masked = b.int(
+        'and',
+        this.resize(this.read(count, 8), width),
+        this.c(width, width === 64 ? 63n : 31n),
+      );
+    const zero = b.compare('eq', masked, this.c(width, 0n)),
+      one = b.compare('eq', masked, this.c(width, 1n)),
+      shift = this.resize(masked, wide);
+    const old = new Map<Flag, Value>(
+      (['cf', 'of', 'zf', 'sf', 'pf', 'af'] as const).map((name) => [name, this.flag(name)]),
+    );
+    let result: Value, carry: Value;
+    if (left) {
+      const joined = b.concat([fill, value]);
+      result = b.extract(b.int('shl', joined, shift), width, width);
+      carry = b.extract(
+        b.int('lshr', joined, b.int('sub', this.c(wide, BigInt(wide)), shift)),
+        0,
+        1,
+      );
+    } else {
+      const joined = b.concat([value, fill]);
+      result = b.extract(b.int('lshr', joined, shift), 0, width);
+      carry = b.extract(b.int('lshr', joined, b.int('sub', shift, this.c(wide, 1n))), 0, 1);
+    }
+    const overflow = b.int('xor', b.extract(result, width - 1, 1), b.extract(value, width - 1, 1));
+    const flags: [Flag, Value][] = [
+      ['cf', carry],
+      [
+        'of',
+        b.select(
+          one,
+          overflow,
+          b.indeterminate(
+            integer(1),
+            'undefined',
+            'Double shift overflow for count other than one',
+          ),
+        ),
+      ],
+      ['zf', b.compare('eq', result, this.c(width, 0n))],
+      ['sf', b.extract(result, width - 1, 1)],
+      ['pf', b.flag('add', 'parity', result, this.c(width, 0n), this.c(1, 0n))],
+      ['af', b.indeterminate(integer(1), 'undefined', 'Double shift auxiliary carry')],
+    ];
+    const beyond = width === 16 ? b.compare('ugt', masked, this.c(width, 16n)) : undefined;
+    const bounded = (value: Value, what: string): Value =>
+      beyond
+        ? b.select(
+            beyond,
+            b.indeterminate(
+              value.type,
+              'undefined',
+              `16-bit double shift ${what} for a count above 16`,
+            ),
+            value,
+          )
+        : value;
+    this.write(dst, bounded(result, 'result'));
+    for (const [name, flag] of flags)
+      this.setFlag(name, b.select(zero, old.get(name)!, bounded(flag, name)));
+  }
+
+  /**
+   * A legacy SSE 128-bit source: an XMM register or a 16-byte aligned m128 (legacy SSE faults on
+   * a misaligned m128; the alignment is carried by the load).
+   */
+  xmm(operand: Operand | undefined): Value {
+    if (
+      operand?.kind === 'register' &&
+      operand.register.bank === 'vector' &&
+      operand.register.width_bits === 128
+    )
+      return this.read(operand);
+    if (operand?.kind === 'memory' && operand.memory.access_bits === 128)
+      return this.read(operand, 128, 16);
+    throw new Unsupported('Only legacy SSE XMM or m128 operands are modeled');
+  }
+
+  /** Legacy SSE destination write: bits above 127 are preserved. */
+  writeXmm(operand: Operand | undefined, value: Value): void {
+    if (
+      operand?.kind !== 'register' ||
+      operand.register.bank !== 'vector' ||
+      operand.register.width_bits !== 128
+    )
+      throw new Unsupported('Only legacy SSE XMM destinations are modeled');
+    this.write(operand, value);
+  }
+
+  /** Legacy SSE scalar write: only the low lane changes. */
+  writeLow(operand: Extract<Operand, { kind: 'register' }>, value: Value): void {
+    const width = bitWidth(value.type);
+    this.block.writeRegister(
+      {
+        ...operand.register,
+        id: `${operand.register.id}:low${width}`,
+        width_bits: width,
+        write_rule: 'preserve_other_bits',
+      },
+      value,
+    );
+  }
+
+  immediate(operand: Operand | undefined): bigint {
+    if (operand?.kind !== 'immediate') throw new Unsupported('Missing immediate operand');
+    return operand.value;
   }
 
   stackPush(value: Value): void {
@@ -686,7 +904,29 @@ export class X86Semantics {
     if (!tail) b.writeRegister(this.abi.stack_pointer, sp);
   }
 
+  /**
+   * A LOCK-prefixed read-modify-write (and XCHG with memory, which is always locked) is the
+   * unlocked operation between two `memory_fence` events: exact for a single-threaded reading,
+   * and locked instructions order all earlier and later loads and stores. The IR does not express
+   * the atomicity of the read-modify-write itself.
+   */
   execute(): void {
+    const p = this.p,
+      locked =
+        p.prefixes.lock ||
+        (p.mnemonic === 'xchg' && p.operands.some((operand) => operand.kind === 'memory'));
+    if (!locked) {
+      this.operation();
+      return;
+    }
+    if (!lockable.has(p.mnemonic) || p.operands[0]?.kind !== 'memory')
+      throw new Unsupported('Privileged, atomic, VEX/EVEX/XOP/MVEX or masked/rounding instruction');
+    this.block.memoryFence();
+    this.operation();
+    this.block.memoryFence();
+  }
+
+  operation(): void {
     const p = this.p,
       m = p.mnemonic,
       operands = p.operands,
@@ -695,7 +935,6 @@ export class X86Semantics {
     let b = this.block;
     if (
       p.privileged ||
-      p.prefixes.lock ||
       p.prefixes.encoding !== 'legacy' ||
       p.prefixes.mask ||
       p.prefixes.rounding !== 'none' ||
@@ -729,8 +968,6 @@ export class X86Semantics {
       return;
     }
     if (m === 'xchg') {
-      if (dst?.kind === 'memory' || src?.kind === 'memory')
-        throw new Unsupported('Atomic memory XCHG');
       const left = this.read(dst!),
         right = this.read(src!);
       this.write(dst!, right);
@@ -854,8 +1091,16 @@ export class X86Semantics {
       ['loop', 'loope', 'loopne', 'ud2', 'int3', 'int'].includes(m)
     )
       return;
-    if (m === 'bts') {
-      this.bitTestAndSet();
+    if (m === 'bt' || m === 'bts' || m === 'btr' || m === 'btc') {
+      this.bitTest(m);
+      return;
+    }
+    if (m === 'bsf' || m === 'bsr' || m === 'tzcnt' || m === 'lzcnt' || m === 'popcnt') {
+      this.bitCount(m);
+      return;
+    }
+    if (m === 'shld' || m === 'shrd') {
+      this.doubleShift(m === 'shld');
       return;
     }
     if (m === 'bswap') {
@@ -942,32 +1187,232 @@ export class X86Semantics {
       );
       return;
     }
-    if (m === 'punpcklbw') {
-      // Legacy SSE only (VEX/EVEX and MMX are rejected above): interleave the low
-      // eight bytes of the destination and source; upper vector bits are preserved.
+    if (m === 'cmpxchg') {
+      // Memory forms only: the destination is always written (with its old value on failure).
+      if (dst?.kind !== 'memory' || src?.kind !== 'register')
+        throw new Unsupported('CMPXCHG with a register destination');
+      const width = this.width(dst),
+        accumulator = gpr('rax', width);
+      const old = this.read(dst),
+        expected = b.readRegister(accumulator);
+      this.arithmetic('sub', expected, old, this.c(1, 0n));
+      const equal = this.flag('zf');
+      this.write(dst, b.select(equal, this.read(src, width), old));
+      // A 32-bit accumulator write zero-extends RAX only when the comparison fails.
+      b.writeRegister(
+        width === 32 ? gpr('rax') : accumulator,
+        b.select(
+          equal,
+          b.readRegister(width === 32 ? gpr('rax') : accumulator),
+          this.resize(old, width === 32 ? 64 : width),
+        ),
+      );
+      return;
+    }
+    if (m === 'xadd') {
+      if (src?.kind !== 'register' || !dst) throw new Unsupported('XADD operands');
+      const old = this.read(dst),
+        sum = this.arithmetic('add', old, this.read(src, bitWidth(old.type)), this.c(1, 0n));
+      this.write(src, old);
+      this.write(dst, sum);
+      return;
+    }
+    if (m === 'mfence' || m === 'lfence' || m === 'sfence') {
+      b.memoryFence();
+      return;
+    }
+    if (m === 'pause') return;
+    const unpack = /^(?:punpck|unpck)([lh])(bw|wd|dq|qdq|ps|pd)$/.exec(m);
+    if (unpack) {
+      // Interleave the low (or high) halves of destination and source, destination first.
+      const size = { bw: 8, wd: 16, dq: 32, qdq: 64, ps: 32, pd: 64 }[unpack[2]!]!,
+        half = 64 / size,
+        base = unpack[1] === 'h' ? half : 0;
+      const left = this.xmm(dst),
+        right = this.xmm(src);
+      const parts: Value[] = [];
+      for (let lane = base; lane < base + half; lane++)
+        parts.push(b.extract(left, lane * size, size), b.extract(right, lane * size, size));
+      this.writeXmm(dst, b.concat(parts));
+      return;
+    }
+    if (m === 'pshufd' || m === 'pshuflw' || m === 'pshufhw') {
+      const source = this.xmm(src),
+        order = this.immediate(operands[2]);
+      const lanes = (offset: number, size: number): Value[] =>
+        [0, 1, 2, 3].map((lane) =>
+          b.extract(source, offset + Number((order >> BigInt(2 * lane)) & 3n) * size, size),
+        );
+      this.writeXmm(
+        dst,
+        b.concat(
+          m === 'pshufd'
+            ? lanes(0, 32)
+            : m === 'pshuflw'
+              ? [...lanes(0, 16), b.extract(source, 64, 64)]
+              : [b.extract(source, 0, 64), ...lanes(64, 16)],
+        ),
+      );
+      return;
+    }
+    if (m === 'shufps' || m === 'shufpd') {
+      const left = this.xmm(dst),
+        right = this.xmm(src),
+        order = this.immediate(operands[2]);
+      const pick = (value: Value, selector: bigint, size: number): Value =>
+        b.extract(value, Number(selector) * size, size);
+      this.writeXmm(
+        dst,
+        b.concat(
+          m === 'shufps'
+            ? [0, 1, 2, 3].map((lane) =>
+                pick(lane < 2 ? left : right, (order >> BigInt(2 * lane)) & 3n, 32),
+              )
+            : [pick(left, order & 1n, 64), pick(right, (order >> 1n) & 1n, 64)],
+        ),
+      );
+      return;
+    }
+    const laneCompare = /^pcmp(eq|gt)(b|w|d|q)$/.exec(m) ?? /^pm(ax|in)([su])(b|w|d)$/.exec(m);
+    if (laneCompare) {
+      const compare = m.startsWith('pcmp'),
+        size = laneSize(laneCompare.at(-1)!);
       if (
-        dst?.kind !== 'register' ||
-        dst.register.bank !== 'vector' ||
-        dst.register.width_bits !== 128 ||
-        (src?.kind !== 'register' && src?.kind !== 'memory')
-      )
-        throw new Unsupported('Only legacy SSE PUNPCKLBW xmm, xmm/m128 is modeled');
-      const type = vector(integer(8), 16),
-        left = b.cast('bitcast', type, this.read(dst, 128)),
-        right = b.cast('bitcast', type, this.read(src, 128, 16));
-      this.write(
+        compare &&
+        laneCompare[1] === 'eq' &&
+        dst?.kind === 'register' &&
+        src?.kind === 'register' &&
+        dst.register.id === src.register.id
+      ) {
+        this.writeXmm(dst, this.c(128, -1n));
+        return;
+      }
+      const left = this.xmm(dst),
+        right = this.xmm(src);
+      const predicate = compare
+        ? laneCompare[1] === 'eq'
+          ? 'eq'
+          : 'sgt'
+        : laneCompare[1] === 'ax'
+          ? laneCompare[2] === 's'
+            ? 'sgt'
+            : 'ugt'
+          : laneCompare[2] === 's'
+            ? 'slt'
+            : 'ult';
+      const parts: Value[] = [];
+      for (let lane = 0; lane < 128 / size; lane++) {
+        const l = b.extract(left, lane * size, size),
+          r = b.extract(right, lane * size, size),
+          holds = b.compare(predicate, l, r);
+        parts.push(compare ? b.cast('sign_extend', integer(size), holds) : b.select(holds, l, r));
+      }
+      this.writeXmm(dst, b.concat(parts));
+      return;
+    }
+    if (m === 'pmovmskb' || m === 'movmskps' || m === 'movmskpd') {
+      if (dst?.kind !== 'register' || src?.kind !== 'register')
+        throw new Unsupported('Mask extraction operands');
+      const size = m === 'pmovmskb' ? 8 : m === 'movmskps' ? 32 : 64,
+        source = this.xmm(src);
+      const signs: Value[] = [];
+      for (let lane = 0; lane < 128 / size; lane++)
+        signs.push(b.extract(source, lane * size + size - 1, 1));
+      this.write(dst, this.resize(b.concat(signs), this.width(dst)));
+      return;
+    }
+    if (m === 'pinsrw') {
+      const lane = Number(this.immediate(operands[2]) & 7n);
+      this.writeXmm(dst, b.insert(this.xmm(dst), this.read(src!, 16), lane * 16));
+      return;
+    }
+    if (m === 'pextrw') {
+      const lane = Number(this.immediate(operands[2]) & 7n),
+        word = b.extract(this.xmm(src), lane * 16, 16);
+      this.write(dst!, dst?.kind === 'memory' ? word : this.resize(word, this.width(dst!)));
+      return;
+    }
+    const vectorShift = /^ps(ll|rl|ra)(w|d|q|dq)$/.exec(m);
+    if (vectorShift && m !== 'psraq' && m !== 'psradq') {
+      const value = this.xmm(dst),
+        op = vectorShift[1] === 'll' ? 'shl' : vectorShift[1] === 'rl' ? 'lshr' : 'ashr';
+      if (vectorShift[2] === 'dq') {
+        // Whole-register byte shift; counts above 15 clear the register.
+        const bytes = this.immediate(src);
+        this.writeXmm(
+          dst,
+          bytes > 15n ? this.c(128, 0n) : b.int(op, value, this.c(128, bytes * 8n)),
+        );
+        return;
+      }
+      // The count is the unsigned immediate or the source's low quadword. Counts at or above the
+      // lane width clear logical lanes and fill arithmetic lanes with the sign (IR shifts
+      // saturate the same way), so the count is clamped to the lane width.
+      const size = laneSize(vectorShift[2]!),
+        type = vector(integer(size), 128 / size);
+      let count: Value;
+      if (src?.kind === 'immediate')
+        count = this.c(size, src.value < BigInt(size) ? src.value : BigInt(size));
+      else {
+        const raw = b.extract(this.xmm(src), 0, 64);
+        count = b.select(
+          b.compare('uge', raw, this.c(64, BigInt(size))),
+          this.c(size, BigInt(size)),
+          this.resize(raw, size),
+        );
+      }
+      const counts = b.pack(
+        type,
+        Array.from({ length: 128 / size }, () => count),
+      );
+      this.writeXmm(
+        dst,
+        b.cast('bitcast', integer(128), b.vectorInt(op, b.cast('bitcast', type, value), counts)),
+      );
+      return;
+    }
+    if (m === 'pmuludq') {
+      const left = this.xmm(dst),
+        right = this.xmm(src);
+      const product = (offset: number): Value =>
+        b.int(
+          'mul',
+          this.resize(b.extract(left, offset, 32), 64),
+          this.resize(b.extract(right, offset, 32), 64),
+        );
+      this.writeXmm(dst, b.concat([product(0), product(64)]));
+      return;
+    }
+    if (m === 'pmullw') {
+      const type = vector(integer(16), 8);
+      this.writeXmm(
         dst,
         b.cast(
           'bitcast',
           integer(128),
-          b.pack(
-            type,
-            Array.from({ length: 16 }, (_, index) =>
-              b.lane(index % 2 === 0 ? left : right, index >> 1),
-            ),
+          b.vectorInt(
+            'mul',
+            b.cast('bitcast', type, this.xmm(dst)),
+            b.cast('bitcast', type, this.xmm(src)),
           ),
         ),
       );
+      return;
+    }
+    if (['movhps', 'movhpd', 'movlps', 'movlpd', 'movhlps', 'movlhps'].includes(m)) {
+      // Quadword moves between XMM halves and memory; the other half (and bits above 127) stay.
+      const high = m === 'movhps' || m === 'movhpd';
+      if (dst?.kind === 'memory') {
+        this.write(dst, b.extract(this.xmm(src), high ? 64 : 0, 64));
+        return;
+      }
+      const quadword =
+        m === 'movhlps'
+          ? b.extract(this.xmm(src), 64, 64)
+          : m === 'movlhps'
+            ? b.extract(this.xmm(src), 0, 64)
+            : this.read(src!, 64);
+      this.writeXmm(dst, b.insert(this.xmm(dst), quadword, high || m === 'movlhps' ? 64 : 0));
       return;
     }
     if (m === 'cvtsi2ss' || m === 'cvtsi2sd') {
@@ -995,6 +1440,87 @@ export class X86Semantics {
         },
         b.cast('bitcast', integer(width), converted),
       );
+      this.fpStatus();
+      return;
+    }
+    const truncate = /^cvtt(ss|sd)2si$/.exec(m);
+    if (truncate) {
+      // Truncating conversion; NaN and out-of-range sources give the integer indefinite value
+      // (only the sign bit set). In range means -2^(n-1) - 1 < source < 2^(n-1).
+      if (dst?.kind !== 'register' || !src) throw new Unsupported('CVTT operands');
+      this.fpEnvironment();
+      b = this.block;
+      const from = truncate[1] === 'sd' ? 64 : 32,
+        to = this.width(dst);
+      const source = b.cast('bitcast', floating(from), this.read(src, from));
+      const bound = (value: number): Value => b.constant(floating(from), floatBits(value, from));
+      const limit = 2 ** (to - 1);
+      // -2^(n-1) - 1 is representable only when n + 1 bits fit the significand.
+      const low =
+        to + 1 <= (from === 64 ? 53 : 24)
+          ? b.fpCompare('gt', source, bound(-limit - 1))
+          : b.fpCompare('ge', source, bound(-limit));
+      const inRange = b.int('and', low, b.fpCompare('lt', source, bound(limit)));
+      this.write(
+        dst,
+        b.select(
+          inRange,
+          b.cast('float_to_signed', integer(to), source),
+          this.c(to, 1n << BigInt(to - 1)),
+        ),
+      );
+      this.fpStatus();
+      return;
+    }
+    const scalar = /^(cvtss2sd|cvtsd2ss|sqrtss|sqrtsd|minss|minsd|maxss|maxsd)$/.test(m);
+    const packedMinMax = /^(min|max)(ps|pd)$/.exec(m);
+    const fpCompare = /^cmp(ss|sd|ps|pd)$/.exec(m);
+    if (scalar || packedMinMax || (fpCompare && operands.length === 3)) {
+      if (dst?.kind !== 'register' || dst.register.bank !== 'vector' || !src)
+        throw new Unsupported('Only legacy SSE XMM destinations are modeled');
+      this.fpEnvironment();
+      b = this.block;
+      const suffix = m.slice(-2),
+        size: 32 | 64 = suffix.endsWith('d') ? 64 : 32,
+        packed = suffix.startsWith('p');
+      // The source width of a conversion is its input format, not its result.
+      const input: 32 | 64 = m === 'cvtss2sd' ? 32 : m === 'cvtsd2ss' ? 64 : size;
+      // Conversions and square roots read only the source.
+      const unary = m.startsWith('cvt') || m.startsWith('sqrt');
+      const left = unary ? undefined : packed ? this.xmm(dst) : this.read(dst, input),
+        right = packed ? this.xmm(src) : this.read(src, input);
+      const lane = (l: Value | undefined, r: Value): Value => {
+        const y = b.cast('bitcast', floating(input), r);
+        // The mnemonic suffix is the result format.
+        if (m === 'cvtss2sd' || m === 'cvtsd2ss')
+          return b.cast('bitcast', integer(size), b.cast('float_convert', floating(size), y));
+        if (m.startsWith('sqrt'))
+          return b.cast(
+            'bitcast',
+            integer(size),
+            b.assign(floating(size), { kind: 'float_unary', op: 'sqrt', value: y }),
+          );
+        const x = b.cast('bitcast', floating(input), l!);
+        if (fpCompare) {
+          const predicate = Number(this.immediate(operands[2]) & 7n);
+          const [op, negate] = fpPredicates[predicate]!;
+          const holds = b.fpCompare(op, x, y);
+          return b.cast('sign_extend', integer(size), negate ? b.unary('not', holds) : holds);
+        }
+        // MIN/MAX return the second operand when either is NaN or both are zero: exact bits.
+        return b.select(b.fpCompare(m.startsWith('min') ? 'lt' : 'gt', x, y), l!, r);
+      };
+      if (packed) {
+        const parts: Value[] = [];
+        for (let index = 0; index < 128 / size; index++)
+          parts.push(
+            lane(b.extract(left!, index * size, size), b.extract(right, index * size, size)),
+          );
+        this.writeXmm(dst, b.concat(parts));
+      } else {
+        const result = lane(left, right);
+        this.writeLow(dst, result);
+      }
       this.fpStatus();
       return;
     }
