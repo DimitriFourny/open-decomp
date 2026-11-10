@@ -935,3 +935,19 @@ test('native symbol-table completeness is reported independently of unrelated op
   assert.equal(tables(broken)?.status, 'partial');
   assert.ok(tables(broken)!.limitations.length > 0);
 });
+
+test('a __LINKEDIT payload outside the file is dropped alone, not the image', () => {
+  const tables = (loaded: LoadedImage) =>
+    loaded.capabilities.find((capability) => capability.feature === NATIVE_SYMBOL_TABLES_FEATURE);
+  // LC_CODE_SIGNATURE of a truncated signed file, and function starts past the end.
+  const loaded = load(image([linkedit(29, 0x100000, 0x100), linkedit(38, 0x100000, 4)]));
+  assert.ok(
+    loaded.diagnostics.some(
+      (d) => d.severity === 'warning' && d.message.startsWith('LC_CODE_SIGNATURE:'),
+    ),
+  );
+  assert.ok(loaded.diagnostics.some((d) => d.message.startsWith('LC_FUNCTION_STARTS:')));
+  assert.equal(tables(loaded)?.status, 'supported');
+  const trie = load(image([linkedit(0x80000033, 0x100000, 4)]));
+  assert.equal(tables(trie)?.status, 'partial');
+});
