@@ -506,6 +506,14 @@ export interface SourcePresentation {
   /** Source view only: frame-private save/restore traffic of preserved registers
    * and the frame record, hidden under an `abi_conformance` requirement. */
   readonly frame_saves?: FrameSaves;
+  /** Source view only: omitted stack-protector checks (`classifyStackProtector`):
+   * each check `if` -> the block it continues to, the failure blocks that print
+   * nothing, and the canary slots' entry-SP offsets. */
+  readonly stack_protector?: {
+    readonly guards: ReadonlyMap<string, string>;
+    readonly omitted: ReadonlySet<string>;
+    readonly offsets: readonly bigint[];
+  };
   readonly addresses: readonly SourceAddress[];
   /** Whole source-call results may be assembled from multiple SSA register cells. */
   readonly call_results?: ReadonlyMap<string, readonly Value[]>;

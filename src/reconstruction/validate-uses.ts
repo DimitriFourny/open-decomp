@@ -32,7 +32,11 @@ export function validateEmittedUses(
   const define = (value: Value, block: string, order: number): void => {
     if (!program.inline.has(value.id)) definitions.set(value.id, { block, order });
   };
+  // Omitted stack-protector checks read no condition; their failure blocks
+  // print nothing.
+  const protector = program.source?.stack_protector;
   for (const id of reachable) {
+    if (protector?.omitted.has(id)) continue;
     const block = program.blocks.get(id)!;
     // Edges bind first; the block's own definitions follow, then its statements.
     for (const parameter of boundParameters(program, block)) define(parameter, id, -2);
@@ -117,6 +121,7 @@ export function validateEmittedUses(
     }
   };
   for (const id of reachable) {
+    if (protector?.omitted.has(id)) continue;
     const block = program.blocks.get(id)!;
     for (const definition of program.source?.definitions?.get(id) ?? [])
       for (const operand of expressionOperands(definition.expression))
@@ -154,7 +159,10 @@ export function validateEmittedUses(
     // The dropped `al` guard of a SysV va_start (S7) prints no test.
     const variadic = program.source?.variadic;
     if (control.kind === 'if') {
-      if (variadic?.kind !== 'va_list' || variadic.guard !== control.id)
+      if (
+        (variadic?.kind !== 'va_list' || variadic.guard !== control.id) &&
+        !protector?.guards.has(control.id)
+      )
         use(control.condition, id, order, control);
     } else if (control.kind === 'switch') use(control.value, id, order, control);
     else if (control.kind === 'indirect') use(control.target, id, order, control);
