@@ -33,6 +33,7 @@ import type { Requirement } from '../core/inference.js';
 import { LocalValidationSession } from './local-validation.js';
 import { type ForwardedByte, validateStackPromotion } from './local-storage-validation.js';
 import { sourceRequirementPredicates } from './source-requirements.js';
+import { classifyStackProtector, type StackProtector } from './source-protector.js';
 import { classifyIndirectTails } from './source-tails.js';
 import { classifySysvVaStart, classifyVariadicArea } from './source-variadic.js';
 
@@ -360,7 +361,9 @@ export interface FrameSaveQualifier {
  * against an explicit exit list. A slot is a save when (i) its only store
  * writes the entry value of a preserved register or the link register, (ii)
  * every given exit restores that register from a dominated load of exactly
- * this slot and no other access overlaps it, (iii) no stack address of it
+ * this slot or still holds its entry value (a slot nothing reloads, or a
+ * function with no exit, needs no reload) and no other access overlaps it,
+ * (iii) no stack address of it
  * escapes and (iv) it is not established outgoing argument storage. Under ABI
  * conformance callees never write it, so each reload equals the saved value and
  * neither access is source-observable. The caller checks that the frame as a
@@ -520,7 +523,6 @@ export function frameSaveQualifier(
         !save ||
         !saved ||
         stores.length !== 1 ||
-        !loads.length ||
         first.offset >= 0n ||
         first.end > 0n ||
         group.some(
@@ -1095,9 +1097,49 @@ export function planSourceStack(
     }
   }
   const guardEffects = new Set<string>();
+  // Source view: code after a call whose established contract is noreturn
+  // never executes: the rest of its block, and every block entered only from
+  // such code. An unknown effect there (the undiscovered fallthrough
+  // placeholder) is no frame escape.
+  const noreturnCalls = new Set<string>(),
+    // Unexecuted block -> the noreturn call that ends every path into it.
+    afterNoreturn = new Map<string, string>();
+  if (view === 'source') {
+    for (const call of input.types?.calls?.calls ?? [])
+      if (call.noreturn === 'yes') noreturnCalls.add(call.node_id);
+    const ending = new Map<string, string>();
+    for (const block of blocks.values())
+      for (const node of block.statements)
+        if (node.kind === 'call' && noreturnCalls.has(node.id)) {
+          ending.set(block.id, node.id);
+          break;
+        }
+    const entered = new Map<string, string[]>();
+    for (const { transfer, block } of transfers) {
+      const row = entered.get(transfer.target) ?? [];
+      row.push(block.id);
+      entered.set(transfer.target, row);
+    }
+    for (let grown = ending.size > 0; grown;) {
+      grown = false;
+      for (const [id, sources] of entered) {
+        context.checkpoint(1);
+        if (afterNoreturn.has(id) || id === input.function.entry) continue;
+        const calls = sources.map((source) => ending.get(source) ?? afterNoreturn.get(source));
+        if (calls.every((call) => call !== undefined)) {
+          afterNoreturn.set(id, calls[0]!);
+          grown = true;
+        }
+      }
+    }
+  }
+  const noreturnEffects: { effect: string; call: string }[] = [];
   for (const block of blocks.values()) {
+    let noreturn = afterNoreturn.get(block.id);
     for (const node of block.statements) {
       context.checkpoint(1);
+      if (node.kind === 'call' && noreturn === undefined && noreturnCalls.has(node.id))
+        noreturn = node.id;
       if (node.kind === 'call') {
         callNodes.push(node);
         const projection = calls.get(node.id)!;
@@ -1128,6 +1170,7 @@ export function planSourceStack(
       } else if (node.kind === 'unknown_effect') {
         escaped = true;
         if (fpFailureArms.has(block.id)) guardEffects.add(block.id);
+        else if (noreturn !== undefined) noreturnEffects.push({ effect: node.id, call: noreturn });
         else reachAll = frameExposed = true;
       }
       if (node.kind !== 'load' && node.kind !== 'store') continue;
@@ -1173,6 +1216,17 @@ export function planSourceStack(
       )
     )
       reachAll = frameExposed = true;
+  if (
+    noreturnEffects.length &&
+    (frameExposed ||
+      !validation.presentation(
+        'noreturn_fallthrough_frame',
+        input.function.id,
+        'unknown effect after a call established as noreturn, in its block or in a block entered only from such code: under the call contract it never executes, so it is not a frame address escape; the call, the effect and the unresolved exit stay printed',
+        noreturnEffects.flatMap(({ effect, call }) => [effect, call]).slice(0, 64),
+      ))
+  )
+    reachAll = frameExposed = true;
   // A frame address stored into bytes an escaped address reaches escapes too:
   // whoever holds the outer address can read it back.
   const storedEscapes = new Set<string>();
@@ -1232,7 +1286,7 @@ export function planSourceStack(
   // address reaches them, only the callee's return consumes it: call mechanics,
   // not a source local. The checked view retains every store.
   const returnAddressPushes = new Set<string>();
-  if (view === 'source' && !reachAll && abi.stack_return_address_bytes > 0n) {
+  if (view === 'source' && !frameExposed && abi.stack_return_address_bytes > 0n) {
     const pushes: (typeof accesses)[number][] = [];
     const byStore = new Map(accesses.map((access) => [access.node.id, access]));
     for (const block of blocks.values())
@@ -1266,10 +1320,27 @@ export function planSourceStack(
         pushes.push(push);
       }
     const pushIds = new Set(pushes.map((push) => push.node.id));
+    // The lowest frame byte any other exact access touches: a push below it
+    // writes bytes below every object this frame addresses exactly.
+    let lowest: bigint | undefined;
+    for (const access of accesses)
+      if (!pushIds.has(access.node.id) && (lowest === undefined || access.offset < lowest))
+        lowest = access.offset;
+    // Every known base of an escaped or indexed frame address and every
+    // bounded escape floor counts as an access of the object it designates.
+    for (const offset of [...exposedOffsets, ...escapeFloors.keys(), ...indexedBases])
+      if (lowest === undefined || offset < lowest) lowest = offset;
+    const belowFrame = new Set<string>();
     for (const push of pushes) {
       context.checkpoint(accesses.length);
+      // Below every exact access and every known base or floor of an escaped
+      // or indexed frame address, the push needs no escape bound: such an
+      // address designates bytes of an object of this frame, and no object
+      // lies below the stack pointer of a call
+      // (`call_return_address_below_frame`).
+      const below = lowest === undefined || push.end <= lowest;
       if (
-        (reachFloor !== undefined && push.end > reachFloor) ||
+        (!below && (reachAll || (reachFloor !== undefined && push.end > reachFloor))) ||
         accesses.some(
           (access) =>
             !pushIds.has(access.node.id) && access.offset < push.end && access.end > push.offset,
@@ -1277,18 +1348,28 @@ export function planSourceStack(
         !validation.presentation(
           'call_return_address',
           push.node.id,
-          `call instruction's own push of its fall-through address at callee-entry SP ${push.offset}; no other frame access overlaps; no escaped frame address reaches it`,
+          below && (reachAll || (reachFloor !== undefined && push.end > reachFloor))
+            ? `call instruction's own push of its fall-through address at callee-entry SP ${push.offset}, below every other frame access; no frame address of unknown origin exists`
+            : `call instruction's own push of its fall-through address at callee-entry SP ${push.offset}; no other frame access overlaps; no escaped frame address reaches it`,
           [push.node.id],
         )
       )
         continue;
       returnAddressPushes.add(push.node.id);
+      if (below && (reachAll || (reachFloor !== undefined && push.end > reachFloor)))
+        belowFrame.add(push.node.id);
     }
     if (returnAddressPushes.size)
       validation.requireAbi(
         'call_return_address',
         [...returnAddressPushes].slice(0, 64),
         'Hiding a call’s return-address push assumes ABI conformance: the callee consumes the pushed fall-through address only to return and it is not argument storage. Each store remains in the checked view and the original mappings.',
+      );
+    if (belowFrame.size)
+      validation.requireAbi(
+        'call_return_address_below_frame',
+        [...belowFrame].slice(0, 64),
+        'A push below every exact frame access is hidden although some escaped or indexed frame address has no proven lower bound. This assumes that such an address designates bytes of an object of this frame and that no object of a function that calls lies below the stack pointer of its calls (no red-zone object outlives a call). Each store remains in the checked view and the original mappings.',
       );
   }
   // An open argument list describes an unbounded caller-SP-relative area: any
@@ -1540,10 +1621,88 @@ export function planSourceStack(
     }
     return false;
   };
+  // Source view: write-backs (gcc's `lock or [rsp], 0` barrier). A store of
+  // the whole bits a load of exactly the same frame slot read, later in the
+  // same block with no store, call or unknown effect between, into a slot no
+  // escaped frame address reaches, leaves memory unchanged: the store is not
+  // printed (`frame_write_back`), its load only when dead, and neither counts
+  // as an access of the slot for frame saves.
+  const writeBackStores = new Set<string>(),
+    writeBackLoads = new Set<string>();
+  if (view === 'source' && !reachAll && !frameExposed) {
+    const loadOf = new Map<string, (typeof accesses)[number]>();
+    for (const access of accesses)
+      if (access.node.kind === 'load') loadOf.set(access.node.result.id, access);
+    for (const access of accesses) {
+      context.checkpoint(1);
+      const store = access.node;
+      if (store.kind !== 'store' || store.access.volatile) continue;
+      let value = store.value;
+      for (let depth = 0; depth < 8; depth++) {
+        const expression = expressions.get(value.id);
+        if (
+          expression?.kind !== 'cast' ||
+          expression.op !== 'bitcast' ||
+          bitWidth(expression.value.type) !== bitWidth(value.type)
+        )
+          break;
+        value = expression.value;
+      }
+      const load = loadOf.get(value.id);
+      if (
+        !load ||
+        load.key !== access.key ||
+        load.block !== access.block ||
+        load.node.access.volatile ||
+        load.node.access.endian !== store.access.endian ||
+        (reachFloor !== undefined && access.end > reachFloor) ||
+        [...exposedOffsets].some((offset) => offset >= access.offset && offset < access.end) ||
+        outgoingRanges.some((range) => range.start < access.end && range.end > access.offset)
+      )
+        continue;
+      const statements = blocks.get(access.block)!.statements;
+      const from = positions.get(load.node.id)!,
+        to = positions.get(store.id)!;
+      if (from >= to) continue;
+      let written = false;
+      for (let index = from + 1; index < to && !written; index++) {
+        const node = statements[index]!;
+        written = node.kind === 'store' || node.kind === 'call' || node.kind === 'unknown_effect';
+      }
+      if (
+        written ||
+        !validation.presentation(
+          'frame_write_back',
+          store.id,
+          'a store of the bits a load of the same exact nonvolatile frame slot read earlier in its block, with no store, call or unknown effect between, into a slot no escaped frame address reaches: memory is unchanged, so the store prints nothing and the load prints only when its value is used',
+          [store.id, load.node.id],
+        )
+      )
+        continue;
+      writeBackStores.add(store.id);
+      writeBackLoads.add(load.node.id);
+    }
+    if (writeBackStores.size)
+      validation.requireAbi(
+        'frame_private_to_activation',
+        [...writeBackStores].slice(0, 64),
+        'Nonescaping frame-private storage belongs to this activation: pointers supplied by callers, globals, external loads and call results cannot alias it. Callees observe only declared argument storage. Original memory effects and alias facts remain in the checked view.',
+      );
+  }
+  const unwritten = writeBackStores.size
+    ? (access: (typeof accesses)[number]) =>
+        !writeBackStores.has(access.node.id) && !writeBackLoads.has(access.node.id)
+    : undefined;
   const frameSaves = frameSaveQualifier(
     {
-      accesses,
-      groups,
+      accesses: unwritten ? accesses.filter(unwritten) : accesses,
+      groups: unwritten
+        ? new Map(
+            [...groups]
+              .map(([key, group]) => [key, group.filter(unwritten)] as const)
+              .filter(([, group]) => group.length > 0),
+          )
+        : groups,
       exposedOffsets,
       outgoingRanges,
       entry,
@@ -1579,13 +1738,15 @@ export function planSourceStack(
   const exits = indirectTails.size
     ? [...tailExits, ...[...blocks.values()].filter((block) => indirectTails.has(block.control.id))]
     : tailExits;
-  if (!frameExposed && exits.length) {
+  // A function with no return or tail exit (it ends in noreturn calls or
+  // traps) restores nothing: its saves need no reload.
+  if (!frameExposed) {
     frameSaves.qualify(exits, ({ key, save, loads, bits }) => {
       if (
         !validation.presentation(
           'frame_save',
           `stack:${key}`,
-          `frame-private save of ${bits.root}[${bits.low}:${bits.width}] at entry SP ${save.offset}; restored from this exact slot on every return/tail exit; nonescaping, nonoverlapping, not established outgoing argument storage`,
+          `frame-private save of ${bits.root}[${bits.low}:${bits.width}] at entry SP ${save.offset}; ${loads.length ? 'restored from this exact slot on every return/tail exit' : 'never read, and every return/tail exit holds the unmodified entry value'}; nonescaping, nonoverlapping, not established outgoing argument storage`,
           [save.node.id, ...loads.map((load) => load.node.id)].slice(0, 64),
         )
       )
@@ -1605,9 +1766,39 @@ export function planSourceStack(
     if (saveStores.size)
       validation.requireAbi(
         'frame_save',
-        [exits[0]!.control.id, ...saveStores],
+        [...exits.slice(0, 1).map((exit) => exit.control.id), ...saveStores],
         FRAME_SAVE_PREMISE,
       );
+  }
+  // Source view: stack-protector canaries (`classifyStackProtector`). Their
+  // slots are neither promoted nor forwarded; reconstruct() decides whether the
+  // protector is omitted.
+  const protector: StackProtector[] =
+    view === 'source' && !frameExposed
+      ? classifyStackProtector(
+          {
+            input,
+            blocks,
+            expressions,
+            transfers,
+            accesses,
+            groups,
+            addresses,
+            exposedOffsets,
+            outgoingRanges,
+            pushes: returnAddressPushes,
+            dominates,
+            abi,
+          },
+          context,
+        )
+      : [];
+  const protectorLoads = new Set<string>();
+  for (const item of protector) {
+    const key = accesses.find((access) => access.node.id === item.store)!.key;
+    eligible.delete(key);
+    argumentSlots.delete(key);
+    for (const id of item.loads) protectorLoads.add(id);
   }
   // Source view: a non-volatile frame load dominated by a store covering its
   // bytes cannot fault. If its result is dead, reconstruct() may drop it.
@@ -1615,7 +1806,13 @@ export function planSourceStack(
   const byNode = new Map(accesses.map((access) => [access.node.id, access]));
   if (view === 'source')
     for (const load of accesses) {
-      if (load.node.kind !== 'load' || load.node.access.volatile || saveReloads.has(load.node.id))
+      if (
+        load.node.kind !== 'load' ||
+        load.node.access.volatile ||
+        saveReloads.has(load.node.id) ||
+        protectorLoads.has(load.node.id) ||
+        writeBackLoads.has(load.node.id)
+      )
         continue;
       // A covering store must cover the first byte; filter only that bucket.
       // Valid IR memory accesses are byte-width, so every indexed store is an access.
@@ -1775,7 +1972,12 @@ export function planSourceStack(
       }
     }
   }
-  const hidden = new Set<string>([...saveStores, ...saveReloads, ...returnAddressPushes]),
+  const hidden = new Set<string>([
+      ...saveStores,
+      ...saveReloads,
+      ...returnAddressPushes,
+      ...writeBackStores,
+    ]),
     privateLoads = new Set<string>(),
     locals = new Map<string, SourceLocal>(),
     // Source view: loads bound to incoming formals (named stack arguments).
@@ -2799,5 +3001,9 @@ export function planSourceStack(
     indirectTails,
     /** Source view: the callee-side variadic interface, or null. */
     variadic: variadicArea,
+    /** Source view: stack-protector canaries reconstruct() may omit. */
+    protector,
+    /** Source view: the loads of hidden write-backs, dropped when dead. */
+    writeBackLoads,
   };
 }
