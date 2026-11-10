@@ -83,10 +83,7 @@ export function nativeWrittenRegisters(
   );
   const written = new Map<string, bigint>(),
     represented = new Map<string, bigint>();
-  const add = (
-    into: Map<string, bigint>,
-    register: RegisterSlice,
-  ): void => {
+  const add = (into: Map<string, bigint>, register: RegisterSlice): void => {
     into.set(
       register.root,
       (into.get(register.root) ?? 0n) | mask(register.offset_bits, register.width_bits),
@@ -100,8 +97,7 @@ export function nativeWrittenRegisters(
     const callee = interfaces.get(call.id)?.written_registers ?? call.clobbers.registers;
     for (const slice of callee) {
       context.checkpoint(1);
-      const bits =
-        mask(slice.offset_bits, slice.width_bits) & ~(represented.get(slice.root) ?? 0n);
+      const bits = mask(slice.offset_bits, slice.width_bits) & ~(represented.get(slice.root) ?? 0n);
       if (bits) written.set(slice.root, (written.get(slice.root) ?? 0n) | bits);
     }
   }
@@ -222,7 +218,8 @@ export function nativeWrittenRegisters(
         bitWidth(expression.value.type) === width
       )
         pending.push([expression.value, at]);
-      else if (expression?.kind === 'extract') pending.push([expression.value, at - expression.offset]);
+      else if (expression?.kind === 'extract')
+        pending.push([expression.value, at - expression.offset]);
       else if (expression?.kind === 'concat') {
         let part = at;
         for (const item of expression.values) {

@@ -624,8 +624,7 @@ function observeParameters(
             ? new Set(returns.map((register) => register.root))
             : undefined;
       if (leaving)
-        for (const binding of (ir.register_states.find((row) => row.block === block.id)?.exit ??
-          []))
+        for (const binding of ir.register_states.find((row) => row.block === block.id)?.exit ?? [])
           if (leaving.has(binding.register.root)) referenced.add(binding.value.id);
       for (const value of control.kind === 'branch'
         ? [control.condition]
