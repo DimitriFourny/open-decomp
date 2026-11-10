@@ -1023,7 +1023,7 @@ function discoverOnce(
       const visited = new Set<bigint>();
       const pending = [entry];
       const ends = (target: bigint | null, proof: readonly string[] | undefined): boolean => {
-        let evidence = proof;
+        let evidence: Iterable<string> | undefined = proof;
         if (!evidence && target !== null && group?.has(target)) {
           evidence = seedAt(target)?.evidence;
           uses?.add(target);
