@@ -774,6 +774,65 @@ for (const abi of [sysvAMD64Abi, windowsX64Abi])
     }
   });
 
+for (const abi of [sysvAMD64Abi, windowsX64Abi])
+  test(`${abi.id}: a push below every frame access needs no escape bound`, () => {
+    const site = (name: string): Provenance => ({
+      instruction_ids: [entityIdentity(slice, 'instruction', name)],
+      ranges: [{ start: { image_id: image, space: 'va', value: 0x1000n }, size: 5n }],
+      evidence_ids: [],
+      synthetic: [],
+    });
+    for (const gate of ['unbounded', 'base-below', 'opaque-effect'] as const) {
+      const b = builder(`push-below-frame-${abi.id}-${gate}`),
+        block = b.block('entry');
+      const entry = block.readRegister(abi.stack_pointer);
+      const argument = block.readRegister(firstArgument(abi));
+      const sp = block.int('sub', entry, block.constant(u64, 32n));
+      block.writeRegister(abi.stack_pointer, sp);
+      const local = block.int('add', sp, block.constant(u64, 8n));
+      block.store(local, block.constant(u64, 3n));
+      const next = block.int('sub', sp, block.constant(u64, 8n));
+      // An escaped frame address with no lower bound (`unbounded`), or one
+      // based on the push slot itself (`base-below`).
+      block.writeRegister(
+        firstArgument(abi),
+        gate === 'base-below'
+          ? block.int('add', next, argument)
+          : block.int('sub', local, argument),
+      );
+      if (gate === 'opaque-effect')
+        block.unknown('Opaque instruction', {
+          registers: [],
+          flags: [],
+          memory: 'unknown_read_write',
+        });
+      block.writeRegister(abi.stack_pointer, next);
+      block.source(site('call'));
+      block.store(next, block.address({ image_id: image, space: 'va', value: 0x1005n }));
+      block.call(
+        { kind: 'direct', address: { image_id: image, space: 'va', value: 0x2000n } },
+        [],
+        [],
+        abi.unknown_call_clobbers,
+        [newIdentity('evidence')],
+      );
+      block.source(provenance);
+      block.writeRegister(abi.stack_pointer, entry);
+      block.return([block.load(u64, local)]);
+      const fixture = prepare(b.finish(block, [u64]), abi);
+      const source = fixture.view('source');
+      const premises = (source.local_validation_session?.abiConformance ?? []).map(
+        (requirement) => requirement.rule,
+      );
+      assert.equal(rules(source).includes('call_return_address'), gate === 'unbounded');
+      assert.equal(premises.includes('call_return_address_below_frame'), gate === 'unbounded');
+      for (const language of ['c-like', 'python-like'] as const) {
+        const output = emit(fixture.ir, fixture.extra, language).emission;
+        assert.equal(/0x1005/.test(output.text), gate !== 'unbounded', output.text);
+      }
+    }
+  });
+
 test('darwin-arm64: an FP-guard failure arm is no frame escape under its requirement', () => {
   for (const reason of [fpEnvironmentGuard.unsupported_effect, 'unmodeled effect']) {
     const b = builder(`fp-guard-frame-${reason}`),

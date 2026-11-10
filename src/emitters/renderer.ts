@@ -67,6 +67,7 @@ import {
   SOURCE_FP_ENVIRONMENT,
   type SourceFpPresentation,
 } from '../reconstruction/source-fp.js';
+import { omitStackProtector } from '../reconstruction/source-protector.js';
 import { indexedDataAccesses, type IndexedDataAccess } from './source-tables.js';
 import {
   planGlobals,
@@ -604,7 +605,7 @@ export class Renderer {
         'nonstandard-width integer locals use the next ordinary C storage width; conversions retain exact low-bit masks and signed interpretation, with one evaluation of each operand',
       );
     this.fpPresentation = sourceFpPresentation(this.program, context);
-    this.body = this.fpPresentation.body;
+    this.body = this.omitProtector(this.fpPresentation.body);
     this.sourceStructs = new SourceStructs(
       this.typeRecords,
       this.localValidation,
@@ -4045,9 +4046,19 @@ export class Renderer {
   private declareSourceCallees(): void {
     if (!this.sourceView || this.language !== 'c-like') return;
     const declarations = new Map<string, { text: string; node: Instruction } | null>();
+    // Calls in omitted stack-protector failure blocks print nowhere.
+    const omitted = new Set<string>();
+    for (const id of this.program.source?.stack_protector?.omitted ?? [])
+      for (const node of this.program.blocks.get(id)?.statements ?? []) omitted.add(node.id);
     for (const [id, projection] of this.program.calls) {
       const node = this.statements.get(id);
-      if (node?.kind !== 'call' || node.target.kind !== 'direct' || this.objcSend(node)) continue;
+      if (
+        node?.kind !== 'call' ||
+        node.target.kind !== 'direct' ||
+        this.objcSend(node) ||
+        omitted.has(id)
+      )
+        continue;
       const name = this.sourceCallee(node);
       if (name === this.identifiers.get(this.input.function.id)?.identifier) continue;
       const signature = projection.signature?.signature;
@@ -6737,6 +6748,22 @@ export class Renderer {
     }
   }
 
+  /** Source view: the body without the omitted stack-protector checks. */
+  private omitProtector(body: Region): Region {
+    const protector = this.sourceView ? this.program.source?.stack_protector : undefined;
+    return protector
+      ? omitStackProtector(body, protector.guards, protector.omitted, this.context)
+      : body;
+  }
+
+  /** Blocks that print nothing: FP-guard and stack-protector failure paths. */
+  private get omittedBlocks(): ReadonlySet<string> {
+    const protector = this.sourceView ? this.program.source?.stack_protector : undefined;
+    return protector?.omitted.size
+      ? new Set([...this.fpPresentation.omitted, ...protector.omitted])
+      : this.fpPresentation.omitted;
+  }
+
   /** Source view: a trap whose block ends in a call established as noreturn
    * adds nothing a reader of that call does not know. */
   private noreturnCallExit(
@@ -8234,7 +8261,7 @@ export class Renderer {
       }
     }
     this.program = { ...program, function: result.value, blocks };
-    this.body = this.fpPresentation.rewrite(result.value.body);
+    this.body = this.omitProtector(this.fpPresentation.rewrite(result.value.body));
   }
 
   /** Source view, C-like (L4): rotate the loop-carried copies that alone keep a
@@ -8361,7 +8388,7 @@ export class Renderer {
           ? source
           : undefined;
       },
-      this.fpPresentation.omitted,
+      this.omittedBlocks,
       (node, result) => this.admitInlinedCall(node, result),
     );
     const candidates = plan.sites;
@@ -10073,6 +10100,28 @@ export class Renderer {
         );
         mapSites(requirement, start, w.offset);
       }
+    // Source view: omitted stack-protector checks print one note; the checks,
+    // their failure blocks and the canary traffic map to it.
+    const protector = this.sourceView ? this.program.source?.stack_protector : undefined;
+    if (protector) {
+      const start = w.offset;
+      w.comment(
+        0,
+        `stack protector: canary at entry-SP offset ${protector.offsets.map((offset) => `-0x${(-offset).toString(16)}`).join(', ')}, checked before return; checks omitted (requirement stack_protector)`,
+      );
+      const end = w.offset;
+      for (const id of protector.guards.keys()) {
+        const control = this.controls.get(id);
+        if (control) this.map(control, start, [], end);
+      }
+      for (const id of protector.omitted) {
+        const block = this.program.blocks.get(id);
+        if (!block) continue;
+        this.map(block, start, [], end);
+        this.map(block.control, start, [], end);
+        for (const node of block.statements) this.map(node, start, [], end);
+      }
+    }
     if (this.sourceView) {
       const renamed: string[] = [];
       for (const [id, spelling] of this.linkageNames)

@@ -16,7 +16,7 @@ import { structureControlFlow } from '../../src/presentation/index.js';
 import { reconstruct } from '../../src/reconstruction/index.js';
 import { builder, image, slice } from '../ir/support.js';
 import { acknowledgeRequirements, emit, emittedFormals, execute } from '../emitters/c/support.js';
-import { assertMatchesIR, savedFrame, sourcePlan } from './frame-support.js';
+import { assertMatchesIR, firstArgument, savedFrame, sourcePlan } from './frame-support.js';
 
 const u64 = integer(64);
 type Shape = 'shrink-wrapped' | 'modified-early' | 'slot-escapes' | 'other-object-escapes';
@@ -398,4 +398,223 @@ for (const abi of [darwinArm64Abi, sysvAMD64Abi, windowsX64Abi])
         assert.match(python, /frame = stack_frame\(\d+, 16, -0x8\)/, python);
       } else assert.match(python, /frame = stack_frame\(\d+, 16\)/, python);
       assertMatchesIR(fixture, abi, [0n, 1n, 0x1234n, (1n << 64n) - 1n]);
+    });
+
+/** A save restored on return, and a second path that calls `sub_3000` and
+ * falls through into an undiscovered-fallthrough unknown effect. `noreturn`:
+ * sub_3000 has an established noreturn contract; `returns`: its contract does
+ * not say noreturn; `joined`: the effect block is also entered from a path
+ * that made no call. */
+function afterCall(abi: AbiProfile, shape: 'noreturn' | 'returns' | 'joined') {
+  const saved = abi.preserved.find(
+    (register) => register.bank === 'integer' && register.root !== abi.stack_pointer.root,
+  )!;
+  const b = builder(`after-noreturn-${abi.id}-${shape}`),
+    entry = b.block('entry'),
+    fail = b.block('fail'),
+    fallthrough = b.block('fallthrough'),
+    done = b.block('done');
+  const stackEntry = entry.readRegister(abi.stack_pointer);
+  const slot = entry.int('sub', stackEntry, entry.constant(u64, 16n));
+  entry.writeRegister(abi.stack_pointer, slot);
+  entry.store(slot, entry.readRegister(saved));
+  entry.writeRegister(saved, entry.constant(u64, 5n));
+  const argument = entry.readRegister(firstArgument(abi));
+  const condition = entry.extract(argument, 0, 1);
+  if (shape === 'joined') {
+    const other = b.block('other');
+    entry.branch(condition, entry.edge(fail), entry.edge(other));
+    other.branch(other.extract(argument, 1, 1), other.edge(fallthrough), other.edge(done));
+  } else entry.branch(condition, entry.edge(fail), entry.edge(done));
+  fail.call(
+    { kind: 'direct', address: { image_id: image, space: 'va', value: 0x3000n } },
+    [],
+    [],
+    abi.unknown_call_clobbers,
+  );
+  fail.jump(fallthrough);
+  fallthrough.unknown('Missing or ambiguous discovered fallthrough', abi.unknown_call_clobbers);
+  fallthrough.terminate({ kind: 'unknown', reason: 'Missing or ambiguous discovered fallthrough' });
+  done.writeRegister(saved, done.load(u64, slot));
+  done.writeRegister(abi.stack_pointer, stackEntry);
+  done.return([done.constant(u64, 7n)]);
+  const ir = constructSSA(b.finish(entry, [u64])).value as SSAForm;
+  const types = recoverTypes(ir, abi, createOperationContext(), {
+    image_id: image,
+    slice_id: slice,
+    revision: 0,
+    contracts: [
+      {
+        id: 'contract-exit',
+        target: { kind: 'address', address: { image_id: image, space: 'va', value: 0x3000n } },
+        signature: {
+          parameters: [],
+          returns: { kind: 'void' },
+          variadic: false,
+          fixed_parameter_count: 0,
+        },
+        ...(shape === 'returns' ? {} : { noreturn: true }),
+        evidence_ids: ['evidence-exit'],
+      },
+    ],
+  });
+  const extra = { types, source: { abi, callees: [], addresses: [] } };
+  const structured = structureControlFlow(ir, createOperationContext());
+  assert.ok(structured.value);
+  return {
+    ir,
+    extra,
+    source: reconstruct(
+      { function: structured.value, ...extra },
+      createOperationContext(),
+      'source',
+    ),
+  };
+}
+for (const abi of [darwinArm64Abi, sysvAMD64Abi, windowsX64Abi]) {
+  test(`${abi.id}: an unknown effect after a noreturn call does not expose saves`, () => {
+    const { ir, extra, source } = afterCall(abi, 'noreturn');
+    assert.equal(source.source?.frame_saves?.stores.size, 1);
+    assert.ok(
+      source.local_validation?.some((record) => record.rule === 'noreturn_fallthrough_frame'),
+    );
+    for (const language of ['c-like', 'python-like'] as const) {
+      const output = emit(ir, extra, language).emission;
+      assert.doesNotMatch(output.text, /unknown_value|entry_sp|stack_frame|frame\.|\blocal\d/);
+      assert.match(output.text, /sub_3000\(\)/);
+    }
+  });
+  for (const shape of ['returns', 'joined'] as const)
+    test(`${abi.id}: an unknown effect reachable without a noreturn call keeps the frame exposed (${shape})`, () => {
+      const { source } = afterCall(abi, shape);
+      assert.equal(source.source?.frame_saves?.stores.size ?? 0, 0);
+      assert.ok(
+        !source.local_validation?.some((record) => record.rule === 'noreturn_fallthrough_frame'),
+      );
+    });
+}
+
+/** gcc's `lock or [rsp], 0` barrier over a save slot: `r = *slot; *slot = r`
+ * between two fences. `store-between`: another frame store separates the
+ * load and the write-back; `escaped`: the slot's address is passed to a call. */
+function writeBack(abi: AbiProfile, shape: 'valid' | 'store-between' | 'escaped') {
+  const saved = abi.preserved.find(
+    (register) => register.bank === 'integer' && register.root !== abi.stack_pointer.root,
+  )!;
+  const b = builder(`write-back-${abi.id}-${shape}`),
+    block = b.block('entry');
+  const stackEntry = block.readRegister(abi.stack_pointer);
+  const slot = block.int('sub', stackEntry, block.constant(u64, 16n));
+  block.writeRegister(abi.stack_pointer, slot);
+  block.store(slot, block.readRegister(saved));
+  block.writeRegister(saved, block.constant(u64, 5n));
+  block.memoryFence();
+  const loaded = block.load(u64, slot);
+  if (shape === 'store-between')
+    block.store(block.int('add', slot, block.constant(u64, 8n)), block.constant(u64, 1n));
+  block.store(slot, block.int('or', loaded, block.constant(u64, 0n)));
+  block.memoryFence();
+  if (shape === 'escaped') block.writeRegister(firstArgument(abi), slot);
+  block.call(
+    { kind: 'direct', address: { image_id: image, space: 'va', value: 0x2000n } },
+    [],
+    [],
+    abi.unknown_call_clobbers,
+  );
+  block.writeRegister(saved, block.load(u64, slot));
+  block.writeRegister(abi.stack_pointer, stackEntry);
+  block.return([block.constant(u64, 7n)]);
+  const ir = constructSSA(b.finish(block, [u64])).value as SSAForm;
+  const types = recoverTypes(ir, abi, createOperationContext(), {
+    image_id: image,
+    slice_id: slice,
+    revision: 0,
+  });
+  const extra = { types, source: { abi, callees: [], addresses: [] } };
+  const structured = structureControlFlow(ir, createOperationContext());
+  assert.ok(structured.value);
+  return {
+    ir,
+    extra,
+    source: reconstruct(
+      { function: structured.value, ...extra },
+      createOperationContext(),
+      'source',
+    ),
+  };
+}
+for (const abi of [darwinArm64Abi, sysvAMD64Abi, windowsX64Abi]) {
+  test(`${abi.id}: a write-back of a save slot is no access of it`, () => {
+    const { ir, extra, source } = writeBack(abi, 'valid');
+    assert.equal(source.source?.frame_saves?.stores.size, 1);
+    assert.ok(source.local_validation?.some((record) => record.rule === 'frame_write_back'));
+    for (const language of ['c-like', 'python-like'] as const) {
+      const output = emit(ir, extra, language).emission;
+      assert.doesNotMatch(output.text, /unknown_value|entry_sp|stack_frame|frame\.|\blocal\d/);
+      assert.equal(output.text.match(/memory_fence/g)?.length, 2, output.text);
+      const result = execute(
+        output,
+        new Map(),
+        new Map(),
+        0n,
+        new Map(),
+        new Map(),
+        new Map([['sub_2000', () => []]]),
+        acknowledgeRequirements(output),
+      );
+      assert.deepEqual(result.values, [7n]);
+    }
+  });
+  for (const shape of ['store-between', 'escaped'] as const)
+    test(`${abi.id}: ${shape} keeps the write-back`, () => {
+      const { source } = writeBack(abi, shape);
+      assert.ok(!source.local_validation?.some((record) => record.rule === 'frame_write_back'));
+      assert.equal(source.source?.frame_saves?.stores.size ?? 0, 0);
+    });
+}
+
+/** A function that never returns: it saves a preserved register, changes it
+ * and ends in a call of the noreturn `sub_3000` (`escaped`: the slot's address
+ * is that call's argument). The save needs no reload. */
+for (const abi of [darwinArm64Abi, sysvAMD64Abi, windowsX64Abi])
+  for (const shape of ['valid', 'escaped'] as const)
+    test(`${abi.id}: a save in a function with no exit ${shape === 'valid' ? 'is elided' : 'whose slot escapes is kept'}`, () => {
+      const saved = abi.preserved.find(
+        (register) => register.bank === 'integer' && register.root !== abi.stack_pointer.root,
+      )!;
+      const b = builder(`no-exit-save-${abi.id}-${shape}`),
+        block = b.block('entry');
+      const slot = block.int(
+        'sub',
+        block.readRegister(abi.stack_pointer),
+        block.constant(u64, 16n),
+      );
+      block.writeRegister(abi.stack_pointer, slot);
+      block.store(slot, block.readRegister(saved));
+      block.writeRegister(saved, block.constant(u64, 5n));
+      if (shape === 'escaped') block.writeRegister(firstArgument(abi), slot);
+      block.call(
+        { kind: 'direct', address: { image_id: image, space: 'va', value: 0x3000n } },
+        [],
+        [],
+        abi.unknown_call_clobbers,
+      );
+      block.terminate({ kind: 'trap', reason: 'noreturn call' });
+      const ir = constructSSA(b.finish(block, [])).value as SSAForm;
+      const types = recoverTypes(ir, abi, createOperationContext(), {
+        image_id: image,
+        slice_id: slice,
+        revision: 0,
+      });
+      const extra = { types, source: { abi, callees: [], addresses: [] } };
+      const structured = structureControlFlow(ir, createOperationContext());
+      assert.ok(structured.value);
+      const source = reconstruct(
+        { function: structured.value, ...extra },
+        createOperationContext(),
+        'source',
+      );
+      assert.equal(source.source?.frame_saves?.stores.size ?? 0, shape === 'valid' ? 1 : 0);
+      const output = emit(ir, extra, 'c-like').emission;
+      assert.equal(/unknown_value/.test(output.text), shape !== 'valid', output.text);
     });
