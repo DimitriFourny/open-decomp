@@ -400,7 +400,8 @@ function lowBitsOf(site: RuleSite, part: Value, whole: Value, bits: number, dept
   site.context.checkpoint(1);
   part = site.resolve(part);
   whole = site.resolve(whole);
-  if (part.id === whole.id) return bitWidth(part.type) >= bits;
+  if (bitWidth(part.type) < bits || bitWidth(whole.type) < bits) return false;
+  if (part.id === whole.id) return true;
   if (depth > 8) return false;
   const constant = site.constant(part);
   if (constant !== null) {

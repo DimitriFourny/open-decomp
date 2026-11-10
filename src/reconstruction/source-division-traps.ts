@@ -383,6 +383,7 @@ export function classifyDivisionTraps(
       ...resultIds,
       ...slices.map((item) => item.value.id),
     ]);
+    if (!onlyReadBy(wideValues, allowed, blocks, expressions, context)) continue;
     claimed.add(previous.id);
     claimed.add(block.id);
     found.push({

@@ -5039,7 +5039,7 @@ export class Renderer {
       address.pointer && address.text === `(uintptr_t)${address.pointer.text}`
         ? this.printer.primary(address.pointer.text)
         : null;
-    return `*(${access.volatile ? 'volatile ' : ''}${name} *)${direct ? (/^&[\w.]+(?:\[\w+\])?$/.test(direct.text) ? direct.text : `(${direct.text})`) : this.printer.group(address, UNARY)}`;
+    return `*(${access.volatile ? 'volatile ' : ''}${name} *)${direct ? (/^&?[\w.]+(?:\[\w+\])?$/.test(direct.text) ? direct.text : `(${direct.text})`) : this.printer.group(address, UNARY)}`;
   }
 
   private storage(node: Extract<Instruction, { kind: 'load' | 'store' }>): string {
