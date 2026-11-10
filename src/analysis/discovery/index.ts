@@ -25,6 +25,7 @@ import { buildCFG, instructionSuccessors } from '../cfg/index.js';
 import { jumpTableChain, proveJumpTable, type JumpTableProof } from './jump-tables.js';
 import { reconcileGraphs, type DiscoveryLineage } from './lineage.js';
 import { stackDeltas, type StackDelta } from './stack-delta.js';
+import { memorySlot, thunkSlot } from './stubs.js';
 export type { DiscoveryLineage } from './lineage.js';
 
 /** Same entry cap as indirect-table target recovery; larger tables stay unresolved. */
@@ -60,6 +61,10 @@ export interface DiscoveryInput {
    * call ends intraprocedural flow: its return address is never followed (it is
    * often the next function's entry, as after a final `bl ___stack_chk_fail`). */
   readonly noreturn_calls?: ReadonlyMap<bigint, readonly string[]>;
+  /** Import slots (virtual addresses) whose binding's library declaration is noreturn, with
+   * that evidence. An x86 `call qword [rip+slot]` through one ends flow, as does a direct call
+   * to an import thunk (`[endbr64] jmp qword [rip+slot]`, a PE or ELF `-fno-plt` thunk). */
+  readonly noreturn_slots?: ReadonlyMap<bigint, readonly string[]>;
   /** The image ABI's callee-saved registers (`AbiProfile.preserved`). A jump-table register
    * fact survives a call only in these; without them a call forgets every fact. */
   readonly preserved_registers?: readonly RegisterDescriptor[];
@@ -331,6 +336,31 @@ export function discoverFunctions(
     : [...index.boundary_claims];
   const va = (value: bigint): Address => ({ image_id: image.id, space: 'va', value });
   const derive = evidenceDeriver(image, revision, evidence);
+  /** Evidence that a call never returns: its direct target is declared noreturn, or it reads
+   * (itself or through a thunk at its target) a noreturn import slot; undefined otherwise. */
+  const thunks = new Map<bigint, readonly string[] | null>();
+  const noreturnOf = (call: DecodedInstruction): readonly string[] | undefined => {
+    const flow = call.flow;
+    if (call.validity !== 'valid' || flow.kind !== 'call') return undefined;
+    const slots = input.noreturn_slots;
+    if (flow.target) {
+      const declared = input.noreturn_calls?.get(flow.target.value);
+      if (declared || !slots?.size) return declared;
+      let thunk = thunks.get(flow.target.value);
+      if (thunk === undefined) {
+        const slot = thunkSlot(image, decoder, flow.target, context);
+        const parents = slot === null ? undefined : slots.get(slot);
+        thunk = parents
+          ? [derive('import thunk forwards through a noreturn import slot', flow.target, parents)]
+          : null;
+        thunks.set(flow.target.value, thunk);
+      }
+      return thunk ?? undefined;
+    }
+    const slot = memorySlot(call);
+    return slot === null ? undefined : slots?.get(slot);
+  };
+  const noreturn = (call: DecodedInstruction): boolean => noreturnOf(call) !== undefined;
   // Full-width integer roots every call preserves under the image ABI.
   const preserved = new Set(
     (input.preserved_registers ?? [])
@@ -640,7 +670,7 @@ export function discoverFunctions(
           // splits code another root already owns.
           seed(target, 'direct call target in swept code', [flowEvidence], false);
       }
-      for (const successor of instructionSuccessors(instruction, input.noreturn_calls)) {
+      for (const successor of instructionSuccessors(instruction, noreturn)) {
         addIncoming(successor.value, instruction);
         enqueue(successor);
       }
@@ -827,7 +857,7 @@ export function discoverFunctions(
               (
                 (instruction.flow.kind === 'indirect_branch'
                   ? tables.get(instruction.address.value)?.proof.targets
-                  : undefined) ?? instructionSuccessors(instruction, input.noreturn_calls)
+                  : undefined) ?? instructionSuccessors(instruction, noreturn)
               ).filter((successor) => successor.value === root || !seedAt(successor.value)),
           },
           context,
@@ -1022,7 +1052,7 @@ export function discoverFunctions(
         localDiagnostics.push(...instruction.diagnostics);
         const table = tableAt(instruction);
         for (const successor of table?.proof.targets ??
-          instructionSuccessors(instruction, input.noreturn_calls)) {
+          instructionSuccessors(instruction, noreturn)) {
           if (successor.value !== item.entry.value && functionEntries.has(successor.value)) {
             // A table reaching another root is rejected below, not a boundary conflict.
             if (!table && (instruction.flow.kind !== 'branch' || instruction.flow.conditional)) {
@@ -1046,7 +1076,7 @@ export function discoverFunctions(
         context.checkpoint(1);
         byId.set(instruction.id, instruction);
         for (const successor of tableAt(instruction)?.proof.targets ??
-          instructionSuccessors(instruction, input.noreturn_calls)) {
+          instructionSuccessors(instruction, noreturn)) {
           const list = predecessors.get(successor.value);
           if (list) list.push(instruction);
           else predecessors.set(successor.value, [instruction]);
@@ -1189,12 +1219,13 @@ export function discoverFunctions(
         tableTargets.set(instruction.address.value, table.proof.targets);
       }
       const flow = instruction.flow;
-      if (instruction.validity !== 'valid' || flow.kind !== 'call' || flow.indirect || !flow.target)
-        continue;
-      const parents = input.noreturn_calls?.get(flow.target.value);
-      if (parents && !noreturnCalls.has(flow.target.value))
-        noreturnCalls.set(flow.target.value, [
-          derive('direct call target declared noreturn', flow.target, parents),
+      if (instruction.validity !== 'valid' || flow.kind !== 'call') continue;
+      const parents = noreturnOf(instruction);
+      if (parents)
+        noreturnCalls.set(instruction.address.value, [
+          flow.target
+            ? derive('direct call target declared noreturn', flow.target, parents)
+            : derive('call through a noreturn import slot', instruction.address, parents),
         ]);
     }
     const blocks = buildCFG(

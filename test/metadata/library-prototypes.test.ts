@@ -217,6 +217,13 @@ test('declaration families bind only to their nominal library', () => {
   assert.ok(!lookup('strrchr', 'custom.dll', 'pe'));
 });
 
+test('the stack-protector failure handler is noreturn in libSystem and glibc only', () => {
+  assert.equal(findDeclaration('__stack_chk_fail', SYSTEM, 'macho')?.noreturn, true);
+  assert.equal(findDeclaration('__stack_chk_fail', 'libc.so.6', 'elf')?.noreturn, true);
+  assert.equal(findDeclaration('__stack_chk_fail', 'libfoo.so.1', 'elf'), undefined);
+  assert.equal(findDeclaration('__stack_chk_fail', 'msvcrt.dll', 'pe'), undefined);
+});
+
 test('named pointer typedefs keep their name over an opaque pointee', () => {
   const result = contracts(windows, [binding(windows, 'CreateFileW', 'KERNEL32.DLL')]);
   const create = named(result, 'CreateFileW');

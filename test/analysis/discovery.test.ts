@@ -730,6 +730,62 @@ test('a final call to a declared noreturn callee ends flow before the next funct
   }
 });
 
+test('a call through a noreturn import slot, directly or through a thunk, ends flow', () => {
+  const le32 = (value: number): number[] => [
+    value & 0xff,
+    (value >> 8) & 0xff,
+    (value >> 16) & 0xff,
+    (value >>> 24) & 0xff,
+  ];
+  const slots = new Map([[0x1200n, ['evidence_import_binding']]]);
+  const ends = (
+    bytes: readonly number[],
+    noreturn_slots: ReadonlyMap<bigint, readonly string[]>,
+    next = 6,
+  ): boolean => {
+    // f at +0 ends in a call whose return address is g's entry at `next`.
+    const image = raw(bytes);
+    const result = discover(image, { assertions: [assertion(image, next)], noreturn_slots });
+    const caller = result.graphs.find((graph) => graph.function.entry.value === 0x1000n)!;
+    const kinds = caller.blocks.flatMap((block) => block.edges.map((edge) => edge.kind));
+    assert.deepEqual(kinds, [caller.function.boundary === 'conflicting' ? 'fallthrough' : 'trap']);
+    if (kinds[0] === 'trap') {
+      // The trap's proof chain reaches the import binding.
+      const proofs = new Map(result.evidence.map((item) => [item.id, item]));
+      const cites = (id: string): boolean =>
+        id === 'evidence_import_binding' || (proofs.get(id)?.derived_from ?? []).some(cites);
+      assert.ok(caller.blocks[0]!.edges[0]!.evidence_ids.some(cites));
+    }
+    return kinds[0] === 'trap';
+  };
+  // f: call qword [rip+0x1fa] (slot 0x1200); g: ret
+  const direct = [0xff, 0x15, ...le32(0x1fa), 0xc3];
+  assert.equal(ends(direct, slots), true);
+  assert.equal(ends(direct, new Map()), false);
+  // f: call thunk (+6); g: ret; thunk: [endbr64] jmp qword [rip+disp] (slot 0x1200)
+  const thunk = (endbr: boolean, disp: number): number[] => [
+    0xe8,
+    ...le32(1),
+    0xc3,
+    ...(endbr ? [0xf3, 0x0f, 0x1e, 0xfa] : []),
+    0xff,
+    0x25,
+    ...le32(disp),
+  ];
+  assert.equal(ends(thunk(false, 0x1200 - 0x100c), slots, 5), true);
+  assert.equal(ends(thunk(true, 0x1200 - 0x1010), slots, 5), true);
+  assert.equal(ends(thunk(false, 0x1200 - 0x100c), new Map(), 5), false);
+  // The thunk reads another slot, or the slot's value reaches the call through a register.
+  assert.equal(ends(thunk(false, 0x1208 - 0x100c), slots, 5), false);
+  // f: mov rax, qword [rip+0x1f3] (slot 0x1200); call rax; g: ret
+  const register = raw([0x48, 0x8b, 0x05, ...le32(0x1f3), 0xff, 0xd0, 0xc3]);
+  const viaRegister = discover(register, {
+    assertions: [assertion(register, 9)],
+    noreturn_slots: slots,
+  }).graphs.find((graph) => graph.function.entry.value === 0x1000n)!;
+  assert.equal(viaRegister.function.boundary, 'conflicting');
+});
+
 test("selected discovery publishes every proof its diagnostics cite, including another root's seed proofs", () => {
   // A (entry, +0): jz +4 -> B (+4, asserted root). Conditional flow into a foreign
   // root is a boundary conflict whose diagnostic cites B's seed proof, not A's.

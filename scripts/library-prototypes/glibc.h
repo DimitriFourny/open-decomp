@@ -43,6 +43,8 @@ void __assert_fail(const char *assertion, const char *file, unsigned int line,
 void __assert_perror_fail(int errnum, const char *file, unsigned int line,
                           const char *function) __attribute__((noreturn));
 void __chk_fail(void) __attribute__((noreturn));
+/* LSB Core: the stack-protector failure handler terminates the process. */
+void __stack_chk_fail(void) __attribute__((noreturn));
 void __longjmp_chk(void *env, int val) __attribute__((noreturn));
 int __sigsetjmp(void *env, int savemask);
 int __register_atfork(void (*prepare)(void), void (*parent)(void), void (*child)(void),

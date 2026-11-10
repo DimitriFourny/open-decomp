@@ -129,14 +129,33 @@ export function libraryNoreturnCalls(
   image: LoadedImage,
   context: OperationContext,
 ): ReadonlyMap<bigint, readonly string[]> {
+  return noreturnImports(image, context, (imported) => imported.callable_entry);
+}
+
+/** Import slots (virtual addresses) whose binding's library declaration is noreturn, under
+ * the same identity rules; delayed (lazily bound) slots are excluded. A call reading one
+ * transfers to whatever the loader stored there: the import. */
+export function libraryNoreturnSlots(
+  image: LoadedImage,
+  context: OperationContext,
+): ReadonlyMap<bigint, readonly string[]> {
+  return noreturnImports(image, context, (imported) => (imported.delayed ? null : imported.slot));
+}
+
+function noreturnImports(
+  image: LoadedImage,
+  context: OperationContext,
+  key: (imported: LoadedImage['imports'][number]) => Address | null,
+): ReadonlyMap<bigint, readonly string[]> {
   const adjusted = adjustedImports(image, context);
   const entries = new Map<bigint, { noreturn: boolean; evidence_ids: string[] }>();
   for (const imported of image.imports) {
     context.checkpoint(1);
+    const address = key(imported);
     if (
       imported.original_name === null ||
       imported.library === null ||
-      imported.callable_entry === null ||
+      address === null ||
       imported.weak ||
       adjusted.has(fingerprint([imported.library, imported.original_name]))
     )
@@ -152,7 +171,7 @@ export function libraryNoreturnCalls(
       declaration.library === 'swift-concurrency'
     )
       continue;
-    const entry = image.address_map.translate(imported.callable_entry, 'va');
+    const entry = image.address_map.translate(address, 'va');
     if (entry.kind !== 'mapped') continue;
     const prior = entries.get(entry.address.value);
     entries.set(entry.address.value, {
