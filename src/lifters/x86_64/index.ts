@@ -15,7 +15,13 @@ import {
   syntheticProvenance,
 } from '../../ir/index.js';
 import type { BlockBuilder, RegisterIR, Value } from '../../ir/index.js';
-import { Unsupported, X86Semantics, gpr, unknownClobbers } from './semantics.js';
+import {
+  Unsupported,
+  X86Semantics,
+  boundedUnknownClobbers,
+  gpr,
+  unknownClobbers,
+} from './semantics.js';
 
 export interface X86LiftResult {
   readonly ir: RegisterIR;
@@ -54,7 +60,8 @@ export interface X86LiftResult {
  * conversion SIMD, AVX and later encodings, crypto, system/privileged/transactional instructions, CET
  * enforcement and precise memory-fault/exception delivery. ENDBR64 is a landing
  * marker abstraction, not CET enforcement. Unknown instructions emit an unknown
- * effect (whole modeled state and memory) and lifting continues with the next
+ * effect bounded by the decoder's access sets when the instruction falls through
+ * (boundedUnknownClobbers; otherwise the whole modeled state and memory) and lifting continues with the next
  * instruction when its flow is sequential or a returning call, like ARM64; other
  * flows terminate. Instructions never silently disappear or become invented traps.
  * Explicit UD2/INT3/INT terminate as traps; malformed/reserved encodings remain
@@ -63,7 +70,7 @@ export interface X86LiftResult {
  */
 export class X86Lifter implements Lifter<RegisterIR> {
   readonly name = 'x86-64 typed semantic lifter';
-  readonly version = '5';
+  readonly version = '6';
   readonly architecture = 'x86_64';
   lift(graph: FunctionGraph, abi: AbiProfile, context: OperationContext): X86LiftResult {
     if (abi.architecture !== this.architecture)
@@ -155,8 +162,9 @@ export class X86Lifter implements Lifter<RegisterIR> {
       block: BlockBuilder,
       reason: string,
       instruction?: DecodedInstruction,
+      clobbers = unknownClobbers,
     ): void => {
-      block.unknown(reason, unknownClobbers);
+      block.unknown(reason, clobbers);
       reasons.add(reason);
       diagnostics.push({
         code: 'unavailable_semantics',
@@ -329,11 +337,18 @@ export class X86Lifter implements Lifter<RegisterIR> {
         } catch (error) {
           if (!(error instanceof Unsupported)) throw error;
           block = semantics.block;
-          // The whole modeled state and memory are unknown after the instruction. Only
-          // instructions whose flow is plain sequential execution (or a call that returns
-          // here) continue; any other transfer has no modeled successor.
+          // What the instruction may write is unknown afterwards: the decoder's access sets
+          // bound a sequential instruction (boundedUnknownClobbers), anything else clobbers
+          // the whole modeled state and memory. Only instructions whose flow is plain
+          // sequential execution (or a call that returns here) continue; any other transfer
+          // has no modeled successor.
           if (instruction.flow.kind === 'fallthrough' || instruction.flow.kind === 'call')
-            unknownEffect(block, error.message, instruction);
+            unknownEffect(
+              block,
+              error.message,
+              instruction,
+              boundedUnknownClobbers(instruction) ?? unknownClobbers,
+            );
           else {
             boundary(block, error.message, instruction);
             terminated = true;

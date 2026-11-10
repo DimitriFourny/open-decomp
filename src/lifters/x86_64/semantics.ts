@@ -90,6 +90,98 @@ export const unknownClobbers: CallClobbers = {
   flags: Object.keys(flagBits).map((name) => flagRegister(name as Flag)),
   memory: 'unknown_read_write',
 };
+const mxcsrStatus: RegisterDescriptor = {
+  ...mxcsr,
+  id: 'x86_64:mxcsr[0:6]',
+  bank: 'flags',
+  role: 'flags',
+  width_bits: 6,
+  write_rule: 'preserve_other_bits',
+};
+const writeAccesses = new Set([
+  'write',
+  'conditional_write',
+  'read_write',
+  'read_conditional_write',
+]);
+const readAccesses = new Set(['read', 'conditional_read', 'read_write', 'read_conditional_write']);
+// State the decoder's access sets do not describe: FS/GS base and MXCSR control writes.
+const wholeStateMnemonics = new Set([
+  'wrfsbase',
+  'wrgsbase',
+  'ldmxcsr',
+  'vldmxcsr',
+  'fxrstor',
+  'fxrstor64',
+  'xrstor',
+  'xrstor64',
+  'xrstors',
+  'xrstors64',
+]);
+/**
+ * The bound of an unlifted instruction's effect, from the decoder's access sets: every register
+ * root (or preserved slice) it may write, the six modeled flags it may modify, MXCSR exception
+ * status for SIMD instructions, and memory `unknown_read_write` if it may write memory. A form that
+ * reads a general-purpose register but writes no memory gets `read_only`, never `none`: the IR does
+ * not record which inputs an effect depends on, so a frame address read from a GPR must keep the
+ * conservative escape treatment (`none` is only for effects whose inputs are vector, flag or
+ * unmodeled x87/MMX state, as on ARM64). Unmodeled x87, MMX and mask registers are not outputs.
+ * Returns undefined (keep the whole-state clobber) for anything but a valid, unprivileged
+ * instruction that falls through, for segment-register and FS/GS-base writes and for MXCSR loads.
+ */
+export function boundedUnknownClobbers(instruction: DecodedInstruction): CallClobbers | undefined {
+  const p = instruction.payload;
+  if (
+    instruction.validity !== 'valid' ||
+    instruction.flow.kind !== 'fallthrough' ||
+    p?.architecture !== 'x86_64' ||
+    p.privileged ||
+    wholeStateMnemonics.has(p.mnemonic)
+  )
+    return undefined;
+  const registers = new Map<string, RegisterDescriptor>();
+  // Every instruction that can set MXCSR exception flags names an XMM/YMM/ZMM register.
+  let readsGeneral = false,
+    simd = false;
+  for (const { register, access } of p.registers) {
+    const xmm = register.bank === 'vector' && register.root.startsWith('x86_64:zmm');
+    simd ||= xmm;
+    if (register.bank === 'integer' && register.role !== 'program_counter')
+      readsGeneral ||= readAccesses.has(access);
+    if (!writeAccesses.has(access)) continue;
+    if (register.bank === 'segment' || register.role === 'program_counter') return undefined;
+    if (register.bank === 'integer' || xmm) {
+      const descriptor =
+        register.write_rule === 'preserve_other_bits'
+          ? register
+          : register.bank === 'integer'
+            ? gpr(register.root.slice('x86_64:'.length))
+            : unknownClobbers.registers.find((root) => root.root === register.root)!;
+      registers.set(descriptor.id, descriptor);
+    }
+    // x87, MMX, mask and other control registers are not modeled state.
+  }
+  // A full-root write subsumes slices of the same root.
+  const roots = new Set(
+    [...registers.values()]
+      .filter((register) => register.width_bits === register.root_width_bits)
+      .map((register) => register.root),
+  );
+  const outputs = [...registers.values()].filter(
+    (register) => register.width_bits === register.root_width_bits || !roots.has(register.root),
+  );
+  const modified = p.flags.written | p.flags.cleared | p.flags.set | p.flags.undefined;
+  const flags = (Object.keys(flagBits) as Flag[])
+    .filter((name) => (modified >> BigInt(flagBits[name])) & 1n)
+    .map(flagRegister);
+  if (simd) flags.push(mxcsrStatus);
+  const memory = p.memory.some((access) => writeAccesses.has(access.access))
+    ? 'unknown_read_write'
+    : readsGeneral || p.memory.some((access) => readAccesses.has(access.access))
+      ? 'read_only'
+      : 'none';
+  return { registers: outputs, flags, memory };
+}
 export class Unsupported extends Error {}
 
 /** Architectural semantics, never inferred from decoder access metadata. */
@@ -365,14 +457,7 @@ export class X86Semantics {
 
   fpStatus(): void {
     this.block.writeRegister(
-      {
-        ...mxcsr,
-        id: 'x86_64:mxcsr[0:6]',
-        bank: 'flags',
-        role: 'flags',
-        width_bits: 6,
-        write_rule: 'preserve_other_bits',
-      },
+      mxcsrStatus,
       this.block.indeterminate(
         integer(6),
         'unknown',
@@ -625,6 +710,13 @@ export class X86Semantics {
       )
     )
       throw new Unsupported('x87/MMX register semantics');
+    // A segment selector load also replaces the FS/GS base the lifter models.
+    if (
+      p.registers.some(
+        ({ register, access }) => register.bank === 'segment' && writeAccesses.has(access),
+      )
+    )
+      throw new Unsupported('Segment register write');
     if (m === 'nop' || m === 'endbr64') return;
     if (m === 'mov' || m === 'movzx' || m === 'movsx' || m === 'movsxd') {
       const value = this.read(src!);

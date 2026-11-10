@@ -256,7 +256,7 @@ test('SSE unordered compare sets CF/PF/ZF and clears OF/SF/AF', () => {
   for (const offset of [4, 7, 11]) assert.equal(register(result, 'rflags', 1, offset), 0n);
 });
 
-test('an unsupported instruction clobbers the modeled state, then lifting continues in the same block', () => {
+test('an unsupported instruction clobbers what it may write, then lifting continues in the same block', () => {
   // fld1 (x87) is unsupported; the following mov and ret are still lifted.
   const { ir, coverage, graph } = liftBytes('d9 e8 b8 07 00 00 00 c3');
   assert.equal(graph.blocks.length, 1);
@@ -272,8 +272,10 @@ test('an unsupported instruction clobbers the modeled state, then lifting contin
   );
   assert.ok(write > effect, 'the mov after the unsupported instruction is lifted');
   assert.equal(entry.terminator.kind, 'return');
+  // fld1 writes only unmodeled x87 state: the ordered effect stays, with no modeled output.
   const unknown = entry.instructions[effect]!;
-  assert.ok(unknown.kind === 'unknown_effect' && unknown.clobbers.memory === 'unknown_read_write');
+  assert.ok(unknown.kind === 'unknown_effect' && unknown.clobbers.memory === 'none');
+  assert.deepEqual(unknown.clobbers.registers, []);
   assert.equal(coverage.state, 'partial');
   assert.equal(coverage.completed_units, graph.instructions.length - 1);
   assert.equal(run(ir).status, 'unknown');
@@ -467,7 +469,8 @@ test('BTS sub-forms with unmodeled semantics remain explicit unknown effects', (
       ),
       code,
     );
-    assert.equal(run(lifted.ir, { rdx: 0x2100n, rcx: 1n }).status, 'unknown');
+    // The bounded effect names neither RDX nor RCX, so they are not machine inputs here.
+    assert.equal(run(lifted.ir).status, 'unknown');
   }
   // The immediate form with a 32-bit address size is exact.
   const exact = liftBytes('67 0f ba 2a 03 c3');
