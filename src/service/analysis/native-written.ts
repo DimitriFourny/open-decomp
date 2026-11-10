@@ -92,9 +92,13 @@ export function nativeWrittenRegisters(
   for (const binding of prepared.entry) add(represented, binding.register);
   // Calls write what their callee's set (else their clobber set) names; for the cells
   // this body tracks, the exits below decide, so only untracked bits are added here.
+  // Calls share their callee's set (or the ABI clobber list): each list once.
+  const seen = new Set<readonly RegisterSlice[]>();
   for (const call of prepared.calls) {
     context.checkpoint(1);
     const callee = interfaces.get(call.id)?.written_registers ?? call.clobbers.registers;
+    if (seen.has(callee)) continue;
+    seen.add(callee);
     for (const slice of callee) {
       context.checkpoint(1);
       const bits = mask(slice.offset_bits, slice.width_bits) & ~(represented.get(slice.root) ?? 0n);

@@ -576,7 +576,10 @@ function observeParameters(
       }
   // Such a value used after its call may still be an entry argument no use above
   // observed: the argument list then stays open (not closed by callee reads).
-  if (preserved.size && !ambiguous) {
+  const suspects = ambiguous
+    ? []
+    : [...preserved].filter(([, input]) => mayHoldUnobserved(input)).map(([output]) => output);
+  if (suspects.length) {
     const referenced = new Set<string>();
     for (const block of ir.blocks) {
       for (const node of block.instructions) {
@@ -595,7 +598,8 @@ function observeParameters(
                     ]
                   : [];
         for (const operand of operands) referenced.add(operand.id);
-        // Argument registers a callee reads (all of them for an unknown callee).
+        // Argument registers a known callee reads (an opaque call's reach is tested
+        // by `passesUnobserved`; a direct call without interface is already ambiguous).
         if (node.kind === 'call') {
           const contract = calls
             .get(node.id)
@@ -609,7 +613,7 @@ function observeParameters(
                   location.kind === 'register' ? [location.register.root] : [],
                 ),
               ) ??
-              byRoot.keys(),
+              [],
           );
           for (const binding of node.register_inputs)
             if (read.has(binding.register.root)) referenced.add(binding.value.id);
@@ -656,11 +660,7 @@ function observeParameters(
       }
       return false;
     };
-    for (const [output, input] of preserved)
-      if (used(output) && mayHoldUnobserved(input)) {
-        ambiguous = true;
-        break;
-      }
+    if (suspects.some(used)) ambiguous = true;
   }
   const missingBanks = new Set<string>();
   for (const candidate of candidates) {
