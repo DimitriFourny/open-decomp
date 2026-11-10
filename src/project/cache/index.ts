@@ -56,6 +56,8 @@ import {
 import {
   analysisReadsetSchema,
   analysisReuseScope,
+  decodeStoredReadset,
+  encodeStoredReadset,
   validateAnalysisReadset,
   type AnalysisDependencyCollector,
 } from './dependencies.js';
@@ -115,12 +117,74 @@ const catalogSchema = z.strictObject({
   evidence: z.array(evidenceSchema).max(100000),
 });
 const payloadSchema = z.strictObject({
-  format_version: z.literal(ANALYSIS_ARTIFACT_VERSION),
+  format_version: z.union([z.literal(2), z.literal(ANALYSIS_ARTIFACT_VERSION)]),
   identity: cacheIdentitySchema,
   result: functionDecompileResultSchema,
   catalog: catalogSchema,
   dependencies: analysisReadsetSchema.optional(),
 });
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === 'object' && !Array.isArray(value);
+
+/** The stored form of a payload, format 3 (format 2 stored the logical payload as it is): the
+ * readset as rows over a table of distinct fingerprints (`encodeStoredReadset`), and each
+ * catalog proof whose wire form equals an entry of `result.evidence` as that entry's index.
+ * The result and the catalog's subjects and types keep their wire form (clients read them from
+ * artifact pages). `expandPayload` restores the logical payload. */
+function storedPayload(identity: CacheIdentity, value: AnalysisComputation): Buffer {
+  const resultProofs = new Map<string, number>();
+  value.result.evidence.forEach((proof, index) => {
+    const key = JSON.stringify(proof);
+    if (!resultProofs.has(key)) resultProofs.set(key, index);
+  });
+  return Buffer.from(
+    JSON.stringify({
+      format_version: ANALYSIS_ARTIFACT_VERSION,
+      identity,
+      result: value.result,
+      ...(value.dependencies === undefined
+        ? {}
+        : { dependencies: encodeStoredReadset(value.dependencies) }),
+      catalog: {
+        subjects: value.catalog.subjects.map(encodeSubject),
+        types: value.catalog.types.map((record) => ({
+          ...record,
+          definition: encodeTypeDefinition(record.definition),
+        })),
+        evidence: value.catalog.evidence.map((proof) => {
+          const wire = encodeEvidence(proof);
+          return resultProofs.get(JSON.stringify(wire)) ?? wire;
+        }),
+      },
+    }),
+  );
+}
+/** The logical payload of stored JSON (`storedPayload`), still to be validated by
+ * `payloadSchema`; format 2 is stored as it is. Any malformed stored part is refused. */
+function expandPayload(stored: unknown): unknown {
+  if (!isRecord(stored) || stored['format_version'] !== ANALYSIS_ARTIFACT_VERSION) return stored;
+  const { catalog, dependencies, ...rest } = stored;
+  if (!isRecord(catalog)) fail('invalid_input', 'Invalid stored analysis catalog');
+  const { evidence, ...catalogRest } = catalog;
+  const result = rest['result'];
+  const proofs: unknown = isRecord(result) ? result['evidence'] : undefined;
+  if (!Array.isArray(evidence) || !Array.isArray(proofs))
+    fail('invalid_input', 'Invalid stored analysis catalog');
+  return {
+    ...rest,
+    ...(dependencies === undefined ? {} : { dependencies: decodeStoredReadset(dependencies) }),
+    catalog: {
+      ...catalogRest,
+      evidence: evidence.map((proof: unknown) => {
+        if (typeof proof !== 'number') return proof;
+        if (!Number.isInteger(proof) || proof < 0 || proof >= proofs.length)
+          fail('invalid_input', 'Invalid stored analysis proof reference');
+        return proofs[proof];
+      }),
+    },
+  };
+}
 
 // Digests of immutable parts of parsed identities, results and loaded images, by object. A
 // stored payload and its image are checked against each other on every hit; hash each once.
@@ -341,6 +405,12 @@ const parsedPayloads = new Map<string, ParsedPayload>();
 let parsedPayloadBytes = 0;
 const MAX_PARSED_PAYLOAD_BYTES = 16 * 1024 * 1024;
 
+/** The logical payload (format 2's layout) of stored artifact bytes, unvalidated: what tools and
+ * tests that inspect a stored artifact read. Serving goes through `readAnalysisArtifact`. */
+export function storedPayloadJson(bytes: Uint8Array): unknown {
+  return expandPayload(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)));
+}
+
 function parsePayload(sha256: string, bytes: Uint8Array): ParsedPayload {
   const known = parsedPayloads.get(sha256);
   if (known) {
@@ -348,9 +418,7 @@ function parsePayload(sha256: string, bytes: Uint8Array): ParsedPayload {
     parsedPayloads.set(sha256, known);
     return known;
   }
-  const wire = payloadSchema.parse(
-    JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)),
-  );
+  const wire = payloadSchema.parse(storedPayloadJson(bytes));
   const parsed: ParsedPayload = {
     size: bytes.length,
     wire,
@@ -562,23 +630,7 @@ export async function runCachedDecompilation(
   if (enabled && !reused && input.dependencies !== undefined)
     computation = { ...computation, dependencies: input.dependencies.finish() };
   if (reused) context.progress('dependency-reuse', 1, 1);
-  const serialize = (value: AnalysisComputation): Buffer =>
-    Buffer.from(
-      JSON.stringify({
-        format_version: ANALYSIS_ARTIFACT_VERSION,
-        identity,
-        result: value.result,
-        ...(value.dependencies === undefined ? {} : { dependencies: value.dependencies }),
-        catalog: {
-          subjects: value.catalog.subjects.map(encodeSubject),
-          types: value.catalog.types.map((record) => ({
-            ...record,
-            definition: encodeTypeDefinition(record.definition),
-          })),
-          evidence: value.catalog.evidence.map(encodeEvidence),
-        },
-      }),
-    );
+  const serialize = (value: AnalysisComputation): Buffer => storedPayload(identity, value);
   let bytes = serialize(computation);
   // `computation.result` is the output of `functionDecompileResultSchema.parse` (the hit path's
   // parsed payload for a reuse); only shedding below replaces it with an unparsed value.

@@ -70,6 +70,142 @@ export const analysisReadsetSchema = z.strictObject({
 export type AnalysisReadset = z.infer<typeof analysisReadsetSchema>;
 type Selector = z.infer<typeof selectorSchema>;
 
+/** Selector fields in schema order, by kind; the index of a kind is its stored code. */
+const SELECTOR_FIELDS: readonly (readonly [Selector['kind'], readonly string[]])[] = [
+  ['signature', ['id']],
+  ['type', ['id']],
+  ['proof', ['id']],
+  ['annotations', ['id']],
+  ['type_annotations', ['id']],
+  ['all_annotations', []],
+  ['record_scope', ['image_id', 'record_kind']],
+  ['function', ['image_id', 'id']],
+  ['function_address', ['image_id', 'address']],
+  ['data_entities', ['image_id', 'start', 'end']],
+];
+const SELECTOR_CODES = new Map(SELECTOR_FIELDS.map(([kind], code) => [kind, code]));
+/** IDs a run row packs: the prefix, then 64 lowercase hex digits stored as 32 bytes. */
+const PACKED_ID = /^(entity_|evidence_)([0-9a-f]{64})$/;
+/** The stored form of a readset in an analysis artifact (format 3), whose reads decode to the
+ * same reads in the same order (`decodeStoredReadset`). Each distinct fingerprint is stored
+ * once in `fingerprints` (most reads are of unannotated entities and share the digest of an
+ * empty list), and each read is either a row `[kind code, ...selector fields in schema order,
+ * fingerprint index]` or part of a run: consecutive reads of one single-ID kind with one
+ * fingerprint and IDs of one prefix are one row `[-1 - kind code, fingerprint index, prefix,
+ * base64 of the IDs' 32-byte digests]`. */
+export interface StoredReadset {
+  readonly version: 1;
+  readonly complete: true;
+  readonly fingerprints: readonly string[];
+  readonly reads: readonly (readonly unknown[])[];
+}
+export function encodeStoredReadset(readset: AnalysisReadset): StoredReadset {
+  const fingerprints: string[] = [];
+  const index = new Map<string, number>();
+  const reads: unknown[][] = [];
+  // The open run: its row and the digests of its IDs so far.
+  let run: { readonly row: unknown[]; readonly digests: Buffer[] } | undefined;
+  const close = (): void => {
+    if (run) run.row.push(Buffer.concat(run.digests).toString('base64'));
+    run = undefined;
+  };
+  for (const { selector, fingerprint } of readset.reads) {
+    const code = SELECTOR_CODES.get(selector.kind);
+    const fields = code === undefined ? undefined : SELECTOR_FIELDS[code]![1];
+    const values = selector as Record<string, unknown>;
+    // Every selector field is stored: a selector of another shape cannot be written.
+    if (
+      code === undefined ||
+      fields === undefined ||
+      Object.keys(selector).length !== fields.length + 1 ||
+      !fields.every((field) => values[field] !== undefined)
+    )
+      throw new TypeError('Analysis readset selector has an unexpected shape');
+    let slot = index.get(fingerprint);
+    if (slot === undefined) {
+      index.set(fingerprint, (slot = fingerprints.length));
+      fingerprints.push(fingerprint);
+    }
+    const packed =
+      fields.length === 1 && fields[0] === 'id' && typeof values['id'] === 'string'
+        ? PACKED_ID.exec(values['id'])
+        : null;
+    if (!packed) {
+      close();
+      reads.push([code, ...fields.map((field) => values[field]), slot]);
+      continue;
+    }
+    if (!run || run.row[0] !== -1 - code || run.row[1] !== slot || run.row[2] !== packed[1]) {
+      close();
+      run = { row: [-1 - code, slot, packed[1]], digests: [] };
+      reads.push(run.row);
+    }
+    run.digests.push(Buffer.from(packed[2]!, 'hex'));
+  }
+  close();
+  return { version: 1, complete: true, fingerprints, reads };
+}
+/** The readset a stored form describes, still to be validated by `analysisReadsetSchema`.
+ * A value that is not a well-formed stored readset is refused. */
+export function decodeStoredReadset(stored: unknown): unknown {
+  const invalid = (): never => {
+    throw new OperationError({
+      code: 'invalid_input',
+      severity: 'error',
+      message: 'Invalid stored analysis readset',
+      evidence_ids: [],
+    });
+  };
+  if (stored === null || typeof stored !== 'object') return invalid();
+  const { version, complete, fingerprints, reads, ...rest } = stored as Record<string, unknown>;
+  if (Object.keys(rest).length !== 0 || !Array.isArray(fingerprints) || !Array.isArray(reads))
+    return invalid();
+  const fingerprintAt = (slot: unknown): unknown =>
+    typeof slot === 'number' && Number.isInteger(slot) && slot >= 0 && slot < fingerprints.length
+      ? fingerprints[slot]
+      : invalid();
+  const decoded: { selector: Record<string, unknown>; fingerprint: unknown }[] = [];
+  for (const row of reads as unknown[]) {
+    if (!Array.isArray(row) || typeof row[0] !== 'number' || !Number.isInteger(row[0]))
+      return invalid();
+    if (row[0] >= 0) {
+      const entry = SELECTOR_FIELDS[row[0]];
+      if (entry === undefined || row.length !== entry[1].length + 2) return invalid();
+      const selector: Record<string, unknown> = { kind: entry[0] };
+      entry[1].forEach((field, position) => (selector[field] = row[position + 1]));
+      decoded.push({ selector, fingerprint: fingerprintAt(row[row.length - 1]) });
+    } else {
+      const entry = SELECTOR_FIELDS[-1 - row[0]];
+      const [, slot, prefix, ids] = row as unknown[];
+      if (
+        entry === undefined ||
+        entry[1].length !== 1 ||
+        entry[1][0] !== 'id' ||
+        row.length !== 4 ||
+        (prefix !== 'entity_' && prefix !== 'evidence_') ||
+        typeof ids !== 'string'
+      )
+        return invalid();
+      const digests = Buffer.from(ids, 'base64');
+      // Only the canonical encoding of whole digests is accepted.
+      if (digests.length === 0 || digests.length % 32 !== 0 || digests.toString('base64') !== ids)
+        return invalid();
+      const fingerprint = fingerprintAt(slot);
+      for (let offset = 0; offset < digests.length; offset += 32)
+        decoded.push({
+          selector: {
+            kind: entry[0],
+            id: `${prefix}${digests.subarray(offset, offset + 32).toString('hex')}`,
+          },
+          fingerprint,
+        });
+    }
+    // The schema bounds the reads; refuse a larger expansion before building more of it.
+    if (decoded.length > MAX_READS) return invalid();
+  }
+  return { version, complete, reads: decoded };
+}
+
 /** This is a candidate index key, never a CacheIdentity or permission to serve a hit. */
 export function analysisReuseScope(identity: CacheIdentity): string {
   return cacheIdentityKey({ ...identity, annotation_revision: 0, evidence_revision: 0 });

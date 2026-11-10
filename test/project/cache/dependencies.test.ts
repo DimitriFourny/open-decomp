@@ -16,7 +16,10 @@ import {
   type ProjectStore,
 } from '../../../src/core/index.js';
 import {
+  analysisReadsetSchema,
   createAnalysisReadset,
+  decodeStoredReadset,
+  encodeStoredReadset,
   validateAnalysisReadset,
   type AnalysisDependencyCollector,
   type AnalysisReadset,
@@ -181,4 +184,134 @@ test('a data entity window read is invalidated only by a registration inside the
   assert.equal(validateAnalysisReadset(store, store.snapshot().revision, readset, context), true);
   register(0x1fffn);
   assert.equal(validateAnalysisReadset(store, store.snapshot().revision, readset, context), false);
+});
+
+test('a stored readset decodes to the same reads, in order, for every selector kind', () => {
+  const image = imageIdentity('1'.repeat(64));
+  const digest = (n: number): string => n.toString(16).padStart(64, '0');
+  const readset = analysisReadsetSchema.parse({
+    version: 1,
+    complete: true,
+    reads: [
+      { selector: { kind: 'signature', id: 'entity_a' }, fingerprint: digest(1) },
+      { selector: { kind: 'type', id: 'entity_b' }, fingerprint: digest(2) },
+      { selector: { kind: 'proof', id: 'evidence_c' }, fingerprint: digest(1) },
+      { selector: { kind: 'annotations', id: 'entity_d' }, fingerprint: digest(3) },
+      { selector: { kind: 'annotations', id: 'entity_e' }, fingerprint: digest(3) },
+      { selector: { kind: 'type_annotations', id: 'entity_f' }, fingerprint: digest(3) },
+      { selector: { kind: 'all_annotations' }, fingerprint: digest(4) },
+      {
+        selector: { kind: 'record_scope', image_id: image, record_kind: 'reference' },
+        fingerprint: digest(5),
+      },
+      { selector: { kind: 'function', image_id: image, id: 'entity_g' }, fingerprint: digest(6) },
+      {
+        selector: {
+          kind: 'function_address',
+          image_id: image,
+          address: { image_id: image, space: 'va', value: '0x1000' },
+        },
+        fingerprint: digest(7),
+      },
+      {
+        selector: { kind: 'data_entities', image_id: image, start: '0x10', end: null },
+        fingerprint: digest(8),
+      },
+      {
+        selector: { kind: 'data_entities', image_id: image, start: '0x10', end: '0x20' },
+        fingerprint: digest(8),
+      },
+    ],
+  });
+  const stored = encodeStoredReadset(readset);
+  // Each distinct fingerprint is kept once.
+  assert.equal(stored.fingerprints.length, 8);
+  assert.equal(stored.reads.length, readset.reads.length);
+  const decoded = analysisReadsetSchema.parse(
+    decodeStoredReadset(JSON.parse(JSON.stringify(stored))),
+  );
+  assert.deepEqual(decoded, readset);
+  assert.equal(JSON.stringify(decoded), JSON.stringify(readset));
+  assert.equal(direct(decoded), direct(readset));
+});
+
+test('a malformed stored readset is refused, never read as other selectors', () => {
+  const stored = encodeStoredReadset(
+    analysisReadsetSchema.parse({
+      version: 1,
+      complete: true,
+      reads: [{ selector: { kind: 'proof', id: 'evidence_a' }, fingerprint: 'a'.repeat(64) }],
+    }),
+  );
+  const decode = (value: unknown): unknown =>
+    analysisReadsetSchema.parse(decodeStoredReadset(value));
+  for (const reads of [
+    [[2, 'evidence_a', 1]], // fingerprint index out of range
+    [[2, 'evidence_a', -1]],
+    [[2, 'evidence_a', 0.5]],
+    [[10, 'evidence_a', 0]], // unknown kind code
+    [[2, 'evidence_a']], // missing field
+    [[2, 'evidence_a', 'x', 0]], // extra field
+    [{ selector: { kind: 'proof', id: 'evidence_a' }, fingerprint: 'a'.repeat(64) }], // format 2
+  ])
+    assert.throws(() => decode({ ...stored, reads }));
+  assert.throws(() => decode({ ...stored, extra: true }));
+  assert.throws(() => decode({ ...stored, fingerprints: ['not a digest'] }));
+  assert.throws(() =>
+    encodeStoredReadset({
+      version: 1,
+      complete: true,
+      reads: [
+        {
+          selector: { kind: 'proof', id: 'evidence_a', extra: 1 } as never,
+          fingerprint: 'a'.repeat(64),
+        },
+      ],
+    }),
+  );
+});
+
+test('consecutive single-ID reads of one fingerprint are stored as one run and decode in order', () => {
+  const digest = (n: number): string => n.toString(16).padStart(64, '0');
+  const entity = (n: number): string => `entity_${(n * 7919).toString(16).padStart(64, 'a')}`;
+  const reads = [
+    ...Array.from({ length: 5 }, (_, n) => ({
+      selector: { kind: 'annotations', id: entity(n) },
+      fingerprint: digest(1),
+    })),
+    { selector: { kind: 'proof', id: `evidence_${'b'.repeat(64)}` }, fingerprint: digest(1) },
+    { selector: { kind: 'proof', id: `evidence_${'c'.repeat(64)}` }, fingerprint: digest(1) },
+    // Another fingerprint, a non-hex ID and another kind each break the run.
+    { selector: { kind: 'annotations', id: entity(9) }, fingerprint: digest(2) },
+    { selector: { kind: 'annotations', id: 'entity_short' }, fingerprint: digest(2) },
+    { selector: { kind: 'annotations', id: entity(10) }, fingerprint: digest(2) },
+    { selector: { kind: 'type', id: entity(10) }, fingerprint: digest(2) },
+    { selector: { kind: 'annotations', id: entity(11) }, fingerprint: digest(2) },
+  ];
+  const readset = analysisReadsetSchema.parse({ version: 1, complete: true, reads });
+  const stored = encodeStoredReadset(readset);
+  assert.deepEqual(
+    stored.reads.map((row) => row[0]),
+    [-4, -3, -4, 3, -4, -2, -4],
+  );
+  const decoded = analysisReadsetSchema.parse(
+    decodeStoredReadset(JSON.parse(JSON.stringify(stored))),
+  );
+  assert.deepEqual(decoded, readset);
+  assert.equal(direct(decoded), direct(readset));
+  const run = stored.reads[0]!;
+  const decode = (rows: unknown[]): unknown =>
+    analysisReadsetSchema.parse(decodeStoredReadset({ ...stored, reads: rows }));
+  const ids = run[3] as string;
+  for (const row of [
+    [-4, 0, 'entity_', `${ids} `], // not the canonical encoding
+    [-4, 0, 'entity_', ids.slice(0, 40)], // not whole digests
+    [-4, 0, 'entity_', ''],
+    [-4, 0, 'image_', ids], // not a packed prefix
+    [-8, 0, 'entity_', ids], // a kind with more than an ID
+    [-11, 0, 'entity_', ids],
+    [-4, 9, 'entity_', ids],
+    [-4, 0, 'entity_', ids, 0],
+  ])
+    assert.throws(() => decode([row]));
 });

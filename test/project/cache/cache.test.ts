@@ -10,6 +10,7 @@ import {
   SCHEMA_VERSION,
   createOperationContext,
   encodeEvidence,
+  encodeTypeDefinition,
   entityIdentity,
   fingerprint,
   newIdentity,
@@ -21,6 +22,7 @@ import {
 import { SqliteProjectStore } from '../../../src/project/store/index.js';
 import { encodeStored } from '../../../src/project/store/encoding.js';
 import {
+  ANALYSIS_ARTIFACT_MEDIA_TYPE,
   readAnnotationCatalog,
   runCachedDecompilation,
   type AnalysisComputation,
@@ -1035,4 +1037,81 @@ test('one proof identity must mean one proof in a computation: equal copies pass
   );
   assert.equal(p.state.store.findArtifact(other), null);
   assert.equal(p.state.store.readJob(forged.id)?.state, 'running');
+});
+
+test('artifacts store the readset and result proofs compactly, and format-2 artifacts stay readable', async (t) => {
+  const p = await project(t);
+  // The catalog's proof is also a result proof: format 3 stores it once.
+  const withProof = (cache: CacheIdentity): AnalysisComputation => {
+    const value = p.computation(cache);
+    return {
+      ...value,
+      result: { ...value.result, evidence: value.catalog.evidence.map(encodeEvidence) },
+    };
+  };
+  const computed = await p.run(p.identity, 65536, () => withProof(p.identity));
+  const handle = computed.result.artifacts[0]!;
+  const stored = JSON.parse(readFileSync(join(p.state.path, 'artifacts', handle.id), 'utf8')) as {
+    format_version: number;
+    catalog: { evidence: unknown[]; subjects: unknown[] };
+  };
+  assert.equal(stored.format_version, 3);
+  assert.deepEqual(stored.catalog.evidence, [0]);
+  // Subjects keep their wire form: clients read them from artifact pages.
+  assert.deepEqual(
+    stored.catalog.subjects.map((subject) => (subject as { id: string }).id),
+    [p.fn.id, p.fieldId],
+  );
+  const hit = await p.run(p.identity, 65536, () => assert.fail('A hit must not recompute'));
+  const strip = (value: unknown): string =>
+    JSON.stringify(value, (key, item: unknown) =>
+      key === 'cache' || key === 'work' ? undefined : item,
+    );
+  assert.equal(strip(hit.result), strip(computed.result));
+  const catalog = await readAnnotationCatalog(
+    p.state.store,
+    2,
+    [p.fieldId, p.evidenceId],
+    createOperationContext(),
+    p.isCurrent,
+  );
+  assert.equal(catalog?.subject(p.fieldId)?.kind, 'field');
+  assert.equal(catalog?.evidence(p.evidenceId)?.claim, 'Derived field identity');
+
+  // A format-2 payload (the logical payload as it is) under another budget's key.
+  const legacy = { ...p.identity, budget: { ...p.identity.budget, work: 12345 } };
+  const value = withProof(legacy);
+  const job = p.job(legacy);
+  const published = await p.state.store.publishArtifact({
+    job_id: job.id,
+    expected_revision: 2,
+    media_type: ANALYSIS_ARTIFACT_MEDIA_TYPE,
+    bytes: Buffer.from(
+      JSON.stringify({
+        format_version: 2,
+        identity: legacy,
+        result: value.result,
+        catalog: {
+          subjects: value.catalog.subjects,
+          types: value.catalog.types.map((record) => ({
+            id: record.id,
+            definition: encodeTypeDefinition(record.definition),
+            source: record.source,
+            status: record.status,
+            evidence_ids: record.evidence_ids,
+          })),
+          evidence: value.catalog.evidence.map(encodeEvidence),
+        },
+      }),
+    ),
+    cache: legacy,
+    analysis_ids: [legacy.function_id, p.fieldId],
+  });
+  assert.equal(published.state, 'published');
+  const legacyHit = await p.run(legacy, 65536, () => assert.fail('A hit must not recompute'));
+  assert.ok('data' in legacyHit.result && legacyHit.result.data.cache === 'hit');
+  assert.equal(
+    legacyHit.result.artifacts[0]?.id,
+    published.state === 'published' ? published.artifact.id : '',
+  );
 });
