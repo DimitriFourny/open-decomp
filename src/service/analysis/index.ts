@@ -30,6 +30,7 @@ import {
   recoverPointerEvidence,
   recoverTypes,
   refineMemoryShapes,
+  typeRecoveryFailure,
   type SuppliedSignature,
   type SuppliedTypeRecord,
 } from '../../analysis/types/index.js';
@@ -335,9 +336,7 @@ export async function executeDecompilation(
         signatures: [...nativeSignatures, ...nativeCalls.signatures],
         contracts: nativeCalls.contracts,
       });
-      const baselineFailure = baseline.diagnostics.find(
-        (item) => item.code === 'cancelled' || item.code === 'resource_limit',
-      );
+      const baselineFailure = typeRecoveryFailure(baseline);
       if (baselineFailure) throw new OperationError(baselineFailure);
       const baselineCatalog = semanticCatalog(image, ir, baseline, context);
       const trusted = createTrustedSemanticCatalog(
@@ -414,9 +413,7 @@ export async function executeDecompilation(
             contracts: suppliedCalls.contracts,
           })
         : baseline;
-      const typeFailure = types.diagnostics.find(
-        (item) => item.code === 'cancelled' || item.code === 'resource_limit',
-      );
+      const typeFailure = typeRecoveryFailure(types);
       if (typeFailure) throw new OperationError(typeFailure);
       context.progress('structure', 5, 7);
       // The source view structures again once block contents are known (the
@@ -603,9 +600,7 @@ export async function executeDecompilation(
         max_work: context.budget.work,
         transfers: source.memory_transfers ?? [],
       });
-      const refinementFailure = types.diagnostics.find(
-        (item) => item.code === 'cancelled' || item.code === 'resource_limit',
-      );
+      const refinementFailure = typeRecoveryFailure(types);
       if (refinementFailure) throw new OperationError(refinementFailure);
       const imageTypes = recoverImageTypes(sourceInput, localTypes, types);
       // Pointer-ness reaches every value derived from, joined with or compared
@@ -708,10 +703,14 @@ export async function executeDecompilation(
           );
       }
       const abiPartial = types.signatures.some((signature) => signature.abi_state !== 'complete');
+      // Capacities a complete type recovery worked around (a generated type citing only
+      // its first observations).
+      const typeLimits = types.diagnostics.filter((item) => item.code === 'resource_limit');
       const analysisReasons = [
         ...new Set([
           ...graph.coverage.reasons,
           ...(types.state === 'partial' ? ['Source metadata or type recovery is incomplete'] : []),
+          ...typeLimits.map((diagnostic) => diagnostic.message),
           ...(debug.status === 'partial' ? ['Debug metadata recovery is incomplete'] : []),
           ...(source.diagnostics ?? []).map((diagnostic) => diagnostic.message),
         ]),
@@ -739,6 +738,7 @@ export async function executeDecompilation(
           state:
             graph.coverage.state === 'complete' &&
             types.state === 'complete' &&
+            !typeLimits.length &&
             debug.status !== 'partial' &&
             !source.diagnostics?.length
               ? 'complete'
