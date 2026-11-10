@@ -176,7 +176,7 @@ test('legacy scalar SSE preserves upper lanes and rejects unsupported MXCSR', ()
 });
 
 test('unsupported families stay unknown, while explicit UD2 is a trap', () => {
-  for (const code of ['d9 e8', 'f3 a4', 'f0 01 01', 'c5 f8 58 c1']) {
+  for (const code of ['d9 e8', 'f3 67 a4', 'f0 0f c7 09', 'c5 f8 58 c1']) {
     const lifted = liftBytes(`${code} c3`);
     assert.equal(lifted.coverage.state, 'partial');
     assert.ok(
@@ -256,7 +256,7 @@ test('SSE unordered compare sets CF/PF/ZF and clears OF/SF/AF', () => {
   for (const offset of [4, 7, 11]) assert.equal(register(result, 'rflags', 1, offset), 0n);
 });
 
-test('an unsupported instruction clobbers the modeled state, then lifting continues in the same block', () => {
+test('an unsupported instruction clobbers what it may write, then lifting continues in the same block', () => {
   // fld1 (x87) is unsupported; the following mov and ret are still lifted.
   const { ir, coverage, graph } = liftBytes('d9 e8 b8 07 00 00 00 c3');
   assert.equal(graph.blocks.length, 1);
@@ -272,8 +272,10 @@ test('an unsupported instruction clobbers the modeled state, then lifting contin
   );
   assert.ok(write > effect, 'the mov after the unsupported instruction is lifted');
   assert.equal(entry.terminator.kind, 'return');
+  // fld1 writes only unmodeled x87 state: the ordered effect stays, with no modeled output.
   const unknown = entry.instructions[effect]!;
-  assert.ok(unknown.kind === 'unknown_effect' && unknown.clobbers.memory === 'unknown_read_write');
+  assert.ok(unknown.kind === 'unknown_effect' && unknown.clobbers.memory === 'none');
+  assert.deepEqual(unknown.clobbers.registers, []);
   assert.equal(coverage.state, 'partial');
   assert.equal(coverage.completed_units, graph.instructions.length - 1);
   assert.equal(run(ir).status, 'unknown');
@@ -308,157 +310,170 @@ const mask = (width: number): bigint => (1n << BigInt(width)) - 1n;
 const flagAt = (result: ReturnType<typeof run>, offset: number): bigint =>
   register(result, 'rflags', 1, offset);
 
-test('BTS register forms: CF takes the old bit, the bit is set, offsets wrap at the operand width', () => {
-  // modrm c8 = bts eax/ax/rax, ecx/cx/rcx.
-  for (const [prefix, width] of [
-    ['66 ', 16],
-    ['', 32],
-    ['48 ', 64],
-  ] as const) {
-    const { ir, coverage } = liftBytes(`${prefix}0f ab c8 c3`);
-    assert.ok(!coverage.reasons.some((reason) => reason.includes('Instruction family')));
-    const initial = 0x8123456789abcdefn,
-      old = initial & mask(width);
-    for (const offset of [
-      0n,
-      1n,
-      5n,
-      BigInt(width - 1),
-      BigInt(width),
-      BigInt(width + 3),
-      0x1234567n,
-      -1n,
-    ]) {
-      const raw = BigInt.asUintN(width, offset),
-        bit = raw & BigInt(width - 1);
-      const result = run(ir, {
-        rax: initial,
-        rcx: (0xaaaaaaaaaaaaaaaan & ~mask(width)) | raw,
-        rflags: 0n,
-      });
-      const low = old | (1n << bit);
-      // 32-bit writes zero the upper half and 16-bit writes preserve it.
-      const expected = width === 16 ? (initial & ~mask(16)) | low : low;
-      assert.equal(register(result, 'rax'), expected, `${width}-bit offset ${offset}`);
-      assert.equal(cfBit(result), (old >> bit) & 1n, `${width}-bit offset ${offset} CF`);
+// BT/BTS/BTR/BTC: register-source opcode, 0f ba group extension, and the bit update.
+const bitTests = [
+  ['bt', 'a3', 4, (old: bigint) => old],
+  ['bts', 'ab', 5, (old: bigint, bit: bigint) => old | (1n << bit)],
+  ['btr', 'b3', 6, (old: bigint, bit: bigint) => old & ~(1n << bit)],
+  ['btc', 'bb', 7, (old: bigint, bit: bigint) => old ^ (1n << bit)],
+] as const;
+const modrm = (base: number, extension: number): string =>
+  (base | (extension << 3)).toString(16).padStart(2, '0');
+
+for (const [name, opcode, , update] of bitTests)
+  test(`${name.toUpperCase()} register forms: CF takes the old bit, offsets wrap at the operand width`, () => {
+    // modrm c8 = op eax/ax/rax, ecx/cx/rcx.
+    for (const [prefix, width] of [
+      ['66 ', 16],
+      ['', 32],
+      ['48 ', 64],
+    ] as const) {
+      const { ir, coverage } = liftBytes(`${prefix}0f ${opcode} c8 c3`);
+      assert.ok(!coverage.reasons.some((reason) => reason.includes('Instruction family')));
+      const initial = 0x8123456789abcdefn,
+        old = initial & mask(width);
+      for (const offset of [
+        0n,
+        1n,
+        5n,
+        BigInt(width - 1),
+        BigInt(width),
+        BigInt(width + 3),
+        0x1234567n,
+        -1n,
+      ]) {
+        const raw = BigInt.asUintN(width, offset),
+          bit = raw & BigInt(width - 1);
+        const result = run(ir, {
+          rax: initial,
+          rcx: (0xaaaaaaaaaaaaaaaan & ~mask(width)) | raw,
+          rflags: 0n,
+        });
+        const low = update(old, bit);
+        // 32-bit writes zero the upper half and 16-bit writes preserve it; BT writes nothing.
+        const expected = name === 'bt' ? initial : width === 16 ? (initial & ~mask(16)) | low : low;
+        assert.equal(register(result, 'rax'), expected, `${width}-bit offset ${offset}`);
+        assert.equal(cfBit(result), (old >> bit) & 1n, `${width}-bit offset ${offset} CF`);
+      }
     }
-  }
-});
+  });
 
 function cfBit(result: ReturnType<typeof run>): bigint {
   return flagAt(result, 0);
 }
 
-test('BTS immediate register forms use the offset modulo the operand width', () => {
-  for (const [prefix, width] of [
-    ['66 ', 16],
-    ['', 32],
-    ['48 ', 64],
-  ] as const) {
-    const initial = 0x0123456789abcdefn,
-      old = initial & mask(width);
-    for (const immediate of [0, 3, 15, 16, 31, 32, 63, 64, 200, 255]) {
-      const hex = immediate.toString(16).padStart(2, '0');
-      const { ir } = liftBytes(`${prefix}0f ba e8 ${hex} c3`); // bts eax/ax/rax, imm8
-      const result = run(ir, { rax: initial, rflags: 0n });
-      const bit = BigInt(immediate % width),
-        low = old | (1n << bit);
-      assert.equal(
-        register(result, 'rax'),
-        width === 16 ? (initial & ~mask(16)) | low : low,
-        `${width}-bit #${immediate}`,
-      );
-      assert.equal(cfBit(result), (old >> bit) & 1n);
+for (const [name, , extension, update] of bitTests)
+  test(`${name.toUpperCase()} immediate register forms use the offset modulo the operand width`, () => {
+    for (const [prefix, width] of [
+      ['66 ', 16],
+      ['', 32],
+      ['48 ', 64],
+    ] as const) {
+      const initial = 0x0123456789abcdefn,
+        old = initial & mask(width);
+      for (const immediate of [0, 3, 15, 16, 31, 32, 63, 64, 200, 255]) {
+        const hex = immediate.toString(16).padStart(2, '0');
+        const { ir } = liftBytes(`${prefix}0f ba ${modrm(0xc0, extension)} ${hex} c3`);
+        const result = run(ir, { rax: initial, rflags: 0n });
+        const bit = BigInt(immediate % width),
+          low = update(old, bit);
+        assert.equal(
+          register(result, 'rax'),
+          name === 'bt' ? initial : width === 16 ? (initial & ~mask(16)) | low : low,
+          `${width}-bit #${immediate}`,
+        );
+        assert.equal(cfBit(result), (old >> bit) & 1n);
+      }
     }
-  }
-});
-
-test('BTS leaves ZF unchanged and makes OF/SF/AF/PF undefined', () => {
-  const { ir } = liftBytes('0f ab c8 c3');
-  for (const rflags of [0n, 1n << 6n]) {
-    const result = run(ir, { rax: 0n, rcx: 1n, rflags });
-    assert.equal(flagAt(result, 6), (rflags >> 6n) & 1n);
-    const state = result.registers.get('x86_64:rflags')!;
-    for (const offset of [2n, 4n, 7n, 11n]) assert.equal((state.undefined >> offset) & 1n, 1n);
-    for (const offset of [0n, 6n]) assert.equal((state.undefined >> offset) & 1n, 0n);
-  }
-});
-
-test('BTS on memory: an immediate offset stays inside the operand; a register offset addresses the signed bit string', () => {
-  const pattern = Uint8Array.from({ length: 0x200 }, (_, index) => (index * 37 + 11) & 255);
-  const region = (): { base: bigint; bytes: Uint8Array; writable: boolean } => ({
-    base: 0x2000n,
-    bytes: Uint8Array.from(pattern),
-    writable: true,
   });
-  const middle = 0x2100n;
-  for (const [prefix, width] of [
-    ['66 ', 16],
-    ['', 32],
-    ['48 ', 64],
-  ] as const) {
-    // bts [rdx], rcx
-    const register_form = liftBytes(`${prefix}0f ab 0a c3`).ir;
-    for (const offset of [
-      0n,
-      1n,
-      7n,
-      8n,
-      BigInt(width - 1),
-      BigInt(width),
-      BigInt(width + 3),
-      2n * BigInt(width) + 5n,
-      -1n,
-      -8n,
-      -BigInt(width),
-      -BigInt(width) - 1n,
-      -BigInt(width) - 9n,
-      0x7ffn,
-      -0x800n,
-    ]) {
-      const result = run(
-        register_form,
-        {
-          rdx: middle,
-          rcx: (0x5555555555555555n & ~mask(width)) | BigInt.asUintN(width, offset),
-          rflags: 0n,
-        },
-        { memory: [region()] },
-      );
-      // Independent bit-string reference: byte floor(offset / 8), bit offset mod 8.
-      const expected = Uint8Array.from(pattern);
-      const index = Number(0x100n + (offset >> 3n)),
-        bit = Number(offset & 7n);
-      const old = (expected[index]! >> bit) & 1;
-      expected[index]! |= 1 << bit;
-      const output = result.memory.find((item) => item.base === 0x2000n)!;
-      assert.deepEqual(output.bytes, expected, `${width}-bit offset ${offset}`);
-      assert.equal(cfBit(result), BigInt(old), `${width}-bit offset ${offset} CF`);
-    }
-    // bts dword/word/qword [rdx], imm8: the offset wraps within the addressed operand.
-    for (const immediate of [0, 5, width - 1, width, width + 9, 255]) {
-      const hex = immediate.toString(16).padStart(2, '0');
-      const result = run(
-        liftBytes(`${prefix}0f ba 2a ${hex} c3`).ir,
-        { rdx: middle, rflags: 0n },
-        { memory: [region()] },
-      );
-      const expected = Uint8Array.from(pattern);
-      const bit = immediate % width,
-        index = 0x100 + (bit >> 3);
-      const old = (expected[index]! >> (bit & 7)) & 1;
-      expected[index]! |= 1 << (bit & 7);
-      assert.deepEqual(result.memory.find((item) => item.base === 0x2000n)!.bytes, expected);
-      assert.equal(cfBit(result), BigInt(old));
+
+test('BT/BTS/BTR/BTC leave ZF unchanged and make OF/SF/AF/PF undefined', () => {
+  for (const [, opcode] of bitTests) {
+    const { ir } = liftBytes(`0f ${opcode} c8 c3`);
+    for (const rflags of [0n, 1n << 6n]) {
+      const result = run(ir, { rax: 0n, rcx: 1n, rflags });
+      assert.equal(flagAt(result, 6), (rflags >> 6n) & 1n);
+      const state = result.registers.get('x86_64:rflags')!;
+      for (const offset of [2n, 4n, 7n, 11n]) assert.equal((state.undefined >> offset) & 1n, 1n);
+      for (const offset of [0n, 6n]) assert.equal((state.undefined >> offset) & 1n, 0n);
     }
   }
 });
 
-test('BTS sub-forms with unmodeled semantics remain explicit unknown effects', () => {
-  for (const code of [
-    'f0 0f ab 0a', // LOCK
-    '67 0f ab 0a', // register bit offset beyond a 32-bit-address operand
-  ]) {
+for (const [name, opcode, extension, update] of bitTests)
+  test(`${name.toUpperCase()} on memory: an immediate offset stays inside the operand; a register offset addresses the signed bit string`, () => {
+    const pattern = Uint8Array.from({ length: 0x200 }, (_, index) => (index * 37 + 11) & 255);
+    const region = (): { base: bigint; bytes: Uint8Array; writable: boolean } => ({
+      base: 0x2000n,
+      bytes: Uint8Array.from(pattern),
+      writable: true,
+    });
+    const middle = 0x2100n;
+    for (const [prefix, width] of [
+      ['66 ', 16],
+      ['', 32],
+      ['48 ', 64],
+    ] as const) {
+      // op [rdx], rcx
+      const register_form = liftBytes(`${prefix}0f ${opcode} 0a c3`).ir;
+      for (const offset of [
+        0n,
+        1n,
+        7n,
+        8n,
+        BigInt(width - 1),
+        BigInt(width),
+        BigInt(width + 3),
+        2n * BigInt(width) + 5n,
+        -1n,
+        -8n,
+        -BigInt(width),
+        -BigInt(width) - 1n,
+        -BigInt(width) - 9n,
+        0x7ffn,
+        -0x800n,
+      ]) {
+        const result = run(
+          register_form,
+          {
+            rdx: middle,
+            rcx: (0x5555555555555555n & ~mask(width)) | BigInt.asUintN(width, offset),
+            rflags: 0n,
+          },
+          { memory: [region()] },
+        );
+        // Independent bit-string reference: byte floor(offset / 8), bit offset mod 8.
+        const expected = Uint8Array.from(pattern);
+        const index = Number(0x100n + (offset >> 3n)),
+          bit = Number(offset & 7n);
+        const old = (expected[index]! >> bit) & 1;
+        expected[index] = Number(update(BigInt(expected[index]!), BigInt(bit)));
+        const output = result.memory.find((item) => item.base === 0x2000n)!;
+        assert.deepEqual(output.bytes, expected, `${width}-bit offset ${offset}`);
+        assert.equal(cfBit(result), BigInt(old), `${width}-bit offset ${offset} CF`);
+      }
+      // op dword/word/qword [rdx], imm8: the offset wraps within the addressed operand.
+      for (const immediate of [0, 5, width - 1, width, width + 9, 255]) {
+        const hex = immediate.toString(16).padStart(2, '0');
+        const result = run(
+          liftBytes(`${prefix}0f ba ${modrm(0x02, extension)} ${hex} c3`).ir,
+          { rdx: middle, rflags: 0n },
+          { memory: [region()] },
+        );
+        const expected = Uint8Array.from(pattern);
+        const bit = immediate % width,
+          index = 0x100 + (bit >> 3);
+        const old = (expected[index]! >> (bit & 7)) & 1;
+        expected[index] = Number(update(BigInt(expected[index]!), BigInt(bit & 7)));
+        assert.deepEqual(result.memory.find((item) => item.base === 0x2000n)!.bytes, expected);
+        assert.equal(cfBit(result), BigInt(old));
+      }
+    }
+  });
+
+test('BT-family sub-forms with unmodeled semantics remain explicit unknown effects', () => {
+  // A register bit offset beyond a 32-bit-address operand.
+  for (const code of ['67 0f ab 0a', '67 0f a3 0a', 'f0 67 0f b3 0a']) {
     const lifted = liftBytes(`${code} c3`);
     assert.equal(lifted.coverage.state, 'partial');
     assert.ok(
@@ -467,7 +482,8 @@ test('BTS sub-forms with unmodeled semantics remain explicit unknown effects', (
       ),
       code,
     );
-    assert.equal(run(lifted.ir, { rdx: 0x2100n, rcx: 1n }).status, 'unknown');
+    // The bounded effect names neither RDX nor RCX, so they are not machine inputs here.
+    assert.equal(run(lifted.ir).status, 'unknown');
   }
   // The immediate form with a 32-bit address size is exact.
   const exact = liftBytes('67 0f ba 2a 03 c3');

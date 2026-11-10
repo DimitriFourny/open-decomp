@@ -15,7 +15,13 @@ import {
   syntheticProvenance,
 } from '../../ir/index.js';
 import type { BlockBuilder, RegisterIR, Value } from '../../ir/index.js';
-import { Unsupported, X86Semantics, gpr, unknownClobbers } from './semantics.js';
+import {
+  Unsupported,
+  X86Semantics,
+  boundedUnknownClobbers,
+  gpr,
+  unknownClobbers,
+} from './semantics.js';
 
 export interface X86LiftResult {
   readonly ir: RegisterIR;
@@ -28,13 +34,19 @@ export interface X86LiftResult {
  *
  * Supports legacy long-mode corpus integer AL/AH/AX/EAX/RAX slices, MOV/LEA,
  * sign/zero extension, arithmetic and six arithmetic flags, ADC/SBB, MUL/IMUL,
- * DIV/IDIV with explicit #DE paths, count-masked shifts/rotates, conditions,
- * branches/loops, stack, calls, SSE scalar/packed FP and common packed integer
- * moves/add/sub/bitwise operations, legacy SSE PUNPCKLBW and BTS (the memory
- * form with a register bit offset addresses the signed bit string; not under a
- * 32-bit address size). Addresses use decoded RIP targets or explicit
- * address-size wrapping, scale and segment bases (FS/GS base is physical state).
- * Decoder access/flags metadata never defines these instruction semantics.
+ * DIV/IDIV with explicit #DE paths, count-masked shifts/rotates and SHLD/SHRD,
+ * conditions, branches/loops, stack, calls, BT/BTS/BTR/BTC (the memory form with a
+ * register bit offset addresses the signed bit string; not under a 32-bit address
+ * size), BSF/BSR/TZCNT/LZCNT/POPCNT, LOCK read-modify-writes, memory XCHG,
+ * CMPXCHG (memory) and XADD between memory fences, MFENCE/LFENCE/SFENCE, SSE
+ * scalar/packed FP arithmetic, MIN/MAX/SQRT/CMP, CVTSI2SS/SD, CVTTSS/SD2SI and
+ * CVTSS2SD/CVTSD2SS and their packed forms, and legacy SSE integer moves, add/sub/bitwise, unpacks,
+ * shuffles, lane compares/min/max, mask extraction, PINSRW/PEXTRW, shifts,
+ * PMULUDQ/PMULLW, saturating packs and quadword half moves; STOS/MOVS and their REP
+ * loops while DF is provably clear (ABI entry state, no DF writer in the function). Addresses use decoded RIP targets or
+ * explicit address-size wrapping, scale and segment bases (FS/GS base is physical
+ * state). Decoder access/flags metadata never defines these instruction semantics;
+ * it only bounds the effect of an unlifted one.
  *
  * Calls have no fabricated formal signature: arguments/results remain empty and
  * ABI clobbers are explicit. CALL writes the hardware return-address slot and
@@ -49,12 +61,13 @@ export interface X86LiftResult {
  * Legacy scalar writes preserve upper lanes except memory MOVSS/MOVSD and
  * MOVD/MOVQ, which clear bits through 127; bits above XMM remain preserved.
  *
- * Unsupported: x87/MMX, string/REP operations, atomic LOCK/memory XCHG, RCL/RCR,
- * SHLD/SHRD, BT/BTC/BTR, bit scan, BMI/ADX, other unpack/saturating/shuffle/
- * conversion SIMD, AVX and later encodings, crypto, system/privileged/transactional instructions, CET
- * enforcement and precise memory-fault/exception delivery. ENDBR64 is a landing
- * marker abstraction, not CET enforcement. Unknown instructions emit an unknown
- * effect (whole modeled state and memory) and lifting continues with the next
+ * Unsupported: x87/MMX, CMPS/SCAS/LODS, CMPXCHG8B/16B, RCL/RCR, BMI/ADX,
+ * saturating arithmetic, rounding FP-to-integer conversions, AVX and later encodings, crypto,
+ * system/privileged/transactional instructions, CET enforcement and precise
+ * memory-fault/exception delivery. ENDBR64 is a landing marker abstraction, not
+ * CET enforcement. Unknown instructions emit an unknown effect bounded by the
+ * decoder's access sets when the instruction falls through (boundedUnknownClobbers;
+ * otherwise the whole modeled state and memory) and lifting continues with the next
  * instruction when its flow is sequential or a returning call, like ARM64; other
  * flows terminate. Instructions never silently disappear or become invented traps.
  * Explicit UD2/INT3/INT terminate as traps; malformed/reserved encodings remain
@@ -63,7 +76,7 @@ export interface X86LiftResult {
  */
 export class X86Lifter implements Lifter<RegisterIR> {
   readonly name = 'x86-64 typed semantic lifter';
-  readonly version = '5';
+  readonly version = '7';
   readonly architecture = 'x86_64';
   lift(graph: FunctionGraph, abi: AbiProfile, context: OperationContext): X86LiftResult {
     if (abi.architecture !== this.architecture)
@@ -151,12 +164,25 @@ export class X86Lifter implements Lifter<RegisterIR> {
     const tablesByBranch = new Map((graph.jump_tables ?? []).map((table) => [table.branch, table]));
     const selectors = new Map<string, { block: BlockBuilder; value: Value }>();
     const fpSeen = new Set<string>();
+    // The SysV and Windows x64 ABIs clear DF at function entry and across calls. When no decoded
+    // instruction of the function may change DF (STD, POPF, IRET...), it is clear throughout.
+    const directionClear = !graph.instructions.some(
+      (instruction) =>
+        instruction.payload?.architecture !== 'x86_64' ||
+        (((instruction.payload.flags.written |
+          instruction.payload.flags.set |
+          instruction.payload.flags.undefined) >>
+          10n) &
+          1n) ===
+          1n,
+    );
     const unknownEffect = (
       block: BlockBuilder,
       reason: string,
       instruction?: DecodedInstruction,
+      clobbers = unknownClobbers,
     ): void => {
-      block.unknown(reason, unknownClobbers);
+      block.unknown(reason, clobbers);
       reasons.add(reason);
       diagnostics.push({
         code: 'unavailable_semantics',
@@ -194,7 +220,7 @@ export class X86Lifter implements Lifter<RegisterIR> {
           terminated = true;
           break;
         }
-        const semantics = new X86Semantics(builder, block, instruction, abi, () => {
+        const semantics = new X86Semantics(builder, block, instruction, abi, directionClear, () => {
           const reason = 'FP uses canonical arithmetic NaNs and abstracted MXCSR exception status';
           reasons.add(reason);
           if (!fpSeen.has(instruction.id)) {
@@ -329,11 +355,18 @@ export class X86Lifter implements Lifter<RegisterIR> {
         } catch (error) {
           if (!(error instanceof Unsupported)) throw error;
           block = semantics.block;
-          // The whole modeled state and memory are unknown after the instruction. Only
-          // instructions whose flow is plain sequential execution (or a call that returns
-          // here) continue; any other transfer has no modeled successor.
+          // What the instruction may write is unknown afterwards: the decoder's access sets
+          // bound a sequential instruction (boundedUnknownClobbers), anything else clobbers
+          // the whole modeled state and memory. Only instructions whose flow is plain
+          // sequential execution (or a call that returns here) continue; any other transfer
+          // has no modeled successor.
           if (instruction.flow.kind === 'fallthrough' || instruction.flow.kind === 'call')
-            unknownEffect(block, error.message, instruction);
+            unknownEffect(
+              block,
+              error.message,
+              instruction,
+              boundedUnknownClobbers(instruction) ?? unknownClobbers,
+            );
           else {
             boundary(block, error.message, instruction);
             terminated = true;
