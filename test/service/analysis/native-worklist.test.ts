@@ -13,6 +13,8 @@ import {
   type NativeInterface,
   type NativeSummaryUnit,
 } from '../../../src/service/analysis/native-worklist.js';
+import { boundIR } from '../../../src/service/analysis/passes.js';
+import type { FunctionIR } from '../../../src/ir/index.js';
 
 const input: RegisterDescriptor = {
   id: 'x0',
@@ -385,5 +387,42 @@ test('native optional dependency handling never suppresses outer cancellation or
         equal,
       }),
     (error: unknown) => error instanceof OperationError && error.code === 'cancelled',
+  );
+});
+
+// A context specialization whose graph exceeds the worklist's remaining node capacity
+// (`boundIR` under the capacity the worklist passes) is that dependency's own limit: the call
+// falls back to the generic interface instead of failing the request.
+test('a context specialization over the remaining capacity falls back to the generic body', () => {
+  const blocks = Array.from({ length: 4 }, () => ({ instructions: [], parameters: [] }));
+  const result = nativeDependencyWorklist({
+    roots: [],
+    root_dependencies: [
+      {
+        call_id: 'selected-c',
+        target: c,
+        assumptions: { constants: [], aliases: [], type_evidence_scope: 'scope' },
+      },
+    ],
+    context: createOperationContext(),
+    capacity: { instructions: 100, blocks: 100, nodes: 10 },
+    max_functions: 64,
+    max_refinements: 64,
+    load: (target) => units.get(target.id)!,
+    specialize: (_baseline, _assumptions, bounded) => {
+      boundIR({ blocks } as unknown as FunctionIR, bounded);
+      throw new Error('unreachable');
+    },
+    initialize,
+    observe,
+    equal,
+  });
+  const [key] = [...result.summaries.keys()];
+  assert.equal(result.summaries.size, 1);
+  assert.deepEqual(result.summaries.get(key!)?.observed.parameters, [input]);
+  assert.ok(
+    result.summaries
+      .get(key!)
+      ?.reasons.some((reason) => reason.startsWith('native context ir_nodes capacity')),
   );
 });
