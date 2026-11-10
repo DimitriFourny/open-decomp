@@ -467,6 +467,14 @@ const recomputedLowPart: ExpressionRule = {
     )
       return null;
     const [low, ...rest] = expression.values as [Value, ...Value[]];
+    // A plain low slice is register-cell recombination's (exact wiring).
+    const lowDefinition = site.observe(site.resolve(low).id);
+    if (
+      !lowDefinition ||
+      lowDefinition.kind === 'extract' ||
+      (lowDefinition.kind === 'cast' && lowDefinition.op === 'truncate')
+    )
+      return null;
     let base: Value | null = null,
       offset = bitWidth(low.type);
     for (const part of rest) {
