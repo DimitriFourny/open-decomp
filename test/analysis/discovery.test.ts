@@ -968,6 +968,161 @@ test('IBT `.plt.sec` entries bind at their endbr64; weak, aliased or misaligned 
   ]);
 });
 
+test('a function an unwinder can re-enter at a landing pad is never proven noreturn', () => {
+  const le32 = (value: number): number[] => [
+    value & 0xff,
+    (value >> 8) & 0xff,
+    (value >> 16) & 0xff,
+    (value >>> 24) & 0xff,
+  ];
+  const call = (from: number, to: number) => [0xe8, ...le32(to - (from + 5))];
+  /** m (+0): call c; ret. c (+6): call t; BODY. t: ud2. The `.eh_frame` (a `zLR` CIE, both
+   * pointers pc-relative sdata4) has one FDE for c, with LSDA pointer `lsda` (0: null). */
+  const image = (
+    body: (at: number, t: number) => number[],
+    eh: 'lsda' | 'null-lsda' | 'none' | 'corrupt',
+    format: 'elf' | 'pe' = 'elf',
+  ) => {
+    const bodyBytes = body(0x100b, 0);
+    const t = 0x100b + bodyBytes.length;
+    const code = [
+      ...call(0x1000, 0x1006),
+      0xc3,
+      ...call(0x1006, t),
+      ...body(0x100b, t),
+      0x0f,
+      0x0b,
+    ];
+    while (code.length % 8) code.push(0xcc);
+    const ehAt = 0x1000 + code.length;
+    const cieBody = [0, 0, 0, 0, 1, 0x7a, 0x4c, 0x52, 0, 1, 0x78, 0x10, 2, 0x1b, 0x1b];
+    const cie = [...le32(cieBody.length), ...cieBody];
+    const fdeAt = ehAt + cie.length;
+    const fdeBody = [
+      ...le32(fdeAt + 4 - ehAt),
+      ...le32(0x1006 - (fdeAt + 8)),
+      ...le32(t - 0x1006),
+      4,
+      ...le32(eh === 'null-lsda' ? 0 : 0x40),
+    ];
+    const frame =
+      eh === 'none'
+        ? [0, 0, 0, 0]
+        : eh === 'corrupt'
+          ? [
+              ...le32(cieBody.length),
+              0,
+              0,
+              0,
+              0,
+              9,
+              0x7a,
+              0x4c,
+              0x52,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+            ]
+          : [...cie, ...le32(fdeBody.length), ...fdeBody, 0, 0, 0, 0];
+    const base = raw([...code, ...frame]);
+    const va = (value: number): Address => ({
+      image_id: base.id,
+      space: 'va',
+      value: BigInt(value),
+    });
+    const section = {
+      id: 'section-eh-frame',
+      name: '.eh_frame',
+      segment_id: null,
+      kind: 'section' as const,
+      virtual_range: { start: va(ehAt), size: BigInt(frame.length) },
+      file_range: {
+        start: { image_id: base.id, space: 'file' as const, value: BigInt(ehAt - 0x1000) },
+        size: BigInt(frame.length),
+      },
+      permissions: ['read'] as 'read'[],
+      flags: 0n,
+      evidence_ids: [],
+    };
+    const result: LoadedImage =
+      format === 'elf'
+        ? {
+            ...base,
+            target: { ...base.target, format: 'elf', abi: 'sysv-amd64' },
+            sections: [section],
+          }
+        : {
+            ...base,
+            hints: [
+              {
+                kind: 'unwind',
+                range: { start: va(0x1006), size: BigInt(t - 0x1006) },
+                encoding: 'PE_AMD64_UNWIND_INFO_V1',
+                record: { start: va(ehAt), size: 8n },
+                handler: eh === 'lsda' ? va(0x1000) : null,
+                evidence_ids: [],
+              },
+            ],
+          };
+    const found = discover(result, {
+      assertions: [assertion(result, 6), assertion(result, t - 0x1000)],
+    });
+    const at = (offset: number) =>
+      found.graphs.find((graph) => graph.function.entry.value === 0x1000n + BigInt(offset))!;
+    return { m: at(0), c: at(6), t: at(t - 0x1000) };
+  };
+  // c: call t; mov eax, 7; ret — the catch pad sits right after the call.
+  const pad = () => [0xb8, 7, 0, 0, 0, 0xc3];
+  for (const format of ['elf', 'pe'] as const) {
+    const caught = image(pad, 'lsda', format);
+    assert.ok(caught.t.function.noreturn, format);
+    assert.equal(caught.c.function.noreturn, undefined, format);
+    // The caller keeps its continuation: m's call falls through to its ret.
+    assert.deepEqual(
+      caught.m.blocks.flatMap((block) => block.edges.map((edge) => edge.kind)),
+      ['fallthrough', 'return'],
+      format,
+    );
+    assert.equal(caught.m.function.noreturn, undefined);
+    // c's own graph says its handlers are not decompiled.
+    assert.ok(caught.c.coverage.reasons.includes('exception handlers not decompiled'));
+    assert.ok(caught.c.diagnostics.some((item) => item.code === 'unavailable_semantics'));
+  }
+  // A cleanup pad ending in a call that never returns (`_Unwind_Resume`) is not read: an LSDA
+  // alone makes c unprovable, the conservative verdict.
+  const cleanup = image((at, t) => call(at, t), 'lsda');
+  assert.equal(cleanup.c.function.noreturn, undefined);
+  // Without an LSDA (a C `abort()` wrapper, a null LSDA pointer or no FDE) c stays proven.
+  for (const eh of ['null-lsda', 'none'] as const) {
+    const plain = image(pad, eh);
+    assert.ok(plain.c.function.noreturn, eh);
+    assert.ok(plain.m.function.noreturn, eh);
+    assert.ok(!plain.c.coverage.reasons.includes('exception handlers not decompiled'));
+  }
+  // Unreadable unwind data: roots with a call are not proven, call-free ones still are.
+  const corrupt = image(pad, 'corrupt');
+  assert.equal(corrupt.c.function.noreturn, undefined);
+  assert.equal(corrupt.m.function.noreturn, undefined);
+  assert.ok(corrupt.t.function.noreturn);
+});
+
+test('a setjmp-style call that returns twice keeps the path to its second return', () => {
+  // f (+0): call s; test eax, eax; jne +1; ret; ud2. s (+12, a root): ret. The second return of
+  // a setjmp is the same call continuation, so the path to f's ret keeps f unproven.
+  const image = raw([0xe8, 0x07, 0, 0, 0, 0x85, 0xc0, 0x75, 0x01, 0xc3, 0x0f, 0x0b, 0xc3]);
+  const result = discover(image, { assertions: [assertion(image, 12)] });
+  const f = result.graphs.find((graph) => graph.function.entry.value === 0x1000n)!;
+  assert.equal(f.function.noreturn, undefined);
+});
+
 test("selected discovery publishes every proof its diagnostics cite, including another root's seed proofs", () => {
   // A (entry, +0): jz +4 -> B (+4, asserted root). Conditional flow into a foreign
   // root is a boundary conflict whose diagnostic cites B's seed proof, not A's.

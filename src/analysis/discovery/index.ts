@@ -26,6 +26,7 @@ import { jumpTableChain, proveJumpTable, type JumpTableProof } from './jump-tabl
 import { reconcileGraphs, type DiscoveryLineage } from './lineage.js';
 import { stackDeltas, type StackDelta } from './stack-delta.js';
 import { memorySlot, thunkSlot } from './stubs.js';
+import { exceptionFacts, type ExceptionFacts } from './exceptions.js';
 export type { DiscoveryLineage } from './lineage.js';
 
 /** Same entry cap as indirect-table target recovery; larger tables stay unresolved. */
@@ -33,6 +34,9 @@ const MAX_JUMP_TABLE_ENTRIES = 256;
 const JUMP_TABLE_RULE =
   'indirect branch targets from immutable table entries under a dominating unsigned index bound';
 const TAIL_TARGET_RULE = 'unconditional jump at entry stack depth to code outside the root body';
+const EXCEPTION_HANDLERS = 'exception handlers not decompiled';
+const EXCEPTION_HANDLERS_MESSAGE =
+  'The unwind record of this function names an exception handler (LSDA, language handler or personality): landing pads and handler code the unwinder enters are not decompiled';
 /** Linker-synthesized import trampoline sections (ELF PLT variants, Mach-O stub sections). */
 const STUB_SECTION = /(^|[.,])(plt|plt\.sec|plt\.got|iplt)$|__(auth_|objc_)?stubs$|__stub_helper$/;
 
@@ -157,6 +161,8 @@ export interface DiscoveryIndex {
   readonly objects: ReadonlySet<bigint>;
   /** Entries of published functions proven never to return, with that proof's evidence. */
   readonly noreturn: ReadonlyMap<bigint, readonly string[]>;
+  /** Whether an exception unwinder can re-enter a function at a landing pad or handler. */
+  readonly exceptions: ExceptionFacts;
   data_after(value: bigint, context: OperationContext): number;
   executable_end(value: bigint, context: OperationContext): bigint;
 }
@@ -1018,6 +1024,7 @@ function discoverOnce(
       entry: bigint,
       group: ReadonlySet<bigint> | null,
       uses?: Set<bigint>,
+      calls?: { seen: boolean },
     ): readonly string[] | undefined => {
       const parents = new Set<string>();
       const visited = new Set<bigint>();
@@ -1064,6 +1071,7 @@ function discoverOnce(
           for (const id of instructionEvidence.get(instruction.id) ?? instruction.evidence_ids)
             parents.add(id);
         if (flow.kind === 'call') {
+          if (calls) calls.seen = true;
           if (group === null) continue;
           if (ends(flow.target?.value ?? null, noreturnOf(instruction))) continue;
         }
@@ -1071,15 +1079,25 @@ function discoverOnce(
       }
       return [...parents];
     };
+    // A root an unwinder can re-enter at a landing pad (its own unwind record names a handler)
+    // may return from there: never proven. Unreadable unwind data proves only call-free roots.
     const group = new Set(
       roots
-        .filter(
-          (item) =>
-            !neverReturns.has(item.entry.value) &&
-            !index.noreturn.has(item.entry.value) &&
-            !input.noreturn_calls?.has(item.entry.value) &&
-            walk(item.entry.value, null) !== undefined,
-        )
+        .filter((item) => {
+          if (
+            neverReturns.has(item.entry.value) ||
+            index.noreturn.has(item.entry.value) ||
+            input.noreturn_calls?.has(item.entry.value)
+          )
+            return false;
+          const fact = index.exceptions.at(item.entry.value, context);
+          if (fact === 'handler') return false;
+          const calls = { seen: false };
+          return (
+            walk(item.entry.value, null, undefined, calls) !== undefined &&
+            (fact === 'none' || !calls.seen)
+          );
+        })
         .map((item) => item.entry.value),
     );
     // Each root is walked again only when a member its last walk relied on leaves the set.
@@ -1424,6 +1442,17 @@ function discoverOnce(
           consumed: blockCount,
         },
       });
+    // Code an unwinder enters at a landing pad is no static successor of anything: the graph
+    // lacks it, and says so.
+    const handlers = index.exceptions.at(item.entry.value, context) === 'handler';
+    if (handlers)
+      localDiagnostics.push({
+        code: 'unavailable_semantics',
+        severity: 'warning',
+        message: EXCEPTION_HANDLERS_MESSAGE,
+        address: item.entry,
+        evidence_ids: [...item.evidence],
+      });
     const reasons = [
       ...new Set([
         ...localGaps
@@ -1442,6 +1471,7 @@ function discoverOnce(
           )
           .map(() => 'unresolved control flow'),
         ...(conflict ? ['conflicting boundaries'] : []),
+        ...(handlers ? [EXCEPTION_HANDLERS] : []),
       ]),
     ];
     const name = [...item.names].sort()[0] ?? null;
@@ -2036,6 +2066,7 @@ export function prepareDiscoveryIndex(
     executable: executableRanges,
     objects: objectAddresses,
     noreturn,
+    exceptions: exceptionFacts(image, context),
     data_after: dataAfter,
     executable_end: executableEnd,
   };
