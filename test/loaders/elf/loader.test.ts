@@ -281,12 +281,111 @@ test('GNU version requirement is provider evidence, not DT_NEEDED position guess
     .map((e) => e.claim);
   assert.ok(claims.includes('ELF version requirement provider'));
   assert.ok(claims.includes('ELF imported symbol version index'));
+  assert.ok(!image.capabilities.some((c) => c.status === 'partial'));
+});
+
+/** Two requirements in lld's layout: every Verneed record first, then every Vernaux. */
+function lldVersions(): Buffer {
+  const b = boundaryImage(true);
+  b.writeBigUInt64LE(64n, SHOFF + 10 * 64 + 32);
+  b.writeUInt32LE(2, SHOFF + 10 * 64 + 44);
+  b.fill(0, 0xa20, 0xa60);
+  for (const [record, aux, next, index] of [
+    [0xa20, 0xa40, 16, 2],
+    [0xa30, 0xa50, 0, 3],
+  ] as const) {
+    b.writeUInt16LE(1, record);
+    b.writeUInt16LE(1, record + 2);
+    b.writeUInt32LE(19, record + 4);
+    b.writeUInt32LE(aux - record, record + 8);
+    b.writeUInt32LE(next, record + 12);
+    b.writeUInt16LE(index, aux + 6);
+    b.writeUInt32LE(33, aux + 8);
+  }
+  return b;
+}
+
+test('GNU version requirements are accepted in any non-overlapping record layout', () => {
+  const b = lldVersions();
+  let image = load(b);
+  assert.equal(image.imports[0]?.library, 'libexample.so');
+  assert.ok(!image.capabilities.some((c) => c.status === 'partial'));
+  b.writeUInt16LE(3, 0xa02);
+  image = load(b);
+  assert.equal(image.imports[0]?.library, 'libexample.so');
+  // Index 3 is proven by the second auxiliary record, after both requirement records.
+  assert.ok(
+    image.evidence.some(
+      (e) =>
+        image.imports[0]!.evidence_ids.includes(e.id) &&
+        e.claim === 'ELF version requirement index' &&
+        e.origin.kind === 'binary' &&
+        e.origin.range.start.value === 0xa50n,
+    ),
+  );
+});
+
+test('malformed GNU version metadata drops provider attribution, not the image', () => {
+  const overlap = lldVersions();
+  // The second requirement reuses the first one's auxiliary record (aliased bytes).
+  overlap.writeUInt32LE(0x10, 0xa38);
+  overlap.writeUInt16LE(3, 0xa46);
   const broken = boundaryImage(true);
   broken.writeUInt16LE(3, 0xa02);
-  failure(broken);
   const cycle = boundaryImage(true);
   cycle.writeUInt32LE(16, 0xa3c);
-  failure(cycle);
+  const chain = lldVersions();
+  chain.writeUInt32LE(8, 0xa2c);
+  for (const b of [overlap, broken, cycle, chain]) {
+    const image = load(b),
+      imported = image.imports[0]!;
+    assert.equal(imported.original_name, 'external');
+    assert.equal(imported.library, null);
+    assert.ok(
+      !image.evidence
+        .filter((e) => imported.evidence_ids.includes(e.id))
+        .some((e) => e.claim.startsWith('ELF version') || e.claim.includes('symbol version')),
+    );
+    const capability = image.capabilities.find((c) => c.feature === 'ELF GNU symbol versions');
+    assert.equal(capability?.status, 'partial');
+    assert.ok(
+      image.diagnostics.some(
+        (d) =>
+          d.severity === 'warning' &&
+          d.code === 'malformed_image' &&
+          d.message.startsWith('ELF GNU symbol versions dropped: '),
+      ),
+    );
+    assert.ok(image.entry_points.length && image.symbols.length);
+  }
+});
+
+test('a malformed .symtab or entry point is dropped; .dynsym names and code remain', () => {
+  const b = boundaryImage();
+  b.writeUInt16LE(10, 60);
+  b.copy(b, 0xc00, 0x500, 0x548);
+  const symtab = SHOFF + 9 * 64;
+  b.writeUInt32LE(2, symtab + 4);
+  b.writeBigUInt64LE(0xc00n, symtab + 24);
+  b.writeBigUInt64LE(72n, symtab + 32);
+  b.writeUInt32LE(5, symtab + 40);
+  b.writeUInt32LE(1, symtab + 44);
+  b.writeBigUInt64LE(24n, symtab + 56);
+  const valid = load(b);
+  assert.equal(valid.symbols.filter((s) => s.original_name === 'exported').length, 2);
+  assert.ok(!valid.capabilities.some((c) => c.status === 'partial'));
+  b.writeUInt32LE(1, 0xc00); // A named null symbol.
+  b.writeBigUInt64LE(BASE + 0x2000n, 24); // An entry point in zero-fill memory.
+  const image = load(b);
+  assert.equal(image.symbols.filter((s) => s.original_name === 'exported').length, 1);
+  assert.equal(image.imports[0]?.original_name, 'external');
+  assert.deepEqual(image.entry_points, []);
+  for (const feature of ['ELF symbol table', 'ELF entry point'])
+    assert.equal(image.capabilities.find((c) => c.feature === feature)?.status, 'partial');
+  assert.equal(
+    image.capabilities.find((c) => c.feature === 'Native symbol and export tables')?.status,
+    'partial',
+  );
 });
 
 test('unreferenced undefined dynamic symbols retain null slots; weak binding remains native', () => {

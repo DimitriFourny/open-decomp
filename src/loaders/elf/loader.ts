@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 import {
   AddressMap,
+  NATIVE_SYMBOL_TABLES_FEATURE,
   entityIdentity,
   fingerprint,
   sliceIdentity,
@@ -65,6 +66,7 @@ const RELOCATIONS: Readonly<Record<number, { readonly name: string; readonly wid
   41: { name: 'R_X86_64_GOTPCRELX', width: 32 },
   42: { name: 'R_X86_64_REX_GOTPCRELX', width: 32 },
 };
+const VERSIONS_FEATURE = 'ELF GNU symbol versions';
 const integer = (name: string, value: bigint | number): MetadataField => ({
   kind: 'integer',
   name,
@@ -91,6 +93,8 @@ class Parser extends Reader {
   >();
   readonly symbolVersions = new Map<number, readonly number[]>();
   readonly versionSections = new Map<number, RawSection>();
+  versionsDropped = false;
+  symbolTableDropped = false;
   readonly neededLibraries = new Map<string, readonly string[]>();
   readonly unsupportedFeatures = new Set<string>();
   readonly proofs = new Map<string, readonly string[]>();
@@ -181,6 +185,43 @@ class Parser extends Reader {
       evidence_ids: [],
       ...(p === undefined ? {} : { address: this.address('file', p) }),
     });
+  }
+
+  /** Parses optional metadata (not needed to map code). A malformed or unsupported table is
+   * dropped as a whole: `drop` forgets what it recorded, its hints and headers are rolled back,
+   * and a warning plus a partial format capability remain. Budget and cancellation errors are
+   * never downgraded. Returns false when the table was dropped. */
+  optional(feature: string, parse: () => void, drop: () => void): boolean {
+    const hints = this.hints.length,
+      headers = this.headers.length;
+    try {
+      parse();
+      return true;
+    } catch (error) {
+      if (
+        !(error instanceof ELFLoadError) ||
+        (error.code !== 'malformed_image' && error.code !== 'unsupported_target')
+      )
+        throw error;
+      drop();
+      this.hints.length = hints;
+      this.headers.length = headers;
+      const message = `${feature} dropped: ${error.message}`;
+      this.capabilities.push({
+        layer: 'format',
+        feature,
+        status: 'partial',
+        limitations: [message],
+      });
+      this.diagnostics.push({
+        code: error.code,
+        severity: 'warning',
+        message,
+        evidence_ids: [],
+        ...(error.diagnostic.address ? { address: error.diagnostic.address } : {}),
+      });
+      return false;
+    }
   }
 
   mapping(va: bigint, size: bigint, backed = false): ImageMapping | undefined {
@@ -460,116 +501,131 @@ class Parser extends Reader {
 
   parseSymbols(): void {
     for (const s of this.raw) {
-      if (s.type !== 2 && s.type !== 11) continue;
-      if (s.flags & 0x800n)
-        throw new ELFLoadError(
-          'unsupported_target',
-          'Compressed ELF symbol tables are unsupported',
-        );
-      if (s.stride !== 24n || s.size % 24n || !s.link)
-        this.fail('Invalid ELF symbol table entry size or string-table link', s.p);
-      const count = this.table(s.offset, s.size / 24n, 24n),
-        strings = this.raw[s.link]!;
-      if (!count || strings.type !== 3 || s.info > count)
-        this.fail('Invalid ELF symbol string table, null entry or local-symbol boundary', s.p);
-      this.own(s.offset, s.size, 'ELF symbol table');
-      this.own(strings.offset, strings.size, 'ELF symbol names');
-      const records: NativeSymbol[] = [];
-      for (let i = 0; i < count; i++) {
-        const p = s.offset + BigInt(i) * 24n,
-          nameIndex = this.u32(p),
-          info = this.u8(p + 4n),
-          visibility = this.u8(p + 5n) & 3,
-          section = this.u16(p + 6n),
-          value = this.u64(p + 8n),
-          size = this.u64(p + 16n),
-          type = info & 15,
-          binding = info >>> 4;
-        const name = this.name(strings, nameIndex);
-        if (!i && (nameIndex || info || visibility || section || value || size))
-          this.fail('Invalid ELF null symbol', p);
-        if (section === 0xffff)
-          throw new ELFLoadError('unsupported_target', 'ELF SHN_XINDEX symbols are unsupported');
-        let address: Address | null = null;
-        if (section > 0 && section < 0xff00) {
-          const owner = this.raw[section];
-          if (!owner) this.fail('ELF symbol section index outside table', p);
-          if (owner.flags & 2n && type !== 6) {
-            const inside = value >= owner.va && this.end(value, size) <= owner.va + owner.size;
-            // GNU ld aligns zero-size markers such as __TMC_END__ past a short section's end;
-            // such a marker keeps its name but claims no address in that section.
-            if (inside) address = this.address('va', value);
-            else if (size) this.fail('ELF symbol exceeds its owning section', p);
-          }
-        } else if (section === 0xfff1) address = this.address('va', value);
-        else if (section !== 0)
-          this.unsupported(
-            `ELF special symbol section ${section}`,
-            `ELF special symbol section 0x${section.toString(16)} has no reconstructed address`,
-            p,
-          );
-        if (type === 6)
-          this.unsupported(
-            'ELF TLS symbols',
-            'TLS symbol values are thread-relative offsets, not linked VAs',
-            p,
-          );
-        if (type === 10)
-          this.unsupported(
-            'ELF IFUNC resolution',
-            'GNU IFUNC symbol identifies a resolver; the runtime-selected function is not inferred',
-            p,
-          );
-        const evidence = [
-          ...this.fact(p, 24n, 'ELF symbol value, size, type and binding'),
-          ...this.fact(
-            strings.offset + BigInt(nameIndex),
-            BigInt(name.length + 1),
-            'ELF symbol name',
-          ),
-        ];
-        const record: SymbolRecord = {
-          id: this.id('symbol', p),
-          original_name: name || null,
-          display_name: name || null,
-          kind:
-            section === 0xfff1
-              ? 'absolute'
-              : type === 2
-                ? 'function'
-                : type === 1
-                  ? 'object'
-                  : type === 3
-                    ? 'section'
-                    : 'unknown',
-          address,
-          size,
-          binding:
-            binding === 0 ? 'local' : binding === 1 ? 'global' : binding === 2 ? 'weak' : 'unknown',
-          evidence_ids: evidence,
-        };
-        records.push({ record, undefined: section === 0, type, p });
-        if (i) this.symbols.push(record);
+      if (s.type === 11) this.readSymbols(s);
+      else if (s.type === 2) {
+        // .symtab only names code (strip removes it); relocations and versions use .dynsym.
+        const symbols = this.symbols.length;
         if (
-          i &&
-          s.type === 11 &&
-          section !== 0 &&
-          (binding === 1 || binding === 2 || binding === 10) &&
-          (visibility === 0 || visibility === 3) &&
-          name
+          !this.optional(
+            'ELF symbol table',
+            () => this.readSymbols(s),
+            () => {
+              this.symbols.length = symbols;
+              this.symbolTables.delete(s.index);
+            },
+          )
         )
-          this.exports.push({
-            id: this.id('export', p),
-            original_name: name,
-            display_name: name,
-            address: type === 6 || type === 10 ? null : address,
-            ordinal: null,
-            forwarder: null,
-            evidence_ids: evidence,
-          });
+          this.symbolTableDropped = true;
       }
-      this.symbolTables.set(s.index, records);
     }
+  }
+
+  readSymbols(s: RawSection): void {
+    if (s.flags & 0x800n)
+      throw new ELFLoadError('unsupported_target', 'Compressed ELF symbol tables are unsupported');
+    if (s.stride !== 24n || s.size % 24n || !s.link)
+      this.fail('Invalid ELF symbol table entry size or string-table link', s.p);
+    const count = this.table(s.offset, s.size / 24n, 24n),
+      strings = this.raw[s.link]!;
+    if (!count || strings.type !== 3 || s.info > count)
+      this.fail('Invalid ELF symbol string table, null entry or local-symbol boundary', s.p);
+    this.own(s.offset, s.size, 'ELF symbol table');
+    this.own(strings.offset, strings.size, 'ELF symbol names');
+    const records: NativeSymbol[] = [];
+    for (let i = 0; i < count; i++) {
+      const p = s.offset + BigInt(i) * 24n,
+        nameIndex = this.u32(p),
+        info = this.u8(p + 4n),
+        visibility = this.u8(p + 5n) & 3,
+        section = this.u16(p + 6n),
+        value = this.u64(p + 8n),
+        size = this.u64(p + 16n),
+        type = info & 15,
+        binding = info >>> 4;
+      const name = this.name(strings, nameIndex);
+      if (!i && (nameIndex || info || visibility || section || value || size))
+        this.fail('Invalid ELF null symbol', p);
+      if (section === 0xffff)
+        throw new ELFLoadError('unsupported_target', 'ELF SHN_XINDEX symbols are unsupported');
+      let address: Address | null = null;
+      if (section > 0 && section < 0xff00) {
+        const owner = this.raw[section];
+        if (!owner) this.fail('ELF symbol section index outside table', p);
+        if (owner.flags & 2n && type !== 6) {
+          const inside = value >= owner.va && this.end(value, size) <= owner.va + owner.size;
+          // GNU ld aligns zero-size markers such as __TMC_END__ past a short section's end;
+          // such a marker keeps its name but claims no address in that section.
+          if (inside) address = this.address('va', value);
+          else if (size) this.fail('ELF symbol exceeds its owning section', p);
+        }
+      } else if (section === 0xfff1) address = this.address('va', value);
+      else if (section !== 0)
+        this.unsupported(
+          `ELF special symbol section ${section}`,
+          `ELF special symbol section 0x${section.toString(16)} has no reconstructed address`,
+          p,
+        );
+      if (type === 6)
+        this.unsupported(
+          'ELF TLS symbols',
+          'TLS symbol values are thread-relative offsets, not linked VAs',
+          p,
+        );
+      if (type === 10)
+        this.unsupported(
+          'ELF IFUNC resolution',
+          'GNU IFUNC symbol identifies a resolver; the runtime-selected function is not inferred',
+          p,
+        );
+      const evidence = [
+        ...this.fact(p, 24n, 'ELF symbol value, size, type and binding'),
+        ...this.fact(
+          strings.offset + BigInt(nameIndex),
+          BigInt(name.length + 1),
+          'ELF symbol name',
+        ),
+      ];
+      const record: SymbolRecord = {
+        id: this.id('symbol', p),
+        original_name: name || null,
+        display_name: name || null,
+        kind:
+          section === 0xfff1
+            ? 'absolute'
+            : type === 2
+              ? 'function'
+              : type === 1
+                ? 'object'
+                : type === 3
+                  ? 'section'
+                  : 'unknown',
+        address,
+        size,
+        binding:
+          binding === 0 ? 'local' : binding === 1 ? 'global' : binding === 2 ? 'weak' : 'unknown',
+        evidence_ids: evidence,
+      };
+      records.push({ record, undefined: section === 0, type, p });
+      if (i) this.symbols.push(record);
+      if (
+        i &&
+        s.type === 11 &&
+        section !== 0 &&
+        (binding === 1 || binding === 2 || binding === 10) &&
+        (visibility === 0 || visibility === 3) &&
+        name
+      )
+        this.exports.push({
+          id: this.id('export', p),
+          original_name: name,
+          display_name: name,
+          address: type === 6 || type === 10 ? null : address,
+          ordinal: null,
+          forwarder: null,
+          evidence_ids: evidence,
+        });
+    }
+    this.symbolTables.set(s.index, records);
   }
 
   parseDynamic(): void {
@@ -678,25 +734,36 @@ class Parser extends Reader {
       this.fail('ELF dynamic symbols do not use DT_STRTAB strings', dynamicSymbols.p);
     match(7n, 4, 8n, 9n);
     match(17n, 9, 18n, 19n);
-    const versionSymbols = match(0x6ffffff0n, 0x6fffffff);
-    const versionNeeds = match(0x6ffffffen, 0x6ffffffe);
-    if (versionSymbols && versionSymbols.link !== dynamicSymbols?.index)
-      this.fail('ELF version indexes do not use DT_SYMTAB symbols', versionSymbols.p);
-    if (versionNeeds && versionNeeds.link !== s.link)
-      this.fail('ELF version requirements do not use DT_STRTAB strings', versionNeeds.p);
-    for (const [pointer, countTag, type] of [
-      [0x6ffffffen, 0x6fffffffn, 0x6ffffffen],
-      [0x6ffffffcn, 0x6ffffffdn, 0x6ffffffdn],
-    ] as const) {
-      if (!unique.has(pointer) && !unique.has(countTag)) continue;
-      const table = this.raw.find(
-        (section) => BigInt(section.type) === type && section.va === unique.get(pointer),
-      );
-      if (!table || unique.get(countTag) !== BigInt(table.info))
-        this.fail('ELF version dynamic pointer/count contradict section evidence', s.p);
-      if (table.link !== s.link || this.file(table.va, table.size) !== table.offset)
-        this.fail('ELF version dynamic metadata contradicts linked string/file backing', table.p);
-    }
+    // Symbol versions only attribute imports to providers: contradicting version metadata
+    // drops that attribution, never the image.
+    this.optional(
+      VERSIONS_FEATURE,
+      () => {
+        const versionSymbols = match(0x6ffffff0n, 0x6fffffff);
+        const versionNeeds = match(0x6ffffffen, 0x6ffffffe);
+        if (versionSymbols && versionSymbols.link !== dynamicSymbols?.index)
+          this.fail('ELF version indexes do not use DT_SYMTAB symbols', versionSymbols.p);
+        if (versionNeeds && versionNeeds.link !== s.link)
+          this.fail('ELF version requirements do not use DT_STRTAB strings', versionNeeds.p);
+        for (const [pointer, countTag, type] of [
+          [0x6ffffffen, 0x6fffffffn, 0x6ffffffen],
+          [0x6ffffffcn, 0x6ffffffdn, 0x6ffffffdn],
+        ] as const) {
+          if (!unique.has(pointer) && !unique.has(countTag)) continue;
+          const table = this.raw.find(
+            (section) => BigInt(section.type) === type && section.va === unique.get(pointer),
+          );
+          if (!table || unique.get(countTag) !== BigInt(table.info))
+            this.fail('ELF version dynamic pointer/count contradict section evidence', s.p);
+          if (table.link !== s.link || this.file(table.va, table.size) !== table.offset)
+            this.fail(
+              'ELF version dynamic metadata contradicts linked string/file backing',
+              table.p,
+            );
+        }
+      },
+      () => this.dropVersions(),
+    );
     if (unique.has(23n)) {
       const encoding = unique.get(20n);
       if (encoding !== 7n && encoding !== 17n) this.fail('Invalid ELF DT_PLTREL encoding', s.p);
@@ -721,7 +788,23 @@ class Parser extends Reader {
         );
   }
 
+  dropVersions(): void {
+    this.versionsDropped = true;
+    this.versions.clear();
+    this.symbolVersions.clear();
+    this.versionSections.clear();
+  }
+
   parseVersions(): void {
+    if (this.versionsDropped) return;
+    this.optional(
+      VERSIONS_FEATURE,
+      () => this.readVersions(),
+      () => this.dropVersions(),
+    );
+  }
+
+  readVersions(): void {
     for (const s of this.raw) {
       if ([0x6ffffffe, 0x6fffffff].includes(s.type) && s.flags & 0x800n)
         throw new ELFLoadError(
@@ -734,10 +817,15 @@ class Parser extends Reader {
         if (!s.info || s.size < 16n)
           this.fail('ELF version-need section has no bounded records', s.p);
         this.table(s.offset, BigInt(s.info), 16n);
+        // vn_next and vna_next are forward byte offsets; the gABI fixes no layout (GNU ld
+        // interleaves each record with its auxiliaries, lld writes every record first). Every
+        // record and auxiliary must lie inside the section and no two may share bytes.
+        const records: bigint[] = [];
         let p = s.offset;
         for (let i = 0; i < s.info; i++) {
           if (p < s.offset || p + 16n > s.offset + s.size)
             this.fail('ELF version-need record exceeds section', p);
+          records.push(p);
           const version = this.u16(p),
             count = this.u16(p + 2n),
             libraryIndex = this.u32(p + 4n),
@@ -758,8 +846,9 @@ class Parser extends Reader {
           let q = p + BigInt(aux);
           this.table(q, BigInt(count), 16n);
           for (let j = 0; j < count; j++) {
-            if (q < p + 16n || q + 16n > s.offset + s.size)
+            if (q + 16n > s.offset + s.size)
               this.fail('ELF version auxiliary record exceeds section', q);
+            records.push(q);
             const index = this.u16(q + 6n) & 0x7fff,
               nameIndex = this.u32(q + 8n),
               advance = this.u32(q + 12n);
@@ -776,10 +865,14 @@ class Parser extends Reader {
             } else if (advance !== 0) this.fail('ELF version auxiliary count contradicts chain', q);
           }
           if (i + 1 < s.info) {
-            if (next < 16 || p + BigInt(next) <= q) this.fail('Invalid ELF version-need chain', p);
+            if (next < 16) this.fail('Invalid ELF version-need chain', p);
             p += BigInt(next);
           } else if (next !== 0) this.fail('ELF version-need count contradicts chain', p);
         }
+        records.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+        for (let i = 1; i < records.length; i++)
+          if (records[i]! < records[i - 1]! + 16n)
+            this.fail('Overlapping ELF version-need records', records[i]!);
         this.own(s.offset, s.size, 'ELF version requirements');
       } else if (s.type === 0x6fffffff) {
         const symbols = this.symbolTables.get(s.link);
@@ -800,6 +893,18 @@ class Parser extends Reader {
         this.own(s.offset, s.size, 'ELF symbol version indexes');
       }
     }
+    // An undefined symbol's version index names a requirement (index 0 local, 1 global).
+    for (const [table, indexes] of this.symbolVersions) {
+      const symbols = this.symbolTables.get(table)!;
+      for (let i = 1; i < symbols.length; i++)
+        if (
+          symbols[i]!.undefined &&
+          symbols[i]!.record.original_name &&
+          indexes[i]! > 1 &&
+          !this.versions.has(indexes[i]!)
+        )
+          this.fail('Undefined ELF symbol version lacks a version requirement', symbols[i]!.p);
+    }
   }
 
   importFor(
@@ -812,8 +917,6 @@ class Parser extends Reader {
     if (!symbol.record.original_name) return;
     const version = this.symbolVersions.get(table)?.[index],
       provider = version === undefined ? undefined : this.versions.get(version);
-    if (version !== undefined && version > 1 && !provider)
-      this.fail('Undefined ELF symbol version lacks a version requirement', symbol.p);
     const versionSection = this.versionSections.get(table);
     const evidence = [
       ...symbol.record.evidence_ids,
@@ -1049,12 +1152,26 @@ class Parser extends Reader {
     this.parseVersions();
     this.parseRelocations();
     const entries: Address[] = [];
-    if (h.entry) {
-      const mapping = this.mapping(h.entry, 1n, true);
-      if (!mapping?.permissions.includes('execute'))
-        this.fail('ELF entry point is not backed executable memory', 24n);
-      entries.push(this.address('va', h.entry));
-    }
+    if (h.entry)
+      this.optional(
+        'ELF entry point',
+        () => {
+          const mapping = this.mapping(h.entry, 1n, true);
+          if (!mapping?.permissions.includes('execute'))
+            this.fail('ELF entry point is not backed executable memory', 24n);
+          entries.push(this.address('va', h.entry));
+        },
+        () => {},
+      );
+    // Dropped optional metadata must not make the name tables look incomplete unless a
+    // symbol table itself was dropped.
+    if (this.capabilities.some((capability) => capability.status === 'partial'))
+      this.capabilities.push({
+        layer: 'format',
+        feature: NATIVE_SYMBOL_TABLES_FEATURE,
+        status: this.symbolTableDropped ? 'partial' : 'supported',
+        limitations: this.symbolTableDropped ? ['A malformed ELF symbol table was dropped'] : [],
+      });
     this.capabilities.unshift({
       layer: 'format',
       feature: 'ELF64LE EM_X86_64 ET_EXEC/ET_DYN static metadata',

@@ -3,7 +3,7 @@ import { availableParallelism } from 'node:os';
 import { basename, join } from 'node:path';
 import type { BinaryFunction, BinarySession } from '../api/index.js';
 import { cSourceName } from '../metadata/symbols/c-names.js';
-import type { Target, ToolResult } from '../core/index.js';
+import { DISK_FULL_MESSAGE, OperationError, type Target, type ToolResult } from '../core/index.js';
 
 export interface ExportOptions {
   readonly out: string;
@@ -500,6 +500,14 @@ class Exporter {
       row.state = result.state;
       row.reason = 'reason' in result ? result.reason : '';
     } else {
+      // A full disk fails every later function too: stop with its one diagnostic.
+      if ('error' in result && result.error.message.startsWith(DISK_FULL_MESSAGE))
+        throw new OperationError({
+          code: result.error.code,
+          severity: 'error',
+          message: result.error.message,
+          evidence_ids: [],
+        });
       row.state =
         result.state === 'unsupported' || result.state === 'cancelled' ? result.state : 'failed';
       row.reason =
@@ -703,6 +711,13 @@ class Exporter {
   }
 }
 
+/** Whether a failed row's analysis process died before its result (a request worker that
+ * exited, or a project owner that was replaced) rather than the analysis failing. */
+const processLost = (reason: string): boolean =>
+  /^worker_failed: Request worker (exited|ran out of memory|was killed)|Worker ownership was lost before terminal acknowledgement/.test(
+    reason,
+  );
+
 /** Exports one binary as a greppable directory. Throws on real errors; per-function
  * failures are recorded in index.tsv instead. */
 export async function exportBinary(
@@ -734,6 +749,9 @@ export async function exportBinary(
       lastReport = started;
     const counts = { complete: 0, partial: 0, failed: 0 };
     let failure: { error: unknown } | undefined;
+    // Functions whose analysis process died (memory, most likely, with several decompiles
+    // sharing the machine) are analysed again at the end, one at a time.
+    const lost: Row[] = [];
     // `jobs` loops over the one session: its request workers analyse the decompiles in
     // parallel and its project owner publishes every result (docs/internals/project-cache.md
     // §4b), so the files do not depend on `jobs`.
@@ -744,6 +762,10 @@ export async function exportBinary(
           const row = rows[next++];
           if (row === undefined) return;
           await exporter.process(primary, row);
+          if (jobs > 1 && row.state === 'failed' && processLost(row.reason)) {
+            lost.push(row);
+            continue;
+          }
           if (row.state === 'complete') counts.complete++;
           else if (row.state === 'partial') counts.partial++;
           else counts.failed++;
@@ -763,6 +785,17 @@ export async function exportBinary(
     };
     await Promise.all(Array.from({ length: jobs }, () => worker()));
     if (failure) throw failure.error;
+    if (lost.length)
+      log(
+        `export: ${lost.length} function${lost.length === 1 ? '' : 's'} lost ${lost.length === 1 ? 'its' : 'their'} analysis process; retrying one at a time`,
+      );
+    for (const row of lost) {
+      signal.throwIfAborted();
+      await exporter.process(primary, row);
+      if (row.state === 'complete') counts.complete++;
+      else if (row.state === 'partial') counts.partial++;
+      else counts.failed++;
+    }
     signal.throwIfAborted();
     // Image-wide merged structure types: the names the pseudocode files use.
     const types = await primary.types({}, { signal });

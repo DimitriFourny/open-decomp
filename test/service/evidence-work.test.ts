@@ -5,6 +5,7 @@ import {
   entityIdentity,
   fingerprint,
   provenanceCoverage,
+  type Diagnostic,
   type Evidence,
 } from '../../src/core/index.js';
 import { integer } from '../../src/ir/index.js';
@@ -188,4 +189,49 @@ test('more than 10,000 cited proofs publish a closed catalog within its bounds a
   });
   assert.equal(small.omitted, 0);
   assert.equal(small.evidence.length, 10 + 1 + 1 + emissionProofs.length);
+});
+
+test('diagnostics whose proofs exceed the catalog bound are published without citations, not failed', () => {
+  const proof = (name: string, derived_from: string[] = []): Evidence => ({
+    id: `evidence_${fingerprint(name)}`,
+    origin: { kind: 'analysis', analyzer: 'open-decomp/test', version: '1', rule: 'catalog bound' },
+    claim: name,
+    derived_from,
+    conflicts_with: [],
+    revision: 1,
+  });
+  // Each conflict diagnostic cites 4,000 distinct access proofs: three of them exceed 10,000.
+  const accesses = Array.from({ length: 12_000 }, (_, index) => proof(`access-${index}`));
+  const signature = proof('signature');
+  const emissionProofs = Array.from({ length: 4 }, (_, index) => proof(`emission-${index}`));
+  const diagnostic = (index: number): Diagnostic => ({
+    code: 'conflicting_evidence',
+    severity: 'warning',
+    message: `Source type constraint conflict ${index}`,
+    evidence_ids: accesses.slice(index * 4000, (index + 1) * 4000).map((item) => item.id),
+  });
+  const diagnostics = [diagnostic(0), diagnostic(1), diagnostic(2)];
+  const input = {
+    store: { readEvidence: (): Evidence[] => [] },
+    revision: 1,
+    available: [signature, ...accesses, ...emissionProofs],
+    context: createOperationContext(),
+    types: [],
+    optional: [],
+    required: [{ evidence_ids: [signature.id] }],
+    diagnostics,
+    emission: { evidence: emissionProofs.map((item) => item.id) },
+  };
+  const bounded = boundedEvidence(input);
+  const published = new Set(bounded.evidence.map((item) => item.id));
+  assert.ok(published.size <= 10_000);
+  assert.ok(published.has(signature.id));
+  // The first two fit whole; the third keeps its text without citations.
+  assert.deepEqual(bounded.diagnostics.slice(0, 2), diagnostics.slice(0, 2));
+  assert.deepEqual(bounded.diagnostics[2], { ...diagnostics[2]!, evidence_ids: [] });
+  for (const item of bounded.diagnostics)
+    for (const id of item.evidence_ids) assert.ok(published.has(id));
+  assert.equal(bounded.emission, true);
+  assert.equal(bounded.omitted, 4000);
+  assert.deepEqual(boundedEvidence({ ...input, context: createOperationContext() }), bounded);
 });

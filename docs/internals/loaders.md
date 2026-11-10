@@ -62,7 +62,7 @@ flowchart LR
 - Imports from the indirect symbol table: pointer sections give `slot`, stub sections give `callable_entry`, lazy pointers set `delayed`.
 - dyld: legacy rebase/bind opcode streams and chained fixups (several pointer/import formats, 4/16 KiB pages) become relocations + import slots; conflicting signatures at one address → `conflicting_evidence`.
 - Exports: iterative trie walk merged with symbol-table exports. Hints: `LC_FUNCTION_STARTS`, data-in-code, compact unwind / `__unwind_info`; `__eh_frame` is framed and retained, no PC ranges invented.
-- **Optional** metadata (symbols, trie, dyld, starts, unwind, relocations) failing → warning + `partial` capability; structural failures abort. Budget/cancel errors are never downgraded.
+- **Optional** metadata (symbols, trie, dyld, starts, unwind, relocations, a `__LINKEDIT` payload outside the file) failing → warning + `partial` capability; structural failures abort. Budget/cancel errors are never downgraded.
 
 **PE (AMD64 PE32+, native user-mode EXE/DLL).**
 
@@ -70,11 +70,13 @@ flowchart LR
 - Import / delay-import descriptors → IAT cell as `slot`, ordinal or hint/name; no `callable_entry`.
 - Export address/name/ordinal tables, forwarders detected by RVA-inside-directory.
 - Base relocations: only `DIR64` recorded; others diagnosed.
+- **Optional**: each data directory whose body is unbacked (except CLR), and each of imports, delay imports, exports, base relocations, `.pdata`/unwind, TLS, debug directory, COFF symbols, the entry point: a malformed one is dropped whole (records rolled back) with a warning + `partial` capability. Resource limits (forged counts) still abort.
 - `.pdata` → function hints with exact size; `UNWIND_INFO` chains validated (≤ 64 records) → unwind hints; TLS callbacks → entry points + function hints; CodeView RSDS/NB10 identity retained; COFF symbols read if present.
 
 **ELF (ELF64 LE x86-64, `ET_EXEC`/`ET_DYN`).**
 
-- Mappings only from `PT_LOAD` (congruence checks); section table is _required_ and cross-checked against segments, `PT_DYNAMIC`, `DT_*` pointers and GNU version tables — contradictions are malformed.
+- Mappings only from `PT_LOAD` (congruence checks); section table is _required_ and cross-checked against segments, `PT_DYNAMIC` and `DT_*` pointers — contradictions are malformed.
+- **Optional** (dropped whole with a warning + `partial` capability, its hints/headers rolled back): GNU symbol versions (`.gnu.version`, `.gnu.version_r`, their `DT_VER*` cross-checks; imports then have no `library`), `.symtab` (`.dynsym` stays structural: relocations and versions index it), the entry point. When something was dropped the loader also reports the `Native symbol and export tables` capability (partial only if `.symtab` went). Version-need records may be laid out in any order (GNU ld interleaves each `Verneed` with its `Vernaux`, lld writes all `Verneed` first); records must stay inside the section and never share bytes.
 - `.symtab`/`.dynsym` → symbols; exports from `.dynsym` only.
 - Relocations: known x86-64 types get width/target; unknown ones keep raw bytes + unsupported diagnostic. `GLOB_DAT`/`JUMP_SLOT`/absolute relocation on a non-executable site → import with `slot`; a possible instruction patch site → import with no slot.
 
@@ -84,11 +86,11 @@ flowchart LR
 
 ## Design decisions
 
-- **Refuse rather than guess.** Unknown commands, relocation types, thread flavors, bound imports without lookup tables, extended ELF indexes → retained raw + diagnostic/capability, never approximated. A load either succeeds with explicit diagnostics or throws; no empty-but-valid image.
+- **Refuse rather than guess.** Unknown commands, relocation types, thread flavors, bound imports without lookup tables, extended ELF indexes → retained raw + diagnostic/capability, never approximated. A load either succeeds with explicit diagnostics (dropped optional tables are named in a warning and a `partial` capability) or throws; no silently empty image.
 - **Facts, not analysis.** Slots are storage addresses, not resolved values; relocations are recorded, not applied; exports may be interposed at runtime. Analyses cite the native range that claims it.
 - **Linked addresses only.** No ASLR slide, no dyld/ld.so emulation. Keeps output deterministic and cache keys content-derived.
 - **Single backing authority.** One mapping set validated up front; every consumer reads via `spans`, so zero-fill and holes are visible, never silently shortened.
-- **Hostile-input posture.** Every read bounds-checked, every count capped (≈100k records, 4–8 KiB strings, 65k load commands, 1024 slices) and charged to the operation budget. Mach-O alone separates "structural" from "optional"; PE/ELF fail whole.
+- **Hostile-input posture.** Every read bounds-checked, every count capped (≈100k records, 4–8 KiB strings, 65k load commands, 1024 slices) and charged to the operation budget. All three loaders separate "structural" (mappings, sections, segments, the dynamic table, relocations, `.dynsym`) from "optional" metadata; only structural failures abort.
 - **Evidence-bearing, immutable.** `ImmutableBytes` owns one copy, exposes no mutable view; IDs derive from slice + kind + native birth key, so reloading yields identical IDs.
 - **Names untouched.** `original_name` is never rewritten; demangling is a later layer producing `display_name`.
 
@@ -103,7 +105,7 @@ flowchart LR
 | Mach-O imports appended per mechanism (indirect table _and_ chained fixups)                                                          | Several records per symbol, differing slot/stub roles                                                                     | Merge by name+slot (consumers key by ID today, so it is redundancy, not loss) `[inference]`                             |
 | Mach-O `__eh_frame` retained but not turned into PC ranges; compact unwind is the only unwind-based function-boundary source there   | Function starts rely on `LC_FUNCTION_STARTS`/unwind/symbols                                                               | A DWARF CFI consumer producing `unwind`/`function` hints                                                                |
 | Loaders record debug identities only (ELF build ID and debuglink, PE CodeView RSDS); DWARF and PDB are read by debug recovery        | Signatures/types come from debug info only when it is embedded or supplied as a companion file                            | Debug recovery in `src/metadata/debug/`, not the loader                                                                 |
-| PE/ELF metadata failures are all-or-nothing                                                                                          | One bad optional table rejects an otherwise usable image                                                                  | Port Mach-O's structural/optional split `[inference]`                                                                   |
+| Optional tables are dropped whole, not per record                                                                                    | One bad import descriptor drops every import of the PE                                                                    | Per-record degradation where records are independent                                                                    |
 | Linear mapping lookup in `translate`/`spans`                                                                                         | Fine for tens of mappings; hot if a consumer translates per instruction `[inference]`                                     | Index mappings by VA once in `AddressMap`                                                                               |
 | 128 MiB parse cap (Mach-O/ELF) vs. 512 MiB import cap                                                                                | Large binaries fail at load, not import                                                                                   | Raise cap with streaming/lazy table reads                                                                               |
 
