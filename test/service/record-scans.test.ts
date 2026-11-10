@@ -48,10 +48,10 @@ test('a repeated record scan makes one dependency read and the same charges', as
     queries.push(input.limit);
     return query(input);
   };
-  const scan = () => {
+  const scan = (at = revision) => {
     queries.length = 0;
     const context = createOperationContext();
-    const result = records({ store, context }, revision, image.id, 'function');
+    const result = records({ store, context }, at, image.id, 'function');
     return { result, work: context.consumedWork!(), queries: [...queries] };
   };
   const first = scan();
@@ -64,4 +64,45 @@ test('a repeated record scan makes one dependency read and the same charges', as
   // The caller owns its array.
   second.result.items.pop();
   assert.equal(scan().result.items.length, 1500);
+
+  // A later revision that wrote no function records (an annotation commit) holds the same
+  // records: it is served the kept scan, with the same charges and its own dependency read.
+  const annotated = store.applyAnnotations({
+    expected_revision: revision,
+    author: 'scan-test',
+    origin: 'user',
+    edits: [
+      {
+        operation: 'set',
+        id: `annotation_${'1'.repeat(64)}`,
+        entity_id: functions[0]!.id,
+        value: { kind: 'note', value: 'kept' },
+        status: 'asserted',
+        evidence_ids: [],
+      },
+    ],
+  });
+  assert.equal(annotated.state, 'committed');
+  const later = scan(revision + 1);
+  assert.deepEqual(later.result, first.result);
+  assert.equal(later.work, first.work);
+  assert.deepEqual(later.queries, [1]);
+  // A revision that writes a function record is scanned again and sees it.
+  const added: FunctionRecord = {
+    ...functions[0]!,
+    id: entityIdentity(image.selected_slice_id, 'function', 0x9000n),
+    entry: { image_id: image.id, space: 'va', value: 0x9000n },
+    ranges: [{ start: { image_id: image.id, space: 'va', value: 0x9000n }, size: 1n }],
+  };
+  assert.equal(
+    store.transaction(revision + 1, (tx) => tx.putRecord(image.id, 'function', added)).state,
+    'committed',
+  );
+  const changed = scan(revision + 2);
+  assert.equal(changed.result.items.length, 1501);
+  assert.deepEqual(changed.queries, [1000, 1000]);
+  // Older revisions keep their own records.
+  assert.equal(scan(revision + 1).result.items.length, 1500);
+  // A revision the store does not have still fails, kept scan or not.
+  assert.throws(() => scan(revision + 5), { code: 'stale_revision' });
 });

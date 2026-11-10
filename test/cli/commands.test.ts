@@ -244,12 +244,7 @@ test(
     for (const project of await readdir(cache)) {
       const db = new DatabaseSync(join(cache, project, 'project.sqlite'), { readOnly: true });
       try {
-        for (const table of [
-          'artifacts',
-          'analysis_artifacts',
-          'analysis_reuse',
-          'native_summaries',
-        ])
+        for (const table of ['artifacts', 'analysis_index', 'analysis_reuse', 'native_summaries'])
           assert.deepEqual(
             { ...db.prepare(`SELECT count(*) AS n FROM ${table}`).get() },
             { n: 0 },

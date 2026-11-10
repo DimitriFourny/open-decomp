@@ -52,6 +52,8 @@ import {
   functionSchema,
   headerSchema,
   imageIdSchema,
+  isEntityId,
+  isEvidenceId,
   imageIdentity,
   imageSummarySchema,
   importSchema,
@@ -113,7 +115,7 @@ import {
 } from './image-metadata.js';
 
 // Persistence migrations are independent of the public wire/artifact schema version.
-const STORE_SCHEMA_VERSION = 8;
+const STORE_SCHEMA_VERSION = 9;
 /** Per-project cap on persisted prepared-callee summaries (compressed payload bytes), the
  * default of the `unitStoreBytes` / `--unit-store-mib` open option. Entries of superseded
  * revisions go first, then the oldest write; see `flushNativeSummaries`. The open-time job
@@ -139,6 +141,17 @@ const DISCOVERY_FRONTIERS_TABLE =
   'CREATE TABLE discovery_frontiers(image_id TEXT NOT NULL, revision INTEGER NOT NULL, payload BLOB, PRIMARY KEY(image_id,revision)) STRICT;';
 /** Validated data subjects (globals) that annotations name; `value` is the zero-padded 16-digit
  * hex VA so windows are index range scans. Rows are never updated or deleted. */
+/** Artifacts by the entity, proof and type IDs their catalogs contain, at their revision. IDs are
+ * stored as fixed-width keys (`analysisKey`, `artifactKey`) in one clustered table: the text
+ * form held every 70-character ID twice (table and primary-key index). */
+const ANALYSIS_INDEX_TABLE =
+  'CREATE TABLE analysis_index(revision INTEGER NOT NULL, analysis_key BLOB NOT NULL, artifact_key BLOB NOT NULL, PRIMARY KEY(revision,analysis_key,artifact_key)) STRICT, WITHOUT ROWID;';
+/** Schema 9: the text-keyed `analysis_artifacts` rows become `analysis_index` keys. */
+const ANALYSIS_INDEX_MIGRATION = `${ANALYSIS_INDEX_TABLE}
+  INSERT INTO analysis_index SELECT revision,
+    CASE WHEN substr(analysis_id,1,7)='entity_' THEN unhex('01'||substr(analysis_id,8)) ELSE unhex('02'||substr(analysis_id,10)) END,
+    unhex(substr(artifact_id,10)) FROM analysis_artifacts;
+  DROP TABLE analysis_artifacts;`;
 const DATA_ENTITIES_TABLE = `CREATE TABLE data_entities(id TEXT PRIMARY KEY, image_id TEXT NOT NULL REFERENCES images(image_id), slice_id TEXT NOT NULL, space TEXT NOT NULL CHECK(space='va'), value TEXT NOT NULL, revision INTEGER NOT NULL) STRICT;
   CREATE INDEX data_entities_address ON data_entities(image_id,space,value,revision);`;
 const discoveryFrontierSchema = z.strictObject({
@@ -157,6 +170,13 @@ const annotationActorSchema = annotationSchema.pick({ author: true, origin: true
 const MAX_IMAGE_BYTES = 512 * 1024 * 1024;
 const MAX_ARTIFACT_BYTES = 64 * 1024 * 1024;
 const MAX_LOADED_IMAGE_CACHE_BYTES = 64 * 1024 * 1024;
+/** Artifact files verified in this connection whose bytes are kept to compare later reads with
+ * (`readArtifactBytes`), bounded by their total size. */
+const MAX_VERIFIED_ARTIFACT_BYTES = 32 * 1024 * 1024;
+/** An artifact file named `<id>.zst` holds the artifact's bytes in one zstd frame (written
+ * since store schema 9); a file named `<id>` holds them as they are. The digest and size in the
+ * artifact's metadata are those of the bytes, whichever file holds them. */
+const COMPRESSED_ARTIFACT = '.zst';
 const MAX_LOADED_IMAGE_CACHE_ENTRIES = 4;
 const RECORD_SCHEMAS = {
   function: functionSchema,
@@ -192,6 +212,25 @@ function stringField(row: Row | undefined, field: string): string {
 function dataEntityValue(value: bigint): string {
   if (value < 0n || value >= U64_LIMIT) fail('invalid_address', 'Data entity VA is out of range');
   return value.toString(16).padStart(16, '0');
+}
+/** The analysis index key of an entity or proof ID: a tag byte (1 entity, 2 evidence) and the
+ * ID's 32 digest bytes. */
+function analysisKey(id: string): Buffer {
+  const key = Buffer.alloc(33);
+  if (isEntityId(id)) key[0] = 1;
+  else if (isEvidenceId(id)) key[0] = 2;
+  else fail('invalid_input', 'Invalid analysis artifact identity');
+  key.write(id.slice(id.indexOf('_') + 1), 1, 'hex');
+  return key;
+}
+/** An artifact ID's 32 digest bytes; byte order is the order of the IDs' text. */
+function artifactKey(id: string): Buffer {
+  return Buffer.from(artifactIdSchema.parse(id).slice('artifact_'.length), 'hex');
+}
+function artifactOfKey(key: unknown): string {
+  if (!(key instanceof Uint8Array) || key.length !== 32)
+    fail('invalid_input', 'Invalid persisted analysis artifact key');
+  return `artifact_${Buffer.from(key).toString('hex')}`;
 }
 function dataEntityRecord(row: Row): DataEntityRecord {
   const image_id = imageIdSchema.parse(stringField(row, 'image_id'));
@@ -356,6 +395,21 @@ export class SqliteProjectStore implements ProjectStore {
   // Analysis artifacts delivered with analysis caching disabled: memory only, newest kept.
   readonly #transientArtifacts = new Map<string, { artifact: Artifact; bytes: Uint8Array }>();
   #transientBytes = 0;
+  // Artifact files this connection verified against their published digest, by artifact ID,
+  // as private copies: a later read (every 512 KiB page of a delivered artifact reads the whole
+  // file) compares the file with them instead of hashing it again, exactly as a warm image
+  // read does. Least recently used first.
+  readonly #verifiedArtifacts = new Map<
+    string,
+    {
+      readonly sha256: string;
+      /** The file as verified. */
+      readonly file: ImmutableBytes;
+      /** The bytes a compressed file holds. */
+      readonly content?: ImmutableBytes;
+    }
+  >();
+  #verifiedArtifactBytes = 0;
   // A request snapshot (`openSnapshot`): the main connection is a read-only immutable copy of
   // the owner's database, and written summaries go to this private database instead.
   readonly #outbox: DatabaseSync | undefined;
@@ -516,7 +570,7 @@ export class SqliteProjectStore implements ProjectStore {
           CREATE TABLE annotation_removals(id TEXT NOT NULL, revision INTEGER NOT NULL, author TEXT NOT NULL, origin TEXT NOT NULL CHECK(origin IN ('user','llm')), PRIMARY KEY(id,revision), FOREIGN KEY(id,revision) REFERENCES annotations(id,revision)) STRICT;
           CREATE TABLE jobs(id TEXT PRIMARY KEY, payload BLOB NOT NULL) STRICT;
           CREATE TABLE artifacts(id TEXT PRIMARY KEY, revision INTEGER NOT NULL, job_id TEXT NOT NULL, cache_key TEXT NOT NULL UNIQUE, payload BLOB NOT NULL) STRICT;
-          CREATE TABLE analysis_artifacts(revision INTEGER NOT NULL, analysis_id TEXT NOT NULL, artifact_id TEXT NOT NULL REFERENCES artifacts(id), PRIMARY KEY(revision,analysis_id,artifact_id)) STRICT;
+          ${ANALYSIS_INDEX_TABLE}
           CREATE TABLE analysis_reuse(scope TEXT NOT NULL, revision INTEGER NOT NULL, artifact_id TEXT NOT NULL REFERENCES artifacts(id), PRIMARY KEY(scope,revision DESC,artifact_id)) STRICT;
           ${NATIVE_SUMMARIES_TABLE}
           ${DISCOVERY_FRONTIERS_TABLE}
@@ -564,6 +618,7 @@ export class SqliteProjectStore implements ProjectStore {
             db.exec(`${DISCOVERY_FRONTIERS_TABLE}
               UPDATE indexes SET state='partial' WHERE kind='function' AND state='complete';`);
           if (version < 8) db.exec(DATA_ENTITIES_TABLE);
+          if (version < 9) db.exec(ANALYSIS_INDEX_MIGRATION);
           db.exec(`PRAGMA user_version=${STORE_SCHEMA_VERSION}; COMMIT;`);
         } catch (error) {
           db.exec('ROLLBACK');
@@ -1500,7 +1555,9 @@ export class SqliteProjectStore implements ProjectStore {
       fail('invalid_input', 'Invalid analysis artifact page limit');
     if (query.ids.length > 1000) fail('resource_limit', 'Too many analysis query identities');
     const ids = [...new Set(query.ids)].sort();
-    for (const id of ids) z.union([entityIdSchema, evidenceIdSchema]).parse(id);
+    for (const id of ids)
+      if (!isEntityId(id) && !isEvidenceId(id))
+        fail('invalid_input', 'Invalid analysis artifact identity');
     const binding = {
       project_id: this.project_id,
       revision: query.revision,
@@ -1517,13 +1574,14 @@ export class SqliteProjectStore implements ProjectStore {
     // Bound index work per requested ID, rather than sorting every historical
     // option/version variant matching a large multi-ID catalog query.
     const lookup = this.#prepare(
-      'SELECT artifact_id FROM analysis_artifacts WHERE revision=? AND analysis_id=? AND artifact_id>? ORDER BY artifact_id LIMIT ?',
+      'SELECT artifact_key FROM analysis_index WHERE revision=? AND analysis_key=? AND artifact_key>? ORDER BY artifact_key LIMIT ?',
     );
+    const after = cursor ? artifactKey(cursor.after[0]!) : new Uint8Array(0);
     let candidates: string[] = [];
     for (const id of ids) {
       const matches = lookup
-        .all(query.revision, id, cursor?.after[0] ?? '', query.limit + 1)
-        .map((row) => stringField(row, 'artifact_id'));
+        .all(query.revision, analysisKey(id), after, query.limit + 1)
+        .map((row) => artifactOfKey(row['artifact_key']));
       const merged: string[] = [];
       let left = 0,
         right = 0;
@@ -1599,8 +1657,8 @@ export class SqliteProjectStore implements ProjectStore {
       fail('stale_revision', 'Artifact cache identity is stale');
     if ((input.analysis_ids?.length ?? 0) > 100000)
       fail('resource_limit', 'Too many analysis artifact identities');
-    const analysisIds = [...new Set(input.analysis_ids ?? [])];
-    for (const id of analysisIds) z.union([entityIdSchema, evidenceIdSchema]).parse(id);
+    // Keys validate their IDs (entity or evidence) before anything is written.
+    const analysisKeys = [...new Set(input.analysis_ids ?? [])].map(analysisKey);
     if (
       input.reuse_scope !== undefined &&
       input.reuse_scope !==
@@ -1619,9 +1677,14 @@ export class SqliteProjectStore implements ProjectStore {
       sha256: contentHash(input.bytes),
       schema_version: SCHEMA_VERSION,
     };
+    // The bytes as hashed (no await in between): later reads of the file compare with them.
+    const verified = new ImmutableBytes(input.bytes);
     encodeArtifact(artifact);
-    const path = this.#storagePath('artifacts', artifact.id);
-    writeImmutable(path, input.bytes);
+    const compressed = zstdCompressSync(input.bytes, {
+      params: { [zlib.ZSTD_c_compressionLevel]: 3, [zlib.ZSTD_c_contentSizeFlag]: 1 },
+    });
+    const path = this.#storagePath('artifacts', `${artifact.id}${COMPRESSED_ARTIFACT}`);
+    writeImmutable(path, compressed);
     this.#db.exec('BEGIN IMMEDIATE');
     try {
       this.#prepare('INSERT INTO artifacts VALUES (?,?,?,?,?)').run(
@@ -1631,8 +1694,9 @@ export class SqliteProjectStore implements ProjectStore {
         cacheIdentityKey(input.cache),
         encodeStored(artifact),
       );
-      const index = this.#prepare('INSERT INTO analysis_artifacts VALUES (?,?,?)');
-      for (const id of analysisIds) index.run(current, id, artifact.id);
+      const index = this.#prepare('INSERT INTO analysis_index VALUES (?,?,?)');
+      const key = artifactKey(artifact.id);
+      for (const analysis of analysisKeys) index.run(current, analysis, key);
       if (input.reuse_scope !== undefined)
         this.#prepare('INSERT INTO analysis_reuse VALUES (?,?,?)').run(
           input.reuse_scope,
@@ -1652,6 +1716,7 @@ export class SqliteProjectStore implements ProjectStore {
       unlinkSync(path);
       throw error;
     }
+    this.#rememberVerifiedArtifact(artifact, new ImmutableBytes(compressed), verified);
     this.releaseNativeSummaries();
     return { state: 'published', artifact };
   }
@@ -1703,13 +1768,64 @@ export class SqliteProjectStore implements ProjectStore {
     if (fingerprint(encodeArtifact(input)) !== fingerprint(encodeArtifact(artifact)))
       fail('invalid_input', 'Artifact handle does not match published metadata');
     if (transient) return transient.bytes;
-    const bytes = checkedFile(
-      this.#storagePath('artifacts', artifactIdSchema.parse(artifact.id)),
+    const base = this.#storagePath('artifacts', artifactIdSchema.parse(artifact.id));
+    const compressed = existsSync(`${base}${COMPRESSED_ARTIFACT}`);
+    const file = checkedFile(
+      compressed ? `${base}${COMPRESSED_ARTIFACT}` : base,
       MAX_ARTIFACT_BYTES,
     );
+    const verified = this.#verifiedArtifacts.get(artifact.id);
+    if (
+      verified?.sha256 === artifact.sha256 &&
+      (verified.content !== undefined) === compressed &&
+      verified.file.equals(file)
+    ) {
+      this.#verifiedArtifacts.delete(artifact.id);
+      this.#verifiedArtifacts.set(artifact.id, verified);
+      return verified.content ? verified.content.read(0n, verified.content.length) : file;
+    }
+    let bytes: Uint8Array = file;
+    if (compressed)
+      try {
+        bytes = zstdDecompressSync(file, {
+          maxOutputLength: Math.max(1, Math.min(Number(artifact.size), MAX_ARTIFACT_BYTES)),
+        });
+      } catch {
+        fail('invalid_input', 'Artifact integrity check failed');
+      }
     if (BigInt(bytes.length) !== artifact.size || contentHash(bytes) !== artifact.sha256)
       fail('invalid_input', 'Artifact integrity check failed');
+    this.#rememberVerifiedArtifact(
+      artifact,
+      new ImmutableBytes(file),
+      compressed ? new ImmutableBytes(bytes) : undefined,
+    );
     return bytes;
+  }
+
+  /** Keep private copies of an artifact file just checked against `artifact.sha256`, and of
+   * the bytes it holds when it is compressed. */
+  #rememberVerifiedArtifact(
+    artifact: Artifact,
+    file: ImmutableBytes,
+    content?: ImmutableBytes,
+  ): void {
+    const size = (entry: { file: ImmutableBytes; content?: ImmutableBytes }): number =>
+      entry.file.length + (entry.content?.length ?? 0);
+    const prior = this.#verifiedArtifacts.get(artifact.id);
+    if (prior) {
+      this.#verifiedArtifacts.delete(artifact.id);
+      this.#verifiedArtifactBytes -= size(prior);
+    }
+    const entry = { sha256: artifact.sha256, file, ...(content ? { content } : {}) };
+    if (size(entry) > MAX_VERIFIED_ARTIFACT_BYTES / 2) return;
+    for (const [id, old] of this.#verifiedArtifacts) {
+      if (this.#verifiedArtifactBytes + size(entry) <= MAX_VERIFIED_ARTIFACT_BYTES) break;
+      this.#verifiedArtifacts.delete(id);
+      this.#verifiedArtifactBytes -= size(old);
+    }
+    this.#verifiedArtifacts.set(artifact.id, entry);
+    this.#verifiedArtifactBytes += size(entry);
   }
 
   async readArtifact(
@@ -2129,7 +2245,7 @@ export class SqliteProjectStore implements ProjectStore {
 
   saveJob(job: Job): void {
     this.#current();
-    encodeJob(job);
+    const wire = encodeJob(job);
     if (job.project_id !== this.project_id || job.input_revision > this.#current())
       fail('invalid_input', 'Job belongs to another project or future revision');
     const prior = this.readJob(job.id);
@@ -2154,7 +2270,20 @@ export class SqliteProjectStore implements ProjectStore {
       )
         fail('invalid_input', 'Job artifact has not been published');
     }
-    this.#prepare('INSERT OR REPLACE INTO jobs VALUES (?,?)').run(job.id, encodeStored(job));
+    // A save that changes only the progress of a job is status, not state: it commits without
+    // a sync (the WAL frame becomes durable with the next full commit, checkpoint or close).
+    // Losing it leaves the job's last durable state, which open terminalizes all the same.
+    const progressOnly =
+      prior !== null &&
+      !this.#db.isTransaction &&
+      this.#synchronous > 1 &&
+      JSON.stringify(encodeJob({ ...prior, progress: job.progress })) === JSON.stringify(wire);
+    if (progressOnly) this.#db.exec('PRAGMA synchronous=NORMAL');
+    try {
+      this.#prepare('INSERT OR REPLACE INTO jobs VALUES (?,?)').run(job.id, encodeStored(job));
+    } finally {
+      if (progressOnly) this.#db.exec(`PRAGMA synchronous=${this.#synchronous}`);
+    }
   }
 
   readJob(jobId: string): Job | null {
@@ -2212,6 +2341,8 @@ export class SqliteProjectStore implements ProjectStore {
     this.#loadedImageBytes = 0;
     this.#transientArtifacts.clear();
     this.#transientBytes = 0;
+    this.#verifiedArtifacts.clear();
+    this.#verifiedArtifactBytes = 0;
   }
 }
 

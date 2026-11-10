@@ -3,6 +3,7 @@ import test, { type TestContext } from 'node:test';
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { zstdCompressSync, zstdDecompressSync } from 'node:zlib';
 import { DatabaseSync } from 'node:sqlite';
 import {
   DEFAULT_ANALYSIS_OPTIONS,
@@ -10,6 +11,7 @@ import {
   SCHEMA_VERSION,
   createOperationContext,
   encodeEvidence,
+  encodeTypeDefinition,
   entityIdentity,
   fingerprint,
   newIdentity,
@@ -21,6 +23,7 @@ import {
 import { SqliteProjectStore } from '../../../src/project/store/index.js';
 import { encodeStored } from '../../../src/project/store/encoding.js';
 import {
+  ANALYSIS_ARTIFACT_MEDIA_TYPE,
   readAnnotationCatalog,
   runCachedDecompilation,
   type AnalysisComputation,
@@ -245,7 +248,7 @@ test('reopened analysis catalogs preserve opaque subjects and unsigned type size
   assert.equal(hit.result.state, 'partial');
   if (hit.result.state === 'partial') assert.equal(hit.result.reason, 'unsupported_subset');
   assert.deepEqual(p.state.store.readJob(hit.job.id)?.artifacts, [handle]);
-  assert.deepEqual(readdirSync(join(p.state.path, 'artifacts')), [handle.id]);
+  assert.deepEqual(readdirSync(join(p.state.path, 'artifacts')), [`${handle.id}.zst`]);
   assert.throws(() => p.state.store.readArtifactBytes({ ...handle, sha256: '0'.repeat(64) }), {
     code: 'invalid_input',
   });
@@ -704,8 +707,8 @@ test('stored hash corruption cannot complete cache-hit jobs or reconstruct trust
     first = await p.run();
   const artifact = p.state.store.readJob(first.job.id)!.artifacts[0]!;
   writeFileSync(
-    join(p.state.path, 'artifacts', artifact.id),
-    Buffer.alloc(Number(artifact.size), 0x20),
+    join(p.state.path, 'artifacts', `${artifact.id}.zst`),
+    zstdCompressSync(Buffer.alloc(Number(artifact.size), 0x20)),
   );
   const hit = p.job();
   await assert.rejects(
@@ -753,13 +756,20 @@ test('a payload parsed by an earlier hit is not served once its stored bytes are
   assert.ok('data' in served && served.data.cache === 'hit');
   const again = await hit();
   assert.ok('data' in again && again.data.cache === 'hit');
-  const original = readFileSync(join(p.state.path, 'artifacts', artifact.id));
+  const file = join(p.state.path, 'artifacts', `${artifact.id}.zst`);
+  const original = readFileSync(file);
+  const content = zstdDecompressSync(original);
+  // Damaged stored bytes, and well-formed stored bytes of other content, are both refused.
   const damaged = Buffer.from(original);
   damaged[damaged.length >> 1] = damaged[damaged.length >> 1]! ^ 0x01;
-  writeFileSync(join(p.state.path, 'artifacts', artifact.id), damaged);
+  writeFileSync(file, damaged);
+  await assert.rejects(hit(), { code: 'invalid_input' });
+  const altered = Buffer.from(content);
+  altered[altered.length >> 1] = altered[altered.length >> 1]! ^ 0x01;
+  writeFileSync(file, zstdCompressSync(altered));
   await assert.rejects(hit(), { code: 'invalid_input' });
   // Restoring the exact bytes serves again: damage was rejected, not remembered as a miss.
-  writeFileSync(join(p.state.path, 'artifacts', artifact.id), original);
+  writeFileSync(file, original);
   const restored = await hit();
   assert.ok('data' in restored && restored.data.cache === 'hit');
 });
@@ -893,7 +903,7 @@ test('schema-2 migration preserves artifacts, jobs, revisions and removal actors
   const { bytes: _bytes, address_map: _map, ...legacyMetadata } = p.image;
   db.prepare('UPDATE loaded_images SET payload=?').run(encodeStored(legacyMetadata));
   db.exec(
-    'DROP TABLE analysis_artifacts; DROP TABLE loaded_image_records; DROP TABLE analysis_reuse; DROP TABLE native_summaries; DROP TABLE discovery_frontiers; DROP TABLE data_entities; DROP INDEX records_scope_revision; DROP INDEX loaded_images_revision; PRAGMA user_version=2;',
+    'DROP TABLE analysis_index; DROP TABLE loaded_image_records; DROP TABLE analysis_reuse; DROP TABLE native_summaries; DROP TABLE discovery_frontiers; DROP TABLE data_entities; DROP INDEX records_scope_revision; DROP INDEX loaded_images_revision; PRAGMA user_version=2;',
   );
   db.close();
   p.state.store = SqliteProjectStore.open(p.state.path, 'resume');
@@ -935,7 +945,7 @@ test('a real SQLite index insertion failure rolls back artifact and terminal-job
   await p.state.store.close();
   const db = new DatabaseSync(join(p.state.path, 'project.sqlite'));
   db.exec(
-    "CREATE TRIGGER reject_catalog BEFORE INSERT ON analysis_artifacts BEGIN SELECT RAISE(ABORT, 'interrupted publication'); END;",
+    "CREATE TRIGGER reject_catalog BEFORE INSERT ON analysis_index BEGIN SELECT RAISE(ABORT, 'interrupted publication'); END;",
   );
   db.close();
   p.state.store = SqliteProjectStore.open(p.state.path, 'resume');
@@ -1035,4 +1045,85 @@ test('one proof identity must mean one proof in a computation: equal copies pass
   );
   assert.equal(p.state.store.findArtifact(other), null);
   assert.equal(p.state.store.readJob(forged.id)?.state, 'running');
+});
+
+test('artifacts store the readset and result proofs compactly, and format-2 artifacts stay readable', async (t) => {
+  const p = await project(t);
+  // The catalog's proof is also a result proof: format 3 stores it once.
+  const withProof = (cache: CacheIdentity): AnalysisComputation => {
+    const value = p.computation(cache);
+    return {
+      ...value,
+      result: { ...value.result, evidence: value.catalog.evidence.map(encodeEvidence) },
+    };
+  };
+  const computed = await p.run(p.identity, 65536, () => withProof(p.identity));
+  const handle = computed.result.artifacts[0]!;
+  const stored = JSON.parse(
+    zstdDecompressSync(readFileSync(join(p.state.path, 'artifacts', `${handle.id}.zst`))).toString(
+      'utf8',
+    ),
+  ) as {
+    format_version: number;
+    catalog: { evidence: unknown[]; subjects: unknown[] };
+  };
+  assert.equal(stored.format_version, 3);
+  assert.deepEqual(stored.catalog.evidence, [0]);
+  // Subjects keep their wire form: clients read them from artifact pages.
+  assert.deepEqual(
+    stored.catalog.subjects.map((subject) => (subject as { id: string }).id),
+    [p.fn.id, p.fieldId],
+  );
+  const hit = await p.run(p.identity, 65536, () => assert.fail('A hit must not recompute'));
+  const strip = (value: unknown): string =>
+    JSON.stringify(value, (key, item: unknown) =>
+      key === 'cache' || key === 'work' ? undefined : item,
+    );
+  assert.equal(strip(hit.result), strip(computed.result));
+  const catalog = await readAnnotationCatalog(
+    p.state.store,
+    2,
+    [p.fieldId, p.evidenceId],
+    createOperationContext(),
+    p.isCurrent,
+  );
+  assert.equal(catalog?.subject(p.fieldId)?.kind, 'field');
+  assert.equal(catalog?.evidence(p.evidenceId)?.claim, 'Derived field identity');
+
+  // A format-2 payload (the logical payload as it is) under another budget's key.
+  const legacy = { ...p.identity, budget: { ...p.identity.budget, work: 12345 } };
+  const value = withProof(legacy);
+  const job = p.job(legacy);
+  const published = await p.state.store.publishArtifact({
+    job_id: job.id,
+    expected_revision: 2,
+    media_type: ANALYSIS_ARTIFACT_MEDIA_TYPE,
+    bytes: Buffer.from(
+      JSON.stringify({
+        format_version: 2,
+        identity: legacy,
+        result: value.result,
+        catalog: {
+          subjects: value.catalog.subjects,
+          types: value.catalog.types.map((record) => ({
+            id: record.id,
+            definition: encodeTypeDefinition(record.definition),
+            source: record.source,
+            status: record.status,
+            evidence_ids: record.evidence_ids,
+          })),
+          evidence: value.catalog.evidence.map(encodeEvidence),
+        },
+      }),
+    ),
+    cache: legacy,
+    analysis_ids: [legacy.function_id, p.fieldId],
+  });
+  assert.equal(published.state, 'published');
+  const legacyHit = await p.run(legacy, 65536, () => assert.fail('A hit must not recompute'));
+  assert.ok('data' in legacyHit.result && legacyHit.result.data.cache === 'hit');
+  assert.equal(
+    legacyHit.result.artifacts[0]?.id,
+    published.state === 'published' ? published.artifact.id : '',
+  );
 });

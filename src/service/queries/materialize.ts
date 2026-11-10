@@ -64,7 +64,8 @@ export async function materializeDecompilation(
   const payload: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
   const stored = z
     .object({
-      format_version: z.literal(ANALYSIS_ARTIFACT_VERSION),
+      // Formats 2 and 3 store the result alike (format 3 compacts the catalog and readset).
+      format_version: z.union([z.literal(2), z.literal(ANALYSIS_ARTIFACT_VERSION)]),
       result: functionDecompileResultSchema,
     })
     .parse(payload).result;

@@ -29,7 +29,7 @@ import {
   executeTypesDeclare,
 } from '../../../src/service/analysis/index.js';
 import type { AnnotationSubject } from '../../../src/project/annotations/index.js';
-import type { StoredDecompilation } from '../../../src/project/cache/index.js';
+import { storedPayloadJson, type StoredDecompilation } from '../../../src/project/cache/index.js';
 import { encodeAnnotationEdit } from '../../../src/core/index.js';
 import { assertEvidenceClosed } from '../../support/evidence.js';
 
@@ -162,9 +162,7 @@ export async function project(t: TestContext, fixture: string | Uint8Array) {
     catalog: { subjects: AnnotationSubject[]; types: { id: string; source: string }[] };
   } {
     const artifact = decodeArtifact(result.artifacts[0]!);
-    const stored = JSON.parse(
-      Buffer.from(state.store.readArtifactBytes(artifact)).toString('utf8'),
-    ) as {
+    const stored = storedPayloadJson(state.store.readArtifactBytes(artifact)) as {
       result: StoredDecompilation;
       catalog: { subjects: AnnotationSubject[]; types: { id: string; source: string }[] };
     };
