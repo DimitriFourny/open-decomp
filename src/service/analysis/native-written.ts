@@ -1,5 +1,6 @@
 import type { OperationContext } from '../../core/index.js';
-import { bitWidth, type SSAForm, type Value } from '../../ir/index.js';
+import type { StackRecoveryResult } from '../../analysis/stack/index.js';
+import { bitWidth, type Instruction, type SSAForm, type Value } from '../../ir/index.js';
 import {
   preservedCallOutputs,
   writesRegister,
@@ -27,7 +28,8 @@ const mask = (offset: number, width: number): bigint =>
  * its tail target leaves unwritten) holds exactly the entry bits there, through
  * edge copies, same-width bitcasts, extracts, concatenations and call outputs of
  * cells the called function's own summary proves unwritten. Every other cell is
- * written. Calls without such a summary (imports, indirect or unresolved calls, a
+ * written, unless it is restored: reloaded from a frame slot that only its save
+ * writes (push/pop of a caller-saved register, as Win64 stack probes do). Calls without such a summary (imports, indirect or unresolved calls, a
  * callee the worklist cut) write their whole clobber set, which also covers the
  * roots this body tracks no cell for. Flags are left out: callers never refine them.
  *
@@ -47,6 +49,7 @@ export function nativeWrittenRegisters(
   interfaces: ReadonlyMap<string, NativeInterface>,
   context: OperationContext,
   index?: NativeInterfaceIndex,
+  stack?: StackRecoveryResult,
 ): readonly RegisterSlice[] | undefined {
   for (const block of ir.blocks) {
     context.checkpoint(1 + block.instructions.length);
@@ -110,6 +113,56 @@ export function nativeWrittenRegisters(
       for (const [output, input] of preservedCallOutputs(call, callee))
         through.set(output.id, input);
   }
+  // A restore: a little-endian load of an exact frame slot that exactly one store of
+  // the body writes (same offset and width, no other store touching its bytes), whose
+  // bytes the stack recovery still holds from that store at the load, in order, on
+  // every path (initialized, no alias barrier before it), reads that store's value.
+  const slotStore = new Map<bigint, string | null>(),
+    stores = new Map<string, Extract<Instruction, { kind: 'store' }>>();
+  if (stack?.state === 'complete')
+    for (const block of ir.blocks)
+      for (const node of block.instructions) {
+        if (node.kind !== 'store') continue;
+        context.checkpoint(1);
+        stores.set(node.id, node);
+        const address = stack.values.get(node.address.id)?.value;
+        if (address?.kind !== 'stack') continue;
+        const size = BigInt(Math.ceil(bitWidth(node.value.type) / 8));
+        for (let byte = 0n; byte < size; byte++) {
+          const at = address.offset + byte;
+          slotStore.set(at, slotStore.has(at) ? null : node.id);
+        }
+      }
+  const restored = (value: Value): Value | undefined => {
+    const id = prepared.load_nodes.get(value.id);
+    const load = id === undefined ? undefined : prepared.loads.get(id);
+    const address = load && stack?.values.get(load.address.id)?.value;
+    const snapshot = load && stack?.snapshots.get(load.id);
+    if (!load || address?.kind !== 'stack' || !snapshot || snapshot.aliased) return undefined;
+    const size = BigInt(Math.ceil(bitWidth(value.type) / 8));
+    const store = stores.get(slotStore.get(address.offset) ?? '');
+    const stored = store && stack?.values.get(store.address.id)?.value;
+    if (
+      !store ||
+      stored?.kind !== 'stack' ||
+      stored.offset !== address.offset ||
+      bitWidth(store.value.type) !== bitWidth(value.type) ||
+      store.access.endian !== 'little' ||
+      load.access.endian !== 'little'
+    )
+      return undefined;
+    for (let byte = 0n; byte < size; byte++) {
+      const held = snapshot.memory.get(address.offset + byte);
+      if (
+        slotStore.get(address.offset + byte) !== store.id ||
+        held?.fact.initialization !== 'initialized' ||
+        !held.fact.value_ids.includes(store.value.id) ||
+        held.value_offset_bits !== Number(byte) * 8
+      )
+        return undefined;
+    }
+    return store.value;
+  };
   // `value` holds exactly the entry bits of `root` from `offset` up (its width).
   // Coinductive over edge copies (a loop carrying the value unchanged keeps it);
   // positive answers are cached: every pair a successful query visited holds.
@@ -138,7 +191,7 @@ export function nativeWrittenRegisters(
         for (const source of incoming) pending.push([source, at]);
         continue;
       }
-      const input = through.get(value.id);
+      const input = through.get(value.id) ?? restored(value);
       if (input) {
         pending.push([input, at]);
         continue;

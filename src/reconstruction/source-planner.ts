@@ -1284,6 +1284,32 @@ export function planSource(
         primaryResult = { kind: 'explicit', written: true, reason: 'presentation record bound' };
     }
   }
+  // Both result carriers qualify and only their write order (or the native
+  // written-result interface) chose: a caller that provably reads exactly one of
+  // them decides (`node_new` returns its pointer in rax and leaves the double it
+  // stored in xmm0).
+  if (
+    (primaryResult?.kind === 'integer' || primaryResult?.kind === 'float') &&
+    primaryResult.undemanded_choice
+  ) {
+    const demanded = callerDemands();
+    const reselected = demanded.length
+      ? selectPrimary([...(evidence.function_return_demands ?? []), ...demanded])
+      : null;
+    if (
+      reselected &&
+      reselected.kind !== primaryResult.kind &&
+      (reselected.kind === 'integer' || reselected.kind === 'float') &&
+      validation.presentation(
+        'caller_result_carrier',
+        input.function.id,
+        'both the integer and the typed FP result register are defined on every exit; a direct call site of this function whose caller reads one result register after the call returns and before writing it (in a bounded lifted window after the return address, or as semantic demand of the prepared caller body) selects that register as the result',
+        exitIds,
+        callerSites,
+      )
+    )
+      primaryResult = reselected;
+  }
   // Closed-world caller consensus (premise D1): no caller in the image observes a
   // result register, so the function returns nothing on any path, tails included.
   // Asked only where the result may be incidental and the function would otherwise

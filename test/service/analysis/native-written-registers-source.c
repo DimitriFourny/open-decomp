@@ -23,6 +23,24 @@ __attribute__((noinline)) uint64_t ipa_nested(uint32_t x, uint32_t y) {
   return (uint64_t)a * 7u + ipa_twice(x);
 }
 
+/* q stays in esi across the leaf: ipa_two's summary must not close its argument
+ * list on the reads its stack facts see (only p), or its caller would drop q. */
+__attribute__((noinline)) uint32_t ipa_two(uint32_t p, uint32_t q) { return ipa_scale(p) + q; }
+__attribute__((noinline)) uint32_t ipa_two_caller(uint32_t x) { return ipa_two(x, x + 5u) * 2u; }
+/* The pointer result is in rax; xmm0 keeps the double it stored, written last. */
+struct carrier {
+  double w;
+  int key;
+};
+__attribute__((noinline)) struct carrier *ipa_carrier(struct carrier *c, int key) {
+  c->key = key;
+  c->w = key * 1.5;
+  return c;
+}
+__attribute__((noinline)) int ipa_carrier_caller(struct carrier *c, int key) {
+  return ipa_carrier(c, key)->key + 1;
+}
+
 __asm__(".text\n"
         /* writes r11 on one path only */
         ".globl asm_one_path\n.type asm_one_path,@function\nasm_one_path:\n"
@@ -68,7 +86,10 @@ int main(void) {
     printf("keep_arg %u %llx\n", i, (unsigned long long)ipa_keep_arg(x, y));
     printf("nested %u %llx\n", i, (unsigned long long)ipa_nested(x, y));
     printf("keep_fp %u %llx\n", i, (unsigned long long)bits);
+    printf("two %u %llx\n", i, (unsigned long long)ipa_two_caller(x));
   }
+  struct carrier c;
+  printf("carrier %d\n", ipa_carrier_caller(&c, 3));
   /* Referenced so the hand-written functions are linked and discovered. */
   printf("asm %llx %llx %llx %llx\n", (unsigned long long)caller_one_path(1, 2),
          (unsigned long long)caller_low_byte(0x1234, 3), (unsigned long long)caller_tail(0, 4, 5),

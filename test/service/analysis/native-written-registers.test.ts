@@ -59,7 +59,7 @@ test(
       native.stdout
         .trim()
         .split('\n')
-        .filter((line) => !line.startsWith('asm '))
+        .filter((line) => !line.startsWith('asm ') && !line.startsWith('carrier '))
         .map((line) => {
           const [name, index, value] = line.split(' ');
           return [`${name}:${index}`, BigInt(`0x${value}`)] as const;
@@ -127,21 +127,45 @@ test(
           [expected.get(`keep_fp:${index}`)!],
           `${emitter} ipa_keep_fp ${index}`,
         );
+      // ipa_two reads q only after its call, from the register the leaf leaves
+      // alone: its argument list stays open, and its caller passes both values.
+      const twoCaller = await decompile('ipa_two_caller', emitter);
+      for (const [index, x] of cases.entries())
+        assert.deepEqual(
+          run(
+            twoCaller,
+            [x],
+            new Map<string, SourceCallOracle>([
+              [
+                'ipa_two',
+                (args) => {
+                  assert.equal(args.length, 2, `ipa_two keeps both arguments\n${twoCaller.text}`);
+                  return BigInt.asUintN(32, scale(args[0]!) + args[1]!);
+                },
+              ],
+            ]),
+          ),
+          [expected.get(`two:${index}`)!],
+          `${emitter} ipa_two_caller ${index}`,
+        );
+      // Both result carriers are written on every exit and xmm0 last; the caller
+      // reads rax, so the pointer is the result.
+      const carrier = await decompile('ipa_carrier', emitter);
+      assert.doesNotMatch(carrier.text, /double ipa_carrier\(|-> double:/, carrier.text);
       // Hand-written callees: r11 written on one path only, r11b alone, r10 plus a
-      // tail transfer into the one-path writer, r9 saved and restored through the
-      // stack (no restore proof). Each such register stays a call clobber; r8,
-      // which none of them writes, is the caller's value.
+      // tail transfer into the one-path writer. Each such register stays a call
+      // clobber; r8, which none of them writes, is the caller's value, and so is r9,
+      // which asm_spill saves and restores through its own frame slot.
       for (const [name, clobbered] of [
         ['caller_one_path', ['r11']],
         ['caller_low_byte', ['r11']],
         ['caller_tail', ['r10']],
-        ['caller_spill', ['r9']],
+        ['caller_spill', []],
       ] as const) {
         const text = (await decompile(name, emitter)).text;
         for (const register of clobbered)
           assert.match(text, new RegExp(`call clobbers ${register}\\b`), `${name}\n${text}`);
-        assert.doesNotMatch(text, /call clobbers r8\b/, `${name}\n${text}`);
-        if (name === 'caller_tail') assert.doesNotMatch(text, /call clobbers r9\b/, text);
+        assert.doesNotMatch(text, /call clobbers r(8|9)\b/, `${name}\n${text}`);
       }
     }
   },
