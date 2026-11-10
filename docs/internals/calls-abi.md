@@ -113,4 +113,4 @@ flowchart TD
 - **Cost**: each callee repeats lift/SSA/types/calls (~32% of worker CPU in one profile); units over ~8k size are not persisted. Summaries depend on demand/context, so a summary-only cache is hard [inference].
 - **Budget-dependent results**: the load reserve decides which callees load, hence summaries and merged image types.
 - **Granularity**: return recovery targets primary registers (plus demanded second words); x87/aggregate returns and multi-exit type disagreement are dropped; context caps push hubs onto generic bodies.
-- **Coverage**: three profiles only (no Linux/Windows ARM64, no x86-32); noreturn only from contracts.
+- **Coverage**: three profiles only (no Linux/Windows ARM64, no x86-32); a call's `noreturn` fact only from contracts (discovery's own proofs end the block without one; see [discovery](discovery.md#2d-roots-that-never-return-image-wide-and-continuation-modes)).
