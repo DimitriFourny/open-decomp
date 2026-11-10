@@ -33,6 +33,7 @@ import type { Requirement } from '../core/inference.js';
 import { LocalValidationSession } from './local-validation.js';
 import { type ForwardedByte, validateStackPromotion } from './local-storage-validation.js';
 import { sourceRequirementPredicates } from './source-requirements.js';
+import { classifyStackProtector, type StackProtector } from './source-protector.js';
 import { classifyIndirectTails } from './source-tails.js';
 import { classifySysvVaStart, classifyVariadicArea } from './source-variadic.js';
 
@@ -1769,6 +1770,36 @@ export function planSourceStack(
         FRAME_SAVE_PREMISE,
       );
   }
+  // Source view: stack-protector canaries (`classifyStackProtector`). Their
+  // slots are neither promoted nor forwarded; reconstruct() decides whether the
+  // protector is omitted.
+  const protector: StackProtector[] =
+    view === 'source' && !frameExposed
+      ? classifyStackProtector(
+          {
+            input,
+            blocks,
+            expressions,
+            transfers,
+            accesses,
+            groups,
+            addresses,
+            exposedOffsets,
+            outgoingRanges,
+            pushes: returnAddressPushes,
+            dominates,
+            abi,
+          },
+          context,
+        )
+      : [];
+  const protectorLoads = new Set<string>();
+  for (const item of protector) {
+    const key = accesses.find((access) => access.node.id === item.store)!.key;
+    eligible.delete(key);
+    argumentSlots.delete(key);
+    for (const id of item.loads) protectorLoads.add(id);
+  }
   // Source view: a non-volatile frame load dominated by a store covering its
   // bytes cannot fault. If its result is dead, reconstruct() may drop it.
   const deadReloadCandidates = new Set<string>();
@@ -1779,6 +1810,7 @@ export function planSourceStack(
         load.node.kind !== 'load' ||
         load.node.access.volatile ||
         saveReloads.has(load.node.id) ||
+        protectorLoads.has(load.node.id) ||
         writeBackLoads.has(load.node.id)
       )
         continue;
@@ -2969,6 +3001,8 @@ export function planSourceStack(
     indirectTails,
     /** Source view: the callee-side variadic interface, or null. */
     variadic: variadicArea,
+    /** Source view: stack-protector canaries reconstruct() may omit. */
+    protector,
     /** Source view: the loads of hidden write-backs, dropped when dead. */
     writeBackLoads,
   };
