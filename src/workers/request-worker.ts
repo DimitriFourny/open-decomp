@@ -5,6 +5,7 @@ import {
   encodeArtifact,
   encodeDiagnostic,
   encodeJob,
+  diskFull,
   type Diagnostic,
   type Job,
 } from '../core/index.js';
@@ -64,6 +65,39 @@ export function runRequestWorker(handler: WorkerHandler): void {
       }
       return;
     }
+    const writePublications = (list: RequestStore['publications']): WirePublication[] =>
+      list.map((publication): WirePublication => {
+        const bytes = join(publications, `${publication.artifact.id}.bin`);
+        writeFileSync(bytes, publication.bytes, { mode: 0o600 });
+        if (publication.kind === 'transient')
+          return {
+            kind: 'transient',
+            artifact: encodeArtifact(publication.artifact),
+            media_type: publication.media_type,
+            bytes,
+          };
+        const index = join(publications, `${publication.artifact.id}.json`);
+        writeFileSync(
+          index,
+          JSON.stringify({
+            cache: publication.cache,
+            ...(publication.analysis_ids === undefined
+              ? {}
+              : { analysis_ids: publication.analysis_ids }),
+            ...(publication.reuse_scope === undefined
+              ? {}
+              : { reuse_scope: publication.reuse_scope }),
+          }),
+          { mode: 0o600 },
+        );
+        return {
+          kind: 'artifact',
+          artifact: encodeArtifact(publication.artifact),
+          media_type: publication.media_type,
+          bytes,
+          index,
+        };
+      });
     const job = decodeJob(command.job);
     if (!store) {
       await send({
@@ -112,38 +146,13 @@ export function runRequestWorker(handler: WorkerHandler): void {
       error = workerDiagnostic(failure);
     }
     // Publications precede a later failure, as they would in the owner.
-    const wire = overlay.publications.map((publication): WirePublication => {
-      const bytes = join(publications, `${publication.artifact.id}.bin`);
-      writeFileSync(bytes, publication.bytes, { mode: 0o600 });
-      if (publication.kind === 'transient')
-        return {
-          kind: 'transient',
-          artifact: encodeArtifact(publication.artifact),
-          media_type: publication.media_type,
-          bytes,
-        };
-      const index = join(publications, `${publication.artifact.id}.json`);
-      writeFileSync(
-        index,
-        JSON.stringify({
-          cache: publication.cache,
-          ...(publication.analysis_ids === undefined
-            ? {}
-            : { analysis_ids: publication.analysis_ids }),
-          ...(publication.reuse_scope === undefined
-            ? {}
-            : { reuse_scope: publication.reuse_scope }),
-        }),
-        { mode: 0o600 },
-      );
-      return {
-        kind: 'artifact',
-        artifact: encodeArtifact(publication.artifact),
-        media_type: publication.media_type,
-        bytes,
-        index,
-      };
-    });
+    let wire: WirePublication[] = [];
+    try {
+      wire = writePublications(overlay.publications);
+    } catch (failure) {
+      result = undefined;
+      error = diskFull(failure, publications)?.diagnostic ?? workerDiagnostic(failure);
+    }
     await send({
       kind: 'done',
       id: job.id,

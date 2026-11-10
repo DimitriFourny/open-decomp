@@ -1,5 +1,6 @@
 import {
   OperationError,
+  type Diagnostic,
   type Evidence,
   type LoadedImage,
   type OperationContext,
@@ -116,6 +117,9 @@ export interface BoundedEvidence {
   readonly types: AnalysisCatalogData['types'];
   /** False: the emission's proof table did not fit, so its metadata classes are shed. */
   readonly emission: boolean;
+  /** The diagnostics to publish: a diagnostic whose proofs did not fit keeps its text
+   * without citations. */
+  readonly diagnostics: readonly Diagnostic[];
   /** Proof references (citations) a published record no longer carries: the shed
    * emission's proof table, dropped type citations, unpublished optional proofs. */
   readonly omitted: number;
@@ -124,8 +128,9 @@ export interface BoundedEvidence {
 /** The proofs a decompilation publishes: the closure of everything it cites. When
  * that exceeds a catalog bound (more than `CATALOG_EVIDENCE_BOUND` proofs, or a type
  * citing more than `TYPE_EVIDENCE_BOUND`), the text is still published: the proofs
- * `required` cites (diagnostics, annotations, the signature) close first, then the
- * emission's proof table as a whole, then each type's citations and the `optional`
+ * `required` cites (annotations, the signature) close first, then the emission's proof
+ * table as a whole, then each diagnostic's (one that does not fit is published without
+ * citations), then each type's citations and the `optional`
  * references in order while their closures fit. References past the bound are
  * dropped from the catalog and counted; no published record cites a missing proof.
  * Every choice is a function of the cited records, never of timing. */
@@ -139,17 +144,24 @@ export function boundedEvidence(input: {
   readonly optional: readonly unknown[];
   /** Records the published result carries outside the emission and the types. */
   readonly required: readonly unknown[];
+  /** The result's diagnostics: their proofs close after `required`, each all or nothing. */
+  readonly diagnostics?: readonly Diagnostic[];
   readonly emission: { readonly evidence: readonly string[] };
 }): BoundedEvidence {
   const { store, revision, available, context, types } = input;
+  const diagnostics = input.diagnostics ?? [];
   if (types.every((record) => record.evidence_ids.length <= TYPE_EVIDENCE_BOUND))
     try {
-      const ids = evidenceReferences([types, ...input.optional, ...input.required], context);
+      const ids = evidenceReferences(
+        [types, ...input.optional, ...input.required, diagnostics],
+        context,
+      );
       emissionEvidenceReferences(input.emission, context, ids);
       return {
         evidence: closeEvidence(store, revision, ids, available, context),
         types,
         emission: true,
+        diagnostics,
         omitted: 0,
       };
     } catch (error) {
@@ -185,6 +197,13 @@ export function boundedEvidence(input: {
     throw new CatalogBoundError('Analysis proof closure exceeds the catalog bound');
   const emission = admit(input.emission.evidence);
   let omitted = emission ? 0 : input.emission.evidence.length;
+  // A diagnostic past the bound still says what it says; it no longer cites its proofs.
+  const boundedDiagnostics = diagnostics.map((diagnostic) => {
+    context.checkpoint(1 + diagnostic.evidence_ids.length);
+    if (admit(diagnostic.evidence_ids)) return diagnostic;
+    omitted += diagnostic.evidence_ids.length;
+    return { ...diagnostic, evidence_ids: [] };
+  });
   const bounded = types.map((record) => {
     context.checkpoint(1 + record.evidence_ids.length);
     const evidence_ids = record.evidence_ids
@@ -201,6 +220,7 @@ export function boundedEvidence(input: {
     evidence: [...admitted.values()].sort((a, b) => a.id.localeCompare(b.id)),
     types: bounded,
     emission,
+    diagnostics: boundedDiagnostics,
     omitted,
   };
 }

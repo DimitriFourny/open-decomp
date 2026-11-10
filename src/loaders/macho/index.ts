@@ -294,7 +294,8 @@ function parseImage(
     legacyExports: Payload | undefined,
     chained: Payload | undefined,
     entryOffset: bigint | undefined,
-    threadEntry: bigint | undefined;
+    threadEntry: bigint | undefined,
+    exportsDropped = false;
   const streams = new Map<string, Payload>(),
     seen = new Set<number>();
   for (let i = 0; i < count; i++) {
@@ -478,8 +479,11 @@ function parseImage(
     } else if (LINKEDIT[cmd]) {
       need(16);
       const payload = { offset: r.u32(p + 8), size: r.u32(p + 12) };
-      r.range(payload.offset, payload.size);
-      if (cmd === 38) starts = payload;
+      // A __LINKEDIT payload outside the file (a truncated signature, say) is dropped alone.
+      const inFile = s.optional(name, () => r.range(payload.offset, payload.size));
+      if (!inFile) {
+        if (cmd === 0x80000033) exportsDropped = true;
+      } else if (cmd === 38) starts = payload;
       else if (cmd === 41) data = payload;
       else if (cmd === 0x80000033) exports = payload;
       else if (cmd === 0x80000034) chained = payload;
@@ -693,7 +697,9 @@ function parseImage(
       layer: 'format',
       feature: NATIVE_SYMBOL_TABLES_FEATURE,
       status:
-        symbolsRead && exportsRead && nameTableDiagnostics.length === 0 ? 'supported' : 'partial',
+        symbolsRead && exportsRead && !exportsDropped && nameTableDiagnostics.length === 0
+          ? 'supported'
+          : 'partial',
       limitations: nameTableDiagnostics.map((diagnostic) => diagnostic.message),
     },
   ];

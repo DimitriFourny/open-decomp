@@ -139,33 +139,6 @@ const failures: readonly FailureCase[] = [
     },
   },
   {
-    name: 'PE unwind chain points back to itself',
-    fixture: 'corpus-symbols.dll',
-    code: 'malformed_image',
-    mutate: (bytes) => {
-      const fields = peFields(bytes),
-        entry = fields.file(bytes.readUInt32LE(fields.directory(3)));
-      const begin = bytes.readUInt32LE(entry),
-        end = bytes.readUInt32LE(entry + 4),
-        unwind = bytes.readUInt32LE(entry + 8),
-        at = fields.file(unwind);
-      bytes.set([0x21, 0, 0, 0], at);
-      bytes.writeUInt32LE(begin, at + 4);
-      bytes.writeUInt32LE(end, at + 8);
-      bytes.writeUInt32LE(unwind, at + 12);
-      return bytes;
-    },
-  },
-  {
-    name: 'PE debug directory ends inside a record',
-    fixture: 'corpus-symbols.dll',
-    code: 'malformed_image',
-    mutate: (bytes) => {
-      bytes.writeUInt32LE(27, peFields(bytes).directory(6) + 4);
-      return bytes;
-    },
-  },
-  {
     name: 'PE COFF name exceeds 4096 bytes',
     fixture: 'corpus-symbols.dll',
     code: 'resource_limit',
@@ -231,6 +204,34 @@ interface PartialCase {
   bytes(): Promise<Buffer> | Buffer;
 }
 const partials: readonly PartialCase[] = [
+  // A malformed optional PE directory is dropped with a warning; the image still loads.
+  {
+    name: 'PE unwind chain points back to itself',
+    code: 'malformed_image',
+    bytes: async () => {
+      const bytes = await readFile(join(fixtures, 'corpus-symbols.dll')),
+        fields = peFields(bytes),
+        entry = fields.file(bytes.readUInt32LE(fields.directory(3)));
+      const begin = bytes.readUInt32LE(entry),
+        end = bytes.readUInt32LE(entry + 4),
+        unwind = bytes.readUInt32LE(entry + 8),
+        at = fields.file(unwind);
+      bytes.set([0x21, 0, 0, 0], at);
+      bytes.writeUInt32LE(begin, at + 4);
+      bytes.writeUInt32LE(end, at + 8);
+      bytes.writeUInt32LE(unwind, at + 12);
+      return bytes;
+    },
+  },
+  {
+    name: 'PE debug directory ends inside a record',
+    code: 'malformed_image',
+    bytes: async () => {
+      const bytes = await readFile(join(fixtures, 'corpus-symbols.dll'));
+      bytes.writeUInt32LE(27, peFields(bytes).directory(6) + 4);
+      return bytes;
+    },
+  },
   {
     name: 'Mach-O nlist string index reaches the table end',
     code: 'malformed_image',
