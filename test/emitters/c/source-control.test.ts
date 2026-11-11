@@ -1710,6 +1710,66 @@ for (const language of ['c-like', 'python-like'] as const)
       agree(source, checked, grid([a, k], [0n, 1n, 16n, 66n, 0x4200n, 0x1000n]));
     });
 
+    test('a branching tail entered by two gotos keeps its label', () => {
+      const b = program('source-branching-tail-twice'),
+        entry = b.block('entry', [i32, i32]),
+        early = b.block('early'),
+        none = b.block('none'),
+        shifted = b.block('shifted'),
+        join = b.block('join', [i32]),
+        high = b.block('high'),
+        hop = b.block('hop'),
+        merge = b.block('merge'),
+        tail = b.block('tail', [i32]),
+        low = b.block('low'),
+        next = b.block('next'),
+        equal = b.block('equal'),
+        other = b.block('other');
+      const [a, k] = entry.parameters as [Value, Value];
+      entry.store(entry.constant(i64, 0x1000n), k);
+      entry.branch(
+        entry.compare('ne', a, entry.constant(i32, 0n)),
+        entry.edge(join, [a]),
+        entry.edge(early),
+      );
+      early.branch(
+        early.compare('eq', early.int('and', k, early.constant(i32, 16n)), early.constant(i32, 0n)),
+        early.edge(none),
+        early.edge(shifted),
+      );
+      none.branch(
+        none.compare('eq', k, none.constant(i32, 0n)),
+        none.edge(low),
+        none.edge(tail, [k]),
+      );
+      shifted.store(shifted.constant(i64, 0x100cn), k);
+      shifted.branch(
+        shifted.compare('eq', k, shifted.constant(i32, 0x1010n)),
+        shifted.edge(tail, [k]),
+        shifted.edge(hop),
+      );
+      hop.jump(join, [hop.int('lshr', k, hop.constant(i32, 8n))]);
+      const v = join.parameters[0]!;
+      join.branch(join.compare('sgt', v, join.constant(i32, 64n)), join.edge(high), join.edge(merge));
+      high.store(high.constant(i64, 0x1004n), v);
+      high.return([high.constant(i32, 7n)]);
+      merge.jump(tail, [merge.int('or', v, merge.constant(i32, 0x40n))]);
+      const w = tail.parameters[0]!;
+      tail.branch(tail.compare('sle', w, tail.constant(i32, 65n)), tail.edge(low), tail.edge(next));
+      low.return([low.constant(i32, 1n)]);
+      next.branch(next.compare('eq', w, next.constant(i32, 66n)), next.edge(equal), next.edge(other));
+      equal.store(equal.constant(i64, 0x1008n), w);
+      equal.return([equal.constant(i32, 2n)]);
+      other.return([other.int('add', w, other.constant(i32, 3n))]);
+      const input = b.finish(entry, [i32]),
+        source = emit(input, language),
+        checked = emit(input, language, 'checked');
+      // Two gotos: the tail keeps its label rather than printing twice more.
+      assert.match(source.emission.text, /\bgoto\b/, source.emission.text);
+      assert.ok(!rules(source).includes('branching_tail_duplication'));
+      agree(source, checked, grid([a, k], [0n, 1n, 16n, 66n, 0x1010n, 0x4200n, 0x1000n]));
+    });
+
     test('an edge from a do/while body into its quiet test prints continue', () => {
       // The skipped block prints the other edge's copies: a goto to the test
       // block in the checked view, a continue in C source.
