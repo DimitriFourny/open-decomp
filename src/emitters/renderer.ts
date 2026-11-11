@@ -17,6 +17,7 @@ import {
   type Requirement,
 } from '../core/index.js';
 import {
+  NORETURN_CALL_TRAP,
   bitWidth,
   expressionOperands,
   integer,
@@ -6872,18 +6873,25 @@ export class Renderer {
   }
 
   /** Source view: a trap whose block ends in a call established as noreturn
-   * adds nothing a reader of that call does not know. */
+   * adds nothing a reader of that call does not know. That is a call whose
+   * contract says noreturn, or a lifted noreturn-call trap (discovery's proof:
+   * a library contract, a noreturn import slot, or a callee proven never to
+   * return) after a call no contract says returns. */
   private noreturnCallExit(
     control: Extract<Control, { kind: 'trap' }>,
     block: BlockRegion,
   ): boolean {
     const last = block.statements.at(-1);
+    const fact =
+      last?.kind === 'call'
+        ? this.input.types?.calls?.calls.find((call) => call.node_id === last.id)
+        : undefined;
     return (
       this.sourceView &&
       last?.kind === 'call' &&
-      this.input.types?.calls?.calls.some(
-        (call) => call.node_id === last.id && call.noreturn === 'yes',
-      ) === true &&
+      (fact?.noreturn === 'yes' ||
+        (control.reason === NORETURN_CALL_TRAP &&
+          (fact === undefined || fact.noreturn === 'unknown'))) &&
       this.localValidation.presentation(
         'noreturn_call_exit',
         control.id,

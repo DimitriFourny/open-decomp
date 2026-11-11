@@ -25,6 +25,8 @@ import { buildCFG, instructionSuccessors } from '../cfg/index.js';
 import { jumpTableChain, proveJumpTable, type JumpTableProof } from './jump-tables.js';
 import { reconcileGraphs, type DiscoveryLineage } from './lineage.js';
 import { stackDeltas, type StackDelta } from './stack-delta.js';
+import { memorySlot, thunkSlot } from './stubs.js';
+import { exceptionFacts, type ExceptionFacts } from './exceptions.js';
 export type { DiscoveryLineage } from './lineage.js';
 
 /** Same entry cap as indirect-table target recovery; larger tables stay unresolved. */
@@ -32,6 +34,18 @@ const MAX_JUMP_TABLE_ENTRIES = 256;
 const JUMP_TABLE_RULE =
   'indirect branch targets from immutable table entries under a dominating unsigned index bound';
 const TAIL_TARGET_RULE = 'unconditional jump at entry stack depth to code outside the root body';
+const EXCEPTION_HANDLERS = 'exception handlers not decompiled';
+const EXCEPTION_HANDLERS_MESSAGE =
+  'An unwind record covering this function names an exception handler (LSDA, language handler or personality): landing pads and handler code the unwinder enters are not decompiled';
+const EXCEPTION_UNREAD = 'exception handlers unknown';
+const EXCEPTION_UNREAD_MESSAGE =
+  'The unwind data covering this function was not read: an unwinder may enter landing pads or handler code that is not decompiled';
+/** Coverage reasons of a graph an exception unwinder may enter at code the graph lacks: what
+ * holds on the graph's static paths says nothing about the paths through that code. */
+export const UNWINDER_ENTRY_REASONS: ReadonlySet<string> = new Set([
+  EXCEPTION_HANDLERS,
+  EXCEPTION_UNREAD,
+]);
 /** Linker-synthesized import trampoline sections (ELF PLT variants, Mach-O stub sections). */
 const STUB_SECTION = /(^|[.,])(plt|plt\.sec|plt\.got|iplt)$|__(auth_|objc_)?stubs$|__stub_helper$/;
 
@@ -60,6 +74,10 @@ export interface DiscoveryInput {
    * call ends intraprocedural flow: its return address is never followed (it is
    * often the next function's entry, as after a final `bl ___stack_chk_fail`). */
   readonly noreturn_calls?: ReadonlyMap<bigint, readonly string[]>;
+  /** Import slots (virtual addresses) whose binding's library declaration is noreturn, with
+   * that evidence. An x86 `call qword [rip+slot]` through one ends flow, as does a direct call
+   * to an import thunk (`[endbr64] jmp qword [rip+slot]`, a PE or ELF `-fno-plt` thunk). */
+  readonly noreturn_slots?: ReadonlyMap<bigint, readonly string[]>;
   /** The image ABI's callee-saved registers (`AbiProfile.preserved`). A jump-table register
    * fact survives a call only in these; without them a call forgets every fact. */
   readonly preserved_registers?: readonly RegisterDescriptor[];
@@ -150,6 +168,10 @@ export interface DiscoveryIndex {
   readonly executable: readonly Interval[];
   /** Object-symbol addresses: named data, never a function root. */
   readonly objects: ReadonlySet<bigint>;
+  /** Entries of published functions proven never to return, with that proof's evidence. */
+  readonly noreturn: ReadonlyMap<bigint, readonly string[]>;
+  /** Whether an exception unwinder can re-enter a function at a landing pad or handler. */
+  readonly exceptions: ExceptionFacts;
   data_after(value: bigint, context: OperationContext): number;
   executable_end(value: bigint, context: OperationContext): bigint;
 }
@@ -182,6 +204,28 @@ export function discoverFunctions(
   input: DiscoveryInput,
   context: OperationContext,
 ): DiscoveryResult {
+  // A root proven never to return (2d) is proven after the traversal followed the continuations
+  // of calls to it. When such a continuation is real code no root now owns, the traversal was
+  // misled: run again knowing the proofs, so that code roots its own function.
+  let proven: ProvenNoreturn = { entries: new Map(), evidence: [] };
+  for (let run = 1; ; run++) {
+    const { result, rerun } = discoverOnce(input, proven, context);
+    if (!rerun || run === 3) return result;
+    proven = rerun;
+  }
+}
+
+/** Roots already proven never to return, with the evidence records of their proofs. */
+interface ProvenNoreturn {
+  readonly entries: ReadonlyMap<bigint, readonly string[]>;
+  readonly evidence: readonly Evidence[];
+}
+
+function discoverOnce(
+  input: DiscoveryInput,
+  proven: ProvenNoreturn,
+  context: OperationContext,
+): { readonly result: DiscoveryResult; readonly rerun: ProvenNoreturn | null } {
   context.checkpoint(0);
   const { image, decoder, revision } = input;
   if (decoder.architecture !== image.target.architecture)
@@ -331,6 +375,37 @@ export function discoverFunctions(
     : [...index.boundary_claims];
   const va = (value: bigint): Address => ({ image_id: image.id, space: 'va', value });
   const derive = evidenceDeriver(image, revision, evidence);
+  /** Evidence that a call never returns: its direct target is declared noreturn, or it reads
+   * (itself or through a thunk at its target) a noreturn import slot; undefined otherwise. */
+  const thunks = new Map<bigint, readonly string[] | null>();
+  /** Roots this traversal proved never to return (`provenNoreturn`), by entry. */
+  const neverReturns = new Map<bigint, readonly string[]>(proven.entries);
+  for (const item of proven.evidence) evidence.set(item.id, item);
+  const noreturnOf = (call: DecodedInstruction): readonly string[] | undefined => {
+    const flow = call.flow;
+    if (call.validity !== 'valid' || flow.kind !== 'call') return undefined;
+    const slots = input.noreturn_slots;
+    if (flow.target) {
+      const declared =
+        input.noreturn_calls?.get(flow.target.value) ??
+        index.noreturn.get(flow.target.value) ??
+        neverReturns.get(flow.target.value);
+      if (declared || !slots?.size) return declared;
+      let thunk = thunks.get(flow.target.value);
+      if (thunk === undefined) {
+        const slot = thunkSlot(image, decoder, flow.target, context);
+        const parents = slot === null ? undefined : slots.get(slot);
+        thunk = parents
+          ? [derive('import thunk forwards through a noreturn import slot', flow.target, parents)]
+          : null;
+        thunks.set(flow.target.value, thunk);
+      }
+      return thunk ?? undefined;
+    }
+    const slot = memorySlot(call);
+    return slot === null ? undefined : slots?.get(slot);
+  };
+  const noreturn = (call: DecodedInstruction): boolean => noreturnOf(call) !== undefined;
   // Full-width integer roots every call preserves under the image ABI.
   const preserved = new Set(
     (input.preserved_registers ?? [])
@@ -640,7 +715,7 @@ export function discoverFunctions(
           // splits code another root already owns.
           seed(target, 'direct call target in swept code', [flowEvidence], false);
       }
-      for (const successor of instructionSuccessors(instruction, input.noreturn_calls)) {
+      for (const successor of instructionSuccessors(instruction, noreturn)) {
         addIncoming(successor.value, instruction);
         enqueue(successor);
       }
@@ -827,7 +902,7 @@ export function discoverFunctions(
               (
                 (instruction.flow.kind === 'indirect_branch'
                   ? tables.get(instruction.address.value)?.proof.targets
-                  : undefined) ?? instructionSuccessors(instruction, input.noreturn_calls)
+                  : undefined) ?? instructionSuccessors(instruction, noreturn)
               ).filter((successor) => successor.value === root || !seedAt(successor.value)),
           },
           context,
@@ -917,6 +992,156 @@ export function discoverFunctions(
       seed(va(target), TAIL_TARGET_RULE, promoted.get(target)!, false);
     return promoted.size > 0;
   };
+  /** Roots that never return, as the greatest fixpoint over the decoded instructions: starting
+   * from every root that could qualify, a root is dropped when some path from its entry reaches a
+   * return, any indirect branch (jump tables included: their proof may not survive extraction),
+   * an unknown or invalid instruction, an undecoded address (gap, limit), a trap other than an
+   * undefined-instruction trap (`ud0`-`ud2`, `udf`, `brk` other than the debugger break
+   * `#0xf000`; on PE also `__fastfail`, `int 0x29`), the entry of another root not in the set,
+   * or the continuation of a call that may return. A call ends a path when `noreturnOf` proves
+   * it (library contracts, published proofs, noreturn import slots) or its target is still in the
+   * set. Sound by induction on a returning execution: its deepest returning activation of a
+   * root in the set would have to return along a path that only ends in traps, calls that do not
+   * return, or calls of roots in the set that would have to return first. So recursion (luaD_throw
+   * calling itself last) and roots that only loop or jump to each other never return. */
+  function provenNoreturn(): void {
+    const terminal = (instruction: DecodedInstruction): boolean => {
+      const payload = instruction.payload;
+      if (instruction.flow.kind !== 'trap' || !payload) return false;
+      if (payload.architecture === 'x86_64') {
+        if (/^ud[012]$/.test(payload.mnemonic)) return true;
+        // Windows `__fastfail` (`int 0x29`) terminates the process and never returns.
+        const vector = payload.operands[0];
+        return (
+          image.target.format === 'pe' &&
+          payload.mnemonic === 'int' &&
+          payload.operands.length === 1 &&
+          vector?.kind === 'immediate' &&
+          vector.value === 0x29n
+        );
+      }
+      if (payload.encoding.startsWith('UDF_')) return true;
+      return payload.encoding.startsWith('BRK_') && payload.fields.imm16 !== 0xf000n;
+    };
+    const roots = [...seeds.values()]
+      .filter((item) => !resume || traversed.has(item.entry.value))
+      .sort((a, b) => (a.entry.value < b.entry.value ? -1 : a.entry.value > b.entry.value ? 1 : 0));
+    /** The evidence of every path end, or undefined when some path may return; a call of or an
+     * entry into a root in `group` ends a path. `group` null ends every path at a call or another
+     * root (a root that may return even then never qualifies). An unwinder can resume a path at
+     * a landing pad or handler after a throwing call (or, under PE structured exception handling,
+     * a fault) inside a range whose unwind record names one, and that pad may return: a visited
+     * instruction in such a range, or a call in a range whose unwind data was not read, may
+     * return. */
+    const walk = (
+      entry: bigint,
+      group: ReadonlySet<bigint> | null,
+      uses?: Set<bigint>,
+    ): readonly string[] | undefined => {
+      const parents = new Set<string>();
+      const visited = new Set<bigint>();
+      const pending = [entry];
+      const ends = (target: bigint | null, proof: readonly string[] | undefined): boolean => {
+        let evidence: Iterable<string> | undefined = proof;
+        if (!evidence && target !== null && group?.has(target)) {
+          evidence = seedAt(target)?.evidence;
+          uses?.add(target);
+        }
+        if (!evidence) return false;
+        for (const id of evidence) parents.add(id);
+        return true;
+      };
+      while (pending.length) {
+        context.checkpoint(1);
+        const address = pending.pop()!;
+        if (visited.has(address)) continue;
+        visited.add(address);
+        if (address !== entry && seedAt(address)) {
+          if (
+            group === null ||
+            ends(
+              address,
+              input.noreturn_calls?.get(address) ??
+                index.noreturn.get(address) ??
+                neverReturns.get(address),
+            )
+          )
+            continue;
+          return undefined;
+        }
+        const instruction = decoded.get(address);
+        if (!instruction || instruction.validity !== 'valid') return undefined;
+        const flow = instruction.flow;
+        const fact = index.exceptions.at(address, context);
+        // Unread unwind data may name a handler here: C++ pads are entered only from a call, PE
+        // structured exception handlers from any faulting instruction.
+        if (
+          fact === 'handler' ||
+          (fact === 'unknown' && (flow.kind === 'call' || image.target.format === 'pe'))
+        )
+          return undefined;
+        if (
+          flow.kind === 'return' ||
+          flow.kind === 'unknown' ||
+          flow.kind === 'indirect_branch' ||
+          (flow.kind === 'trap' && !terminal(instruction))
+        )
+          return undefined;
+        if (flow.kind === 'trap')
+          for (const id of instructionEvidence.get(instruction.id) ?? instruction.evidence_ids)
+            parents.add(id);
+        if (flow.kind === 'call') {
+          if (group === null) continue;
+          if (ends(flow.target?.value ?? null, noreturnOf(instruction))) continue;
+        }
+        for (const successor of instructionSuccessors(instruction)) pending.push(successor.value);
+      }
+      return [...parents];
+    };
+    // A root whose own unwind record names a handler, or whose paths pass through a range with
+    // one, can be re-entered at a landing pad and return from there: never proven (walk).
+    const group = new Set(
+      roots
+        .filter(
+          (item) =>
+            !neverReturns.has(item.entry.value) &&
+            !index.noreturn.has(item.entry.value) &&
+            !input.noreturn_calls?.has(item.entry.value) &&
+            walk(item.entry.value, null) !== undefined,
+        )
+        .map((item) => item.entry.value),
+    );
+    // Each root is walked again only when a member its last walk relied on leaves the set.
+    const proofs = new Map<bigint, readonly string[]>();
+    const users = new Map<bigint, Set<bigint>>();
+    const pending = [...group];
+    for (let cursor = 0; cursor < pending.length; cursor++) {
+      const entry = pending[cursor]!;
+      if (!group.has(entry)) continue;
+      const uses = new Set<bigint>();
+      const parents = walk(entry, group, uses);
+      if (parents) {
+        proofs.set(entry, parents);
+        for (const used of uses) {
+          const list = users.get(used) ?? new Set<bigint>();
+          list.add(entry);
+          users.set(used, list);
+        }
+        continue;
+      }
+      group.delete(entry);
+      for (const user of users.get(entry) ?? []) if (group.has(user)) pending.push(user);
+    }
+    for (const item of roots)
+      if (group.has(item.entry.value))
+        neverReturns.set(item.entry.value, [
+          derive(
+            'every path from the entry ends in a trap, a call that does not return, or a call of a root that never returns by the same proof',
+            item.entry,
+            [...item.evidence, ...proofs.get(item.entry.value)!],
+          ),
+        ]);
+  }
   drain();
   let enumerated = false;
   if (!selected && !exhausted) {
@@ -937,6 +1162,9 @@ export function discoverFunctions(
     }
   }
   const functionEntries = { has: (value: bigint): boolean => seedAt(value) !== undefined };
+  // Image-wide and continuation modes: roots that provably never return, before extraction, so
+  // that calls to them end their blocks like calls to noreturn imports.
+  if (!selected) provenNoreturn();
   const graphs: FunctionGraph[] = [];
   let blockCount = 0;
   const allSeeds = selected
@@ -1022,7 +1250,7 @@ export function discoverFunctions(
         localDiagnostics.push(...instruction.diagnostics);
         const table = tableAt(instruction);
         for (const successor of table?.proof.targets ??
-          instructionSuccessors(instruction, input.noreturn_calls)) {
+          instructionSuccessors(instruction, noreturn)) {
           if (successor.value !== item.entry.value && functionEntries.has(successor.value)) {
             // A table reaching another root is rejected below, not a boundary conflict.
             if (!table && (instruction.flow.kind !== 'branch' || instruction.flow.conditional)) {
@@ -1046,7 +1274,7 @@ export function discoverFunctions(
         context.checkpoint(1);
         byId.set(instruction.id, instruction);
         for (const successor of tableAt(instruction)?.proof.targets ??
-          instructionSuccessors(instruction, input.noreturn_calls)) {
+          instructionSuccessors(instruction, noreturn)) {
           const list = predecessors.get(successor.value);
           if (list) list.push(instruction);
           else predecessors.set(successor.value, [instruction]);
@@ -1189,12 +1417,13 @@ export function discoverFunctions(
         tableTargets.set(instruction.address.value, table.proof.targets);
       }
       const flow = instruction.flow;
-      if (instruction.validity !== 'valid' || flow.kind !== 'call' || flow.indirect || !flow.target)
-        continue;
-      const parents = input.noreturn_calls?.get(flow.target.value);
-      if (parents && !noreturnCalls.has(flow.target.value))
-        noreturnCalls.set(flow.target.value, [
-          derive('direct call target declared noreturn', flow.target, parents),
+      if (instruction.validity !== 'valid' || flow.kind !== 'call') continue;
+      const parents = noreturnOf(instruction);
+      if (parents)
+        noreturnCalls.set(instruction.address.value, [
+          flow.target
+            ? derive('direct call target declared noreturn', flow.target, parents)
+            : derive('call through a noreturn import slot', instruction.address, parents),
         ]);
     }
     const blocks = buildCFG(
@@ -1224,6 +1453,31 @@ export function discoverFunctions(
           consumed: blockCount,
         },
       });
+    // Code an unwinder enters at a landing pad is no static successor of anything: the graph
+    // lacks it, and says so whenever its entry or any of its instructions lies in a range whose
+    // unwind record names a handler, or may name one in unwind data that was not read (there
+    // only where a handler can be entered: after a call, on PE after any instruction).
+    const unwinds = [
+      index.exceptions.at(item.entry.value, context),
+      ...members.map((instruction) => {
+        const fact = index.exceptions.at(instruction.address.value, context);
+        return fact === 'unknown' &&
+          instruction.flow.kind !== 'call' &&
+          image.target.format !== 'pe'
+          ? 'none'
+          : fact;
+      }),
+    ];
+    const handlers = unwinds.includes('handler');
+    const unread = !handlers && unwinds.slice(1).includes('unknown');
+    if (handlers || unread)
+      localDiagnostics.push({
+        code: 'unavailable_semantics',
+        severity: 'warning',
+        message: handlers ? EXCEPTION_HANDLERS_MESSAGE : EXCEPTION_UNREAD_MESSAGE,
+        address: item.entry,
+        evidence_ids: [...item.evidence],
+      });
     const reasons = [
       ...new Set([
         ...localGaps
@@ -1242,6 +1496,7 @@ export function discoverFunctions(
           )
           .map(() => 'unresolved control flow'),
         ...(conflict ? ['conflicting boundaries'] : []),
+        ...(handlers ? [EXCEPTION_HANDLERS] : unread ? [EXCEPTION_UNREAD] : []),
       ]),
     ];
     const name = [...item.names].sort()[0] ?? null;
@@ -1254,6 +1509,11 @@ export function discoverFunctions(
         display_name: name,
         evidence_ids: [...item.evidence].sort(),
         signature: null,
+        ...(neverReturns.has(item.entry.value) || index.noreturn.has(item.entry.value)
+          ? {
+              noreturn: neverReturns.get(item.entry.value) ?? index.noreturn.get(item.entry.value)!,
+            }
+          : {}),
         boundary: conflict
           ? 'conflicting'
           : item.established && members.length > 0
@@ -1485,7 +1745,7 @@ export function discoverFunctions(
       sweep: sweepCursor,
     };
   }
-  return {
+  const result: DiscoveryResult = {
     graphs: finalGraphs,
     references,
     evidence: [...evidence.values()],
@@ -1503,6 +1763,51 @@ export function discoverFunctions(
       reasons,
     },
   };
+  // A continuation of a call to a newly proven root that is decoded code (not fill, no root)
+  // and that no graph owns was only reached through that call.
+  let rerun: ProvenNoreturn | null = null;
+  if (neverReturns.size > proven.entries.size) {
+    const owned = new Set<bigint>();
+    for (const graph of finalGraphs)
+      for (const instruction of graph.instructions) {
+        context.checkpoint(1);
+        owned.add(instruction.address.value);
+      }
+    const lost = [...decoded.values()].some((instruction) => {
+      context.checkpoint(1);
+      const flow = instruction.flow;
+      if (
+        instruction.validity !== 'valid' ||
+        flow.kind !== 'call' ||
+        !flow.target ||
+        proven.entries.has(flow.target.value) ||
+        !neverReturns.has(flow.target.value)
+      )
+        return false;
+      const next = decoded.get(flow.fallthrough.value);
+      return (
+        next !== undefined &&
+        next.validity === 'valid' &&
+        !owned.has(next.address.value) &&
+        !seedAt(next.address.value) &&
+        !fill(next)
+      );
+    });
+    if (lost) {
+      const cited = new Map<string, Evidence>();
+      const pending = [...neverReturns.values()].flat();
+      for (let cursor = 0; cursor < pending.length; cursor++) {
+        context.checkpoint(1);
+        const id = pending[cursor]!;
+        const item = evidence.get(id);
+        if (!item || cited.has(id)) continue;
+        cited.set(id, item);
+        pending.push(...item.derived_from);
+      }
+      rerun = { entries: new Map(neverReturns), evidence: [...cited.values()] };
+    }
+  }
+  return { result, rerun };
 }
 
 /** Prepare grounded roots and immutable interval indexes without decoding bodies. */
@@ -1758,7 +2063,8 @@ export function prepareDiscoveryIndex(
         (assertion.ranges ?? []).flatMap(ranges),
       );
   }
-  for (const fn of input.functions ?? [])
+  const noreturn = new Map<bigint, readonly string[]>();
+  for (const fn of input.functions ?? []) {
     seed(
       fn.entry,
       'published function root',
@@ -1766,6 +2072,8 @@ export function prepareDiscoveryIndex(
       fn.boundary === 'established',
       fn.original_name,
     );
+    if (fn.noreturn) noreturn.set(normalize(fn.entry).value, fn.noreturn);
+  }
   const ordered_seeds = [...seeds.values()].sort((a, b) => {
     context.checkpoint(1);
     return a.entry.value < b.entry.value ? -1 : a.entry.value > b.entry.value ? 1 : 0;
@@ -1782,6 +2090,8 @@ export function prepareDiscoveryIndex(
     boundary_claims: boundaryClaims,
     executable: executableRanges,
     objects: objectAddresses,
+    noreturn,
+    exceptions: exceptionFacts(image, context),
     data_after: dataAfter,
     executable_end: executableEnd,
   };

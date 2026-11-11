@@ -17,7 +17,10 @@ import { Arm64Decoder } from '../../decoders/arm64/index.js';
 import { X86Decoder } from '../../decoders/x86_64/index.js';
 import { discoverFunctions, prepareDiscoveryIndex } from '../../analysis/discovery/index.js';
 import type { DiscoveryIndex } from '../../analysis/discovery/index.js';
-import { libraryNoreturnCalls } from '../../metadata/library-contracts/index.js';
+import {
+  libraryNoreturnCalls,
+  libraryNoreturnSlots,
+} from '../../metadata/library-contracts/index.js';
 import { targetAbi } from '../analysis/versions.js';
 import { queryFailure } from './shared.js';
 
@@ -28,6 +31,7 @@ const indexes = new WeakMap<
     readonly functions: readonly FunctionRecord[];
     readonly index: DiscoveryIndex;
     readonly noreturn_calls: ReadonlyMap<bigint, readonly string[]>;
+    readonly noreturn_slots: ReadonlyMap<bigint, readonly string[]>;
   }
 >();
 export interface QueryFunctionGraph extends FunctionGraph {
@@ -124,6 +128,7 @@ export function reconstructFunctionGraph(
       functions: input.functions,
       index: prepareDiscoveryIndex({ image, revision, functions: input.functions }, quiet),
       noreturn_calls: libraryNoreturnCalls(image, quiet),
+      noreturn_slots: libraryNoreturnSlots(image, quiet),
     }));
     indexes.set(image, prepared);
   }
@@ -182,6 +187,7 @@ export function reconstructFunctionGraph(
           index: prepared.index,
           selected_entry: fn.entry,
           noreturn_calls,
+          noreturn_slots: prepared.noreturn_slots,
           preserved_registers: targetAbi(image.target)?.preserved ?? [],
         },
         measured,

@@ -7,6 +7,7 @@ import {
   imageIdentity,
   ImmutableBytes,
   type Address,
+  type ImportRecord,
   type Loader,
   type LoadedImage,
 } from '../../src/core/index.js';
@@ -16,7 +17,11 @@ import { PELoader } from '../../src/loaders/pe/index.js';
 import { Arm64Decoder } from '../../src/decoders/arm64/index.js';
 import { X86Decoder } from '../../src/decoders/x86_64/index.js';
 import { discoverFunctions } from '../../src/analysis/discovery/index.js';
-import { classifyImportStubs } from '../../src/analysis/discovery/stubs.js';
+import { bindPltEntries, classifyImportStubs } from '../../src/analysis/discovery/stubs.js';
+import {
+  libraryNoreturnCalls,
+  libraryNoreturnSlots,
+} from '../../src/metadata/library-contracts/index.js';
 import { buildReferenceIndex } from '../../src/analysis/references/index.js';
 import { buildStringIndex } from '../../src/analysis/strings/index.js';
 import {
@@ -250,3 +255,107 @@ for (const target of [
       decoder.dispose();
     }
   });
+
+test('an ELF PLT entry is bound to its import from the section bytes and relocation alone', () => {
+  const image = load(new ELFLoader(), 'elf-x86_64-symbols');
+  const decoder = new X86Decoder({ formatting: false });
+  const bind = (input: LoadedImage) => bindPltEntries(input, decoder, 0, createOperationContext());
+  try {
+    // `.plt`: PLT0 (push; jmp through GOT+16) then `fixture_external@plt` at 0x401ea0.
+    const slot = image.imports.find((item) => item.original_name === 'fixture_external')!;
+    const bound = bind(image);
+    const entries = bound.imports.filter((item) => item.callable_entry !== null);
+    assert.deepEqual(
+      entries.map((item) => [item.original_name, item.callable_entry!.value, item.slot]),
+      [['fixture_external', 0x401ea0n, null]],
+    );
+    assert.equal(bound.imports.length, image.imports.length + 1);
+    const proof = bound.evidence.find((item) => entries[0]!.evidence_ids.includes(item.id));
+    assert.ok(proof?.derived_from.some((id) => slot.evidence_ids.includes(id)));
+    // Discovery roots the entry under the import's name; the stub classifier agrees.
+    const decorated = {
+      ...image,
+      imports: bound.imports,
+      evidence: [...image.evidence, ...bound.evidence],
+    };
+    const context = createOperationContext();
+    const discovery = discoverFunctions({ image: decorated, decoder, revision: 0 }, context);
+    const stub = discovery.graphs.find((graph) => graph.function.entry.value === 0x401ea0n)!;
+    assert.equal(stub.function.original_name, 'fixture_external');
+    assert.equal(stub.function.boundary, 'established');
+    const references = buildReferenceIndex({ image: decorated, discovery, revision: 0 }, context);
+    assert.ok(
+      classifyImportStubs(decorated, discovery.graphs, references.references, context).has(
+        stub.function.id,
+      ),
+    );
+    // No entry when the slot binding is weak, unnamed or shared by two imports.
+    const without = (change: (item: ImportRecord) => readonly ImportRecord[]) =>
+      bind({
+        ...image,
+        imports: image.imports.flatMap((item) => (item === slot ? change(item) : [item])),
+      }).imports.filter((item) => item.callable_entry !== null).length;
+    assert.equal(
+      without((item) => [{ ...item, weak: true }]),
+      0,
+    );
+    assert.equal(
+      without((item) => [{ ...item, original_name: null }]),
+      0,
+    );
+    assert.equal(
+      without((item) => [item, { ...item, id: `${item.id}-alias` }]),
+      0,
+    );
+    // Other formats and PLT-less images are unchanged.
+    const pe = load(new PELoader(), 'pe-x86_64-symbols.exe');
+    assert.equal(bind(pe).imports, pe.imports);
+    const noPlt = bind({
+      ...image,
+      sections: image.sections.filter((item) => item.name !== '.plt'),
+    });
+    assert.equal(noPlt.imports.length, image.imports.length);
+  } finally {
+    decoder.dispose();
+  }
+});
+
+test('noreturn import entries and slots follow the library identity rules', () => {
+  const image = load(new ELFLoader(), 'elf-x86_64-symbols');
+  const va = (value: bigint) => ({ image_id: image.id, space: 'va' as const, value });
+  const exit = (changes: Partial<ImportRecord>): ImportRecord => ({
+    id: `import-test-${JSON.stringify(changes, (_, value) => (typeof value === 'bigint' ? `${value}` : value))}`,
+    original_name: 'exit',
+    display_name: 'exit',
+    library: 'libc.so.6',
+    ordinal: null,
+    slot: va(0x403fa0n),
+    callable_entry: null,
+    delayed: false,
+    weak: false,
+    evidence_ids: ['evidence_exit_binding'],
+    ...changes,
+  });
+  const context = createOperationContext();
+  const of = (imports: readonly ImportRecord[]) => ({
+    calls: libraryNoreturnCalls({ ...image, imports, relocations: [] }, context),
+    slots: libraryNoreturnSlots({ ...image, imports, relocations: [] }, context),
+  });
+  const bound = of([exit({}), exit({ slot: null, callable_entry: va(0x401ea0n) })]);
+  assert.deepEqual([...bound.slots.keys()], [0x403fa0n]);
+  assert.deepEqual([...bound.calls.keys()], [0x401ea0n]);
+  assert.deepEqual(bound.slots.get(0x403fa0n), ['evidence_exit_binding']);
+  // Weak, delayed or unattributed bindings and returning declarations prove nothing.
+  for (const changes of [
+    { weak: true },
+    { delayed: true },
+    { library: null },
+    { original_name: 'strlen', display_name: 'strlen' },
+  ])
+    assert.equal(of([exit(changes)]).slots.size, 0, JSON.stringify(changes));
+  // A slot that a returning declaration also binds is not noreturn.
+  assert.equal(
+    of([exit({}), exit({ id: 'other', original_name: 'puts', display_name: 'puts' })]).slots.size,
+    0,
+  );
+});
