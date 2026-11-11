@@ -27,6 +27,13 @@ export type StackValue =
 export interface StackFact {
   readonly value: StackValue;
   readonly initialization: Initialization;
+  /** The SSA values this fact holds directly: the value itself for a value's fact; the
+   * stored values for a memory byte, and the incoming values for a block's incoming
+   * state, joined over paths. Not a transitive closure of contributing values (that
+   * grew by one per assignment and was copied at every join: quadratic on large
+   * bodies). Facts that hold different values never compare equal, so a joined byte
+   * keeps the identity of a store's fact only when every path stored that value
+   * (`source-stack-arguments` maps store facts back to their values by identity). */
   readonly value_ids: readonly EntityId[];
   readonly evidence_ids: readonly string[];
   /** Physical entry dependencies, not a source parameter declaration. */
@@ -740,6 +747,11 @@ export function recoverStack(
             : initialization(operands),
       );
     };
+    // A parameter's fact holds the parameter itself, joined from its incoming values.
+    const own = (parameter: Value, incomingFact: StackFact): StackFact =>
+      incomingFact.value_ids.length === 1 && incomingFact.value_ids[0] === parameter.id
+        ? incomingFact
+        : { ...incomingFact, value_ids: [parameter.id] };
     const transfer = (id: EntityId, record: boolean): State => {
       const block = blocks.get(id)!,
         incomingState = incoming.get(id)!;
@@ -749,7 +761,7 @@ export function recoverStack(
       if (!transferred.has(id)) {
         budget.charge(block.parameters.length);
         block.parameters.forEach((parameter, index) =>
-          publish(parameter.id, incomingState.parameters[index]!),
+          publish(parameter.id, own(parameter, incomingState.parameters[index]!)),
         );
         transferred.add(id);
       } else {
@@ -757,7 +769,10 @@ export function recoverStack(
         dirtyParameters.delete(id);
         budget.charge(changed?.size ?? 0);
         for (const index of changed ?? [])
-          publish(block.parameters[index]!.id, incomingState.parameters[index]!);
+          publish(
+            block.parameters[index]!.id,
+            own(block.parameters[index]!, incomingState.parameters[index]!),
+          );
       }
       for (const node of block.instructions) {
         budget.charge();
@@ -765,7 +780,7 @@ export function recoverStack(
           const fact = evaluate(node.expression, node.result);
           publish(node.result.id, {
             ...fact,
-            value_ids: sortedUnion(fact.value_ids, [node.result.id]),
+            value_ids: [node.result.id],
             evidence_ids: sortedUnion(fact.evidence_ids, node.provenance.evidence_ids),
           });
           if (record) {
@@ -804,7 +819,7 @@ export function recoverStack(
           if (node.kind === 'load')
             publish(node.result.id, {
               ...fact,
-              value_ids: sortedUnion(fact.value_ids, [node.result.id]),
+              value_ids: [node.result.id],
               evidence_ids: sortedUnion(fact.evidence_ids, node.provenance.evidence_ids),
             });
           else if (offset !== null) {

@@ -1,4 +1,4 @@
-import type { AbiType, OperationContext } from '../core/index.js';
+import type { AbiType, OperationContext, RecoveredType } from '../core/index.js';
 import type { EmissionInput } from '../emitters/model.js';
 import { bitWidth, expressionOperands, type Instruction, type Value } from '../ir/index.js';
 import type { BoundaryProjection, Reconstruction } from './model.js';
@@ -67,6 +67,14 @@ export function projectSourceFloating(
   )
     return {};
   const conflicts = new Set(input.types?.conflicts.map((item) => item.subject_id));
+  // Indexed once: `conflicting` is asked for every value of the body, and scanning
+  // every association and type record per value was quadratic on large functions.
+  const supplied = new Set<string>();
+  for (const association of input.types?.associations ?? [])
+    if (association.source !== 'analysis') supplied.add(association.id);
+  const declarations = new Map<string, RecoveredType>();
+  for (const type of input.types?.types ?? [])
+    if (!declarations.has(type.id)) declarations.set(type.id, type.definition);
   const conflicting = (value: Value): boolean => {
     if (
       [value.id, ...(program.source?.value_origins?.get(value.id) ?? [])].some((id) =>
@@ -75,15 +83,8 @@ export function projectSourceFloating(
     )
       return true;
     const projected = program.source?.value_types?.get(value.id);
-    if (
-      !projected ||
-      !input.types?.associations.some(
-        (association) =>
-          projected.association_ids.includes(association.id) && association.source !== 'analysis',
-      )
-    )
-      return false;
-    const declared = input.types.types.find((type) => type.id === projected.type_id)?.definition;
+    if (!projected || !projected.association_ids.some((id) => supplied.has(id))) return false;
+    const declared = declarations.get(projected.type_id);
     return declared?.kind !== 'float' || declared.bits !== bitWidth(value.type);
   };
   const incoming = new Map<string, Value[]>();

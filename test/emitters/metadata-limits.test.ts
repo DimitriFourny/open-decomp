@@ -10,12 +10,14 @@ import {
   mergeOmissions,
   provenanceCoverage,
   shedEmissionMetadata,
+  OperationError,
   type Diagnostic,
 } from '../../src/core/index.js';
 import { IRBuilder, integer } from '../../src/ir/index.js';
 import { structureControlFlow } from '../../src/presentation/index.js';
 import { emitC } from '../../src/emitters/c/index.js';
 import { emitPythonLike } from '../../src/emitters/python-like/index.js';
+import { renderShare, renderShareExhausted } from '../../src/emitters/renderer.js';
 import { image, provenance, slice } from '../ir/support.js';
 import { execute } from './c/support.js';
 
@@ -146,6 +148,35 @@ for (const language of ['c-like', 'python-like'] as const)
       // Both choices occur: the text renders first below the full render's work.
       assert.deepEqual([...chosen].sort(), ['full', 'text']);
     });
+
+test('a full attempt that runs past its work share ends alone and is recognized after rewrapping', () => {
+  const parent = createOperationContext({ budget: { work: 1000 } });
+  const share = renderShare(parent, 100);
+  share.checkpoint(60);
+  assert.equal(parent.consumedWork!(), 60);
+  assert.equal(share.remainingWork!(), 40);
+  let exhausted: unknown;
+  assert.throws(
+    () => share.checkpoint(50),
+    (error) => ((exhausted = error), renderShareExhausted(error, 100)),
+  );
+  // The parent keeps the text-only render's reserve: nothing past the share was charged.
+  assert.equal(parent.consumedWork!(), 60);
+  // A pass that turned the limit into a partial result and a later stage that raised
+  // its diagnostic again still name the share.
+  assert.ok(
+    renderShareExhausted(new OperationError((exhausted as OperationError).diagnostic), 100),
+  );
+  assert.ok(!renderShareExhausted(exhausted, 99));
+  let outer: unknown;
+  try {
+    renderShare(parent, 10_000).checkpoint(5000);
+  } catch (error) {
+    outer = error;
+  }
+  // The request's own work limit is not the share's: it still fails the request.
+  assert.ok(outer instanceof OperationError && !renderShareExhausted(outer, 10_000));
+});
 
 describe('shedding delivered metadata', () => {
   const body = fixture(24);

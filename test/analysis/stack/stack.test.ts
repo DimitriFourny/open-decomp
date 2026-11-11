@@ -459,8 +459,15 @@ test('late incoming parameter conflicts requeue an already interpreted block', (
   const read = result.accesses.find((access) => access.kind === 'read')!;
   assert.equal(read.value.value.kind, 'unknown');
   assert.equal(read.value.initialization, 'initialized');
-  assert.ok(read.value.value_ids.includes(first.id));
-  assert.ok(read.value.value_ids.includes(second.id));
+  // A fact holds the values it carries directly, never a closure of their sources:
+  // the slot holds the joined parameter (itself joined from `first` and `second`).
+  const write = result.accesses.find((access) => access.kind === 'write')!;
+  assert.deepEqual(write.value.value_ids, [joined.parameters[0]!.id]);
+  assert.deepEqual(read.value.value_ids, [joined.parameters[0]!.id]);
+  assert.deepEqual(result.values.get(joined.parameters[0]!.id)!.value_ids, [
+    joined.parameters[0]!.id,
+  ]);
+  assert.ok(![first.id, second.id].some((id) => read.value.value_ids.includes(id)));
   const consumed = context.budget.work - context.remainingWork!();
   const controller = new AbortController();
   const base = createOperationContext({ signal: controller.signal });
@@ -574,11 +581,9 @@ test('many late predecessors reach one memory-reading exit within a bounded stac
   const slot = entry.int('sub', entry.readRegister(darwin.stack_pointer), entry.constant(i64, 8n));
   entry.writeRegister(darwin.stack_pointer, slot);
   entry.store(slot, entry.constant(i64, 42n));
-  const contributors: string[] = [];
   let current = entry;
   for (let index = 0; index < 40; index++) {
     const value = current.constant(i64, 42n);
-    contributors.push(value.id);
     current.writeRegister(output, value);
     if (index === 39) current.jump(exit);
     else {
@@ -611,11 +616,44 @@ test('many late predecessors reach one memory-reading exit within a bounded stac
   );
   const fact = result.values.get(returned.id)!;
   assert.deepEqual(fact.value, { kind: 'constant', bits: 42n });
-  for (const id of contributors)
-    assert.ok(fact.value_ids.includes(id), `Retain the incoming source ${id}`);
+  // The joined register holds itself, not the 40 constants that reach it.
+  assert.deepEqual(fact.value_ids, [returned.id]);
   const limited = recoverStack(program, darwin, createOperationContext(), { max_work: 100 });
   assert.equal(limited.state, 'partial');
   assert.equal(limited.values.size, 0);
   assert.equal(limited.snapshots.size, 0);
   assert.equal(result.accesses.filter((access) => access.kind === 'read').length, 64);
+});
+
+test('a joined slot holds the stored values of its paths, not their sources', () => {
+  for (const same of [false, true]) {
+    const ir = builder(`stack-joined-store-values-${same}`),
+      entry = ir.block('entry', [i1]),
+      left = ir.block('left'),
+      right = ir.block('right'),
+      joined = ir.block('joined');
+    const slot = entry.int(
+      'sub',
+      entry.readRegister(darwin.stack_pointer),
+      entry.constant(i64, 16n),
+    );
+    entry.writeRegister(darwin.stack_pointer, slot);
+    // Opaque loads: equal abstract facts (unknown, no evidence), different values.
+    const shared = entry.load(i64, entry.constant(i64, 0x3000n));
+    entry.branch(entry.parameters[0]!, entry.edge(left), entry.edge(right));
+    const first = same ? shared : left.load(i64, left.constant(i64, 0x3000n)),
+      second = same ? shared : right.load(i64, right.constant(i64, 0x3008n));
+    left.store(left.readRegister(darwin.stack_pointer), first);
+    left.jump(joined);
+    right.store(right.readRegister(darwin.stack_pointer), second);
+    right.jump(joined);
+    joined.return([joined.load(i64, joined.readRegister(darwin.stack_pointer))]);
+    const result = recoverStack(ssa(ir.finish(entry, [i64])), darwin, createOperationContext());
+    assert.equal(result.state, 'complete');
+    const read = result.accesses.find((access) => access.kind === 'read')!;
+    const byte = result.snapshots.get(read.node_id)!.memory.get(-16n)!;
+    assert.equal(byte.fact.value.kind, 'unknown');
+    // Facts of different values never compare equal, so the join keeps both.
+    assert.deepEqual(byte.fact.value_ids, same ? [shared.id] : [first.id, second.id].sort());
+  }
 });
