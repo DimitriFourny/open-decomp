@@ -235,6 +235,21 @@ function dependencyValue(value: unknown): CanonicalValue {
 function digest(value: unknown): string {
   return fingerprint(dependencyValue(value));
 }
+/** `digest({kind, id})` by kind, memoized: while tracing, every function read walks its whole
+ * proof closure again and keys each step. A pure function of its arguments, so the bounded
+ * memo returns exactly what `digest` would. */
+const idSelectorKeys = new Map<string, Map<string, string>>();
+function idSelectorKey(kind: 'proof' | 'type' | 'annotations', id: string): string {
+  let keys = idSelectorKeys.get(kind);
+  if (!keys) idSelectorKeys.set(kind, (keys = new Map()));
+  let key = keys.get(id);
+  if (key === undefined) {
+    if (keys.size >= 1 << 16) keys.clear();
+    key = digest({ kind, id });
+    keys.set(id, key);
+  }
+  return key;
+}
 function exhausted(message: string): never {
   throw new OperationError({
     code: 'resource_limit',
@@ -448,8 +463,7 @@ export class AnalysisDependencyCollector {
   }
   private annotations = () =>
     (this.#annotations ??= allAnnotations(this.source, this.revision, this.context));
-  private capture(selector: Selector, value?: unknown): void {
-    const key = digest(selector);
+  private capture(selector: Selector, value?: unknown, key = digest(selector)): void {
     const existing = this.#reads.get(key);
     // A fresh capture charges once, plus once more for the store read of a value-less one.
     const charges = value === undefined ? 2 : 1;
@@ -515,13 +529,14 @@ export class AnalysisDependencyCollector {
     const visited = this.#trace && new Set<string>();
     while (pending.length) {
       const next = pending.pop()!;
-      const selector = { kind: 'proof' as const, id: next };
-      if (visited ? visited.has(next) : this.#reads.has(digest(selector))) continue;
+      const selector = { kind: 'proof' as const, id: next },
+        key = idSelectorKey('proof', next);
+      if (visited ? visited.has(next) : this.#reads.has(key)) continue;
       visited?.add(next);
       let proof = next === id && initial !== undefined ? initial : this.#proofs.get(next);
       if (proof === undefined) proof = this.source.readEvidence([next], this.revision)[0] ?? null;
       this.#proofs.set(next, proof);
-      this.capture(selector, proof);
+      this.capture(selector, proof, key);
       if (proof) pending.push(...proof.derived_from, ...proof.conflicts_with);
     }
   }
@@ -531,13 +546,14 @@ export class AnalysisDependencyCollector {
     const visited = this.#trace && new Set<string>();
     while (pending.length) {
       const next = pending.pop()!;
-      const selector = { kind: 'type' as const, id: next };
-      if (visited ? visited.has(next) : this.#reads.has(digest(selector))) continue;
+      const selector = { kind: 'type' as const, id: next },
+        key = idSelectorKey('type', next);
+      if (visited ? visited.has(next) : this.#reads.has(key)) continue;
       visited?.add(next);
       let type = next === id && initial !== undefined ? initial : this.#types.get(next);
       if (type === undefined) type = this.source.readType(next, this.revision);
       this.#types.set(next, type);
-      this.capture(selector, type);
+      this.capture(selector, type, key);
       if (type) {
         pending.push(...typeReferences(type.definition));
         for (const proof of type.evidence_ids) this.recordProof(proof);
@@ -569,7 +585,7 @@ export class AnalysisDependencyCollector {
     } else
       for (const id of subjects) {
         const annotations = analysisAnnotations(this.source.readAnnotations(id, this.revision));
-        this.capture({ kind: 'annotations', id }, annotations);
+        this.capture({ kind: 'annotations', id }, annotations, idSelectorKey('annotations', id));
         this.recordAnnotationValues(annotations);
       }
     for (const id of type_ids) {

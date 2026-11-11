@@ -6,7 +6,7 @@ import {
   revisionSchema,
   imageIdSchema,
   sliceIdSchema,
-  entityIdSchema,
+  isSliceId,
 } from './primitives.js';
 import { formatHexU64 } from './integers.js';
 import type { Address } from './addresses.js';
@@ -118,8 +118,11 @@ export function sliceIdentity(
 }
 /** Birth discriminator is immutable. Splits/merges mint IDs and record lineage, never rename IDs. */
 export function entityIdentity(sliceId: string, kind: string, birth: CanonicalValue): string {
-  sliceIdSchema.parse(sliceId);
-  return entityIdSchema.parse(`entity_${fingerprint([sliceId, kind, birth])}`);
+  // What the two schemas check, without a zod parse per identity (IR construction mints one
+  // per node): an invalid slice still fails the schema's parse, and `entity_` with a SHA-256
+  // hex digest is always a valid entity ID.
+  if (!isSliceId(sliceId)) sliceIdSchema.parse(sliceId);
+  return `entity_${fingerprint([sliceId, kind, birth])}`;
 }
 /** Data entity of image storage at `address` (a global): the subject of its name and type
  * annotations, a pure function of the slice and the address, so the same storage has one

@@ -603,7 +603,8 @@ export function verifyIR(
         if (ir.form === 'ssa')
           for (const r of [...instruction.clobbers.registers, ...instruction.clobbers.flags]) {
             checkpoint?.(1);
-            if (!registerSchema.safeParse(r).success) continue;
+            // Remembered facts mean a frozen descriptor that already parsed (`register`).
+            if (!registerFacts.has(r) && !registerSchema.safeParse(r).success) continue;
             const mask =
               (((1n << BigInt(r.width_bits)) - 1n) << BigInt(r.offset_bits)) &
               (tracked.get(r.root) ?? 0n);
