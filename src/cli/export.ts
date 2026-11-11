@@ -398,14 +398,18 @@ class Exporter {
     return this.#addressNames.get(addressKey(target)) ?? hex(BigInt(target.value));
   }
 
-  async #references(session: BinarySession, id: string): Promise<Reference[]> {
+  async #references(
+    session: BinarySession,
+    target: { kind: 'entity'; id: string } | { kind: 'address'; address: Reference['from'] },
+    direction: 'both' | 'incoming' = 'both',
+  ): Promise<Reference[]> {
     const page = await collect(
       async (cursor) =>
         pageOf(
           await session.getReferences(
             {
-              target: { kind: 'entity', id },
-              direction: 'both',
+              target,
+              direction,
               kinds: ['call', 'tail_call', 'read', 'address'],
               include_unresolved: true,
               page: { limit: 1000, ...(cursor ? { cursor } : {}) },
@@ -444,7 +448,13 @@ class Exporter {
               this.#note(this.#importRefs, this.#nameOf(imported) ?? '', row.name);
           }
         }
-        if (reference.to_entity === row.fn.id)
+        if (
+          reference.to_entity === row.fn.id ||
+          (row.fn.kind === 'import_stub' &&
+            !outgoing &&
+            reference.to !== null &&
+            addressKey(reference.to) === addressKey(row.fn.entry))
+        )
           callers.add(
             (reference.from_function === null
               ? undefined
@@ -472,7 +482,17 @@ class Exporter {
 
   /** One function end to end: references, pseudocode (or disassembly), file. */
   async process(session: BinarySession, row: Row): Promise<void> {
-    this.#relate(row, await this.#references(session, row.fn.id));
+    const references = await this.#references(session, { kind: 'entity', id: row.fn.id });
+    // Calls of an import stub reference the import it forwards to, at the stub's entry.
+    if (row.fn.kind === 'import_stub')
+      references.push(
+        ...(await this.#references(
+          session,
+          { kind: 'address', address: row.fn.entry },
+          'incoming',
+        )),
+      );
+    this.#relate(row, references);
     const language = this.#options.language;
     const result = await session.decompileFunction(row.fn.id, {
       ...(this.#options.source === 'reviewed' ? { source: 'reviewed' as const } : {}),

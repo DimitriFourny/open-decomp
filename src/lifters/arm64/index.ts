@@ -11,6 +11,7 @@ import type {
 import { OperationError } from '../../core/index.js';
 import {
   IRBuilder,
+  NORETURN_CALL_TRAP,
   instructionProvenance,
   integer,
   mergeProvenanceSources,
@@ -375,7 +376,7 @@ export class Arm64Lifter implements Lifter<RegisterIR> {
           instructions.get(discovered.instructions.at(-1) ?? '')?.flow.kind === 'call'
         )
           // Discovery ends a block at a call to a proven noreturn callee.
-          block.terminate({ kind: 'trap', reason: 'Call to a noreturn callee does not return' });
+          block.terminate({ kind: 'trap', reason: NORETURN_CALL_TRAP });
         else {
           unknown(block, 'Discovered block has an unresolved exit or decode gap');
           block.terminate({ kind: 'unknown', reason: 'Unresolved discovered continuation' });

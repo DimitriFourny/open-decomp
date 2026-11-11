@@ -8,10 +8,11 @@ import {
 } from '../../core/index.js';
 
 /** Calls deliberately contribute only their continuation to intraprocedural
- * reachability; a direct call to a proven noreturn callee contributes none. */
+ * reachability; a call proven not to return (`noreturn`, asked only about calls)
+ * contributes none. */
 export function instructionSuccessors(
   instruction: DecodedInstruction,
-  noreturn?: Pick<ReadonlyMap<bigint, unknown>, 'has'>,
+  noreturn?: (call: DecodedInstruction) => boolean,
 ): readonly Address[] {
   if (instruction.validity !== 'valid') return [];
   const flow = instruction.flow;
@@ -19,9 +20,7 @@ export function instructionSuccessors(
     case 'fallthrough':
       return [flow.next];
     case 'call':
-      return !flow.indirect && flow.target && noreturn?.has(flow.target.value)
-        ? []
-        : [flow.fallthrough];
+      return noreturn?.(instruction) ? [] : [flow.fallthrough];
     case 'branch':
       return flow.fallthrough ? [flow.target, flow.fallthrough] : [flow.target];
     case 'indirect_branch':
@@ -46,7 +45,7 @@ export interface CFGInput {
   readonly evidence: ReadonlyMap<string, readonly string[]>;
   /** Proven jump-table targets by indirect branch address; they replace its unknown edge. */
   readonly jump_tables?: ReadonlyMap<bigint, readonly Address[]>;
-  /** Direct call targets proven not to return, with the evidence of that proof. */
+  /** Calls proven not to return, by call instruction address, with the evidence of that proof. */
   readonly noreturn_calls?: ReadonlyMap<bigint, readonly string[]>;
 }
 
@@ -63,12 +62,14 @@ export function buildCFG(input: CFGInput, context: OperationContext): readonly C
     instruction.validity === 'valid' && instruction.flow.kind === 'indirect_branch'
       ? input.jump_tables?.get(instruction.address.value)
       : undefined;
+  const noreturn = (call: DecodedInstruction): boolean =>
+    input.noreturn_calls?.has(call.address.value) === true;
   const leaders = new Set<bigint>([input.entry.value]);
   const incoming = new Map<bigint, number>();
   for (const instruction of sorted) {
     context.checkpoint(1);
     for (const successor of tableTargets(instruction) ??
-      instructionSuccessors(instruction, input.noreturn_calls)) {
+      instructionSuccessors(instruction, noreturn)) {
       incoming.set(successor.value, (incoming.get(successor.value) ?? 0) + 1);
       if (instruction.flow.kind !== 'fallthrough') leaders.add(successor.value);
     }
@@ -125,10 +126,7 @@ export function buildCFG(input: CFGInput, context: OperationContext): readonly C
           edge('fallthrough', flow.next, false);
           break;
         case 'call': {
-          const noreturn =
-            !flow.indirect && flow.target
-              ? input.noreturn_calls?.get(flow.target.value)
-              : undefined;
+          const noreturn = input.noreturn_calls?.get(last.address.value);
           if (noreturn)
             edges.push({
               from: id,

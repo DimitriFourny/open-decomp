@@ -9,6 +9,7 @@ import type {
 import { OperationError } from '../../core/index.js';
 import {
   IRBuilder,
+  NORETURN_CALL_TRAP,
   instructionProvenance,
   integer,
   mergeProvenanceSources,
@@ -386,7 +387,7 @@ export class X86Lifter implements Lifter<RegisterIR> {
           decoded.get(source.instructions.at(-1) ?? '')?.flow.kind === 'call'
         )
           // Discovery ends a block at a call to a proven noreturn callee.
-          block.terminate({ kind: 'trap', reason: 'Call to a noreturn callee does not return' });
+          block.terminate({ kind: 'trap', reason: NORETURN_CALL_TRAP });
         else boundary(block, 'Missing or ambiguous discovered fallthrough');
       }
     }

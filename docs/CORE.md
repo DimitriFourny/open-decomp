@@ -875,13 +875,18 @@ Proven mode is untouched by all of this.
 
 Discovery ends intraprocedural flow at a direct call to a callable import whose
 supported, unconflicted library declaration is noreturn (`libraryNoreturnCalls`;
-weak, addend-adjusted and Swift-runtime imports excluded). The return address is
+weak, addend-adjusted and Swift-runtime imports excluded), at an x86 call through
+such an import's slot or to a thunk that jumps through it (`libraryNoreturnSlots`,
+delayed slots also excluded), and at a direct call to a function discovery proved
+never to return (every path ends in an undefined-instruction trap or such a call;
+the function record's `noreturn` evidence). The return address is
 not followed — after a final `bl ___stack_chk_fail` it is the next function's
 entry, formerly a `conflicting boundaries` gap — and the call block ends with a
 `trap` edge whose derived evidence cites the import binding; lifters terminate it
 as a trap instead of an unresolved continuation. The source view prints only the
 call (C declares the callee `extern _Noreturn …`) when the call analysis
-establishes the callee noreturn; the trap keeps a `noreturn_call_exit`
+establishes the callee noreturn, or when no contract says the callee returns and
+the trap is the lifted noreturn-call trap (`NORETURN_CALL_TRAP`); the trap keeps a `noreturn_call_exit`
 presentation record and header mapping, still terminates its region for
 structuring, and the checked view prints the explicit `trap_exit`.
 
@@ -976,8 +981,11 @@ the transfer), and the return location holds the entry return address. With a
 link register (ARM64) that is its unmodified entry value, or a reload of a slot
 that qualifies as a `frame_save` with this exit included; the latter records an
 `abi_conformance` requirement (callees never write the saved slot). With a pushed
-return address (x86-64) no store may overlap those entry-SP bytes and no store may
-have an unknown address. Accepted exits count as tail exits for frame saves and
+return address (x86-64) no store may overlap those entry-SP bytes and no store through
+a frame-derived address may have an unknown offset; a store through an address derived
+from no frame address (a global, the heap, an incoming or loaded pointer) is assumed
+never to write the return-address slot, which no caller can designate (it is no object),
+and records an `abi_conformance` requirement naming the branch and those stores. Accepted exits count as tail exits for frame saves and
 print the indirect-call function-pointer spelling with the observed
 argument-register prefix, the open list stated on the `open arity` comment line:
 `((R (*)(uint64_t))target)(a)` returned when the function has a result type R, else the call and a plain
@@ -1407,8 +1415,11 @@ their decoded body (address materialization, slot read, one indirect branch) plu
 established branch through a single non-weak import slot. They are published under the
 import's name with `kind: "import_stub"`, boundary `established` and analysis
 `complete`; `--function <import name>` selects them. Every Mach-O import with a
-loader-established stub entry is also a discovery root named after the import, so a
-tail branch into a stub is a tail call to the import, not stub code merged into its caller.
+loader-established stub entry, and every ELF PLT entry that jumps through exactly one
+non-weak named import slot (bound from the PLT section bytes and the slot's relocation
+before discovery, whether or not a call reaches it), is also a discovery root named
+after the import, so a tail branch into a stub is a tail call to the import, not stub
+code merged into its caller.
 
 Objective-C (Mach-O ARM64, static metadata only): method implementations are named
 `-[Class selector]` / `+[Class selector]` (category methods under their class; stripped

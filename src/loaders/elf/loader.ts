@@ -442,19 +442,24 @@ class Parser extends Reader {
       const alloc = Boolean(s.flags & 2n),
         tls = Boolean(s.flags & 0x400n),
         m = alloc && s.size ? this.mapping(s.va, s.size) : undefined;
+      // `.tbss` occupies no process address space: its address continues the PT_TLS template,
+      // which linkers (lld) may place past the end of every PT_LOAD.
+      const template = tls && s.type === 8;
       if (alloc && s.size) {
-        if (!m || (s.alignment > 1n && s.va % s.alignment))
+        if ((!m && !template) || (s.alignment > 1n && s.va % s.alignment))
           this.fail('Allocated ELF section is outside its PT_LOAD or misaligned', s.p);
         if (s.type !== 8 && this.file(s.va, s.size) !== s.offset)
           this.fail('ELF section file and virtual mappings disagree', s.p);
-        if (s.type === 8 && !tls && s.va < m.va + m.file_size)
-          this.fail('ELF NOBITS section contradicts file backing', s.p);
-        if (
-          (s.flags & 4n && !m.permissions.includes('execute')) ||
-          (s.flags & 1n && !m.permissions.includes('write'))
-        )
-          this.fail('ELF section permissions contradict its PT_LOAD', s.p);
-        if (!tls || s.type !== 8) allocated.push(s);
+        if (m) {
+          if (s.type === 8 && !tls && s.va < m.va + m.file_size)
+            this.fail('ELF NOBITS section contradicts file backing', s.p);
+          if (
+            (s.flags & 4n && !m.permissions.includes('execute')) ||
+            (s.flags & 1n && !m.permissions.includes('write'))
+          )
+            this.fail('ELF section permissions contradict its PT_LOAD', s.p);
+        }
+        if (!template) allocated.push(s);
       }
       const permissions: ImageMapping['permissions'] = alloc
         ? [
@@ -475,7 +480,7 @@ class Parser extends Reader {
         flags: s.flags,
         evidence_ids: evidence,
       });
-      if (s.size && (!(s.flags & 4n) || s.type !== 1)) {
+      if (s.size && (!alloc || m) && (!(s.flags & 4n) || s.type !== 1)) {
         this.hints.push({
           kind: 'data',
           range: this.range(alloc ? 'va' : 'file', alloc ? s.va : s.offset, s.size),
