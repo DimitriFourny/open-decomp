@@ -1,0 +1,20 @@
+{
+  "license": "MIT (repository LICENSE)",
+  "sources": ["alias.cpp"],
+  "target": "x86_64-linux-gnu (PIE, freestanding, dynamic symbol table)",
+  "compiler": "g++ (Debian 14.2.0-19) 14.2.0",
+  "linker": "GNU ld (GNU Binutils for Debian) 2.44",
+  "recipe_cwd": "test/metadata/fixtures/names",
+  "recipe": ["sh build.sh"],
+  "inputs": {
+    "alias-exported": "alias.cpp linked with -rdynamic: scale(int, int) is a local function and the dynamic export _Z5scaleii"
+  },
+  "notes": [
+    "Static compiler/linker fixture for callee names; never executed by tests.",
+    "Byte identity holds for the recorded toolchain only."
+  ],
+  "sha256": {
+    "alias.cpp": "2b303865f8b793da07ba5e1b4e51eef430b3c3a85395ee008423452e08bb772f",
+    "alias-exported": "a03cc61d7c7717d32fba06f85dffb73fd01d0ded201f6619e860040af5b0db34"
+  }
+}
