@@ -15,6 +15,7 @@ import {
   type CanonicalValue,
   type DecodedInstruction,
   type Diagnostic,
+  type EmissionOmission,
   type LoadedImage,
   type OperationContext,
   type ProjectStore,
@@ -30,6 +31,7 @@ import {
   recoverPointerEvidence,
   recoverTypes,
   refineMemoryShapes,
+  typeRecoveryFailure,
   type SuppliedSignature,
   type SuppliedTypeRecord,
 } from '../../analysis/types/index.js';
@@ -66,7 +68,7 @@ import {
   nativeCallIndex,
   resolveCalls,
 } from './calls.js';
-import { boundedEvidence, semanticCatalog } from './catalog.js';
+import { boundedEvidence, boundedSubjects, semanticCatalog } from './catalog.js';
 import { pipelineComponents, pipelineVersions } from './versions.js';
 import { reviewedSourceLookup } from './reviewed-source.js';
 import { boundIR, requirePass } from './passes.js';
@@ -335,9 +337,7 @@ export async function executeDecompilation(
         signatures: [...nativeSignatures, ...nativeCalls.signatures],
         contracts: nativeCalls.contracts,
       });
-      const baselineFailure = baseline.diagnostics.find(
-        (item) => item.code === 'cancelled' || item.code === 'resource_limit',
-      );
+      const baselineFailure = typeRecoveryFailure(baseline);
       if (baselineFailure) throw new OperationError(baselineFailure);
       const baselineCatalog = semanticCatalog(image, ir, baseline, context);
       const trusted = createTrustedSemanticCatalog(
@@ -414,9 +414,7 @@ export async function executeDecompilation(
             contracts: suppliedCalls.contracts,
           })
         : baseline;
-      const typeFailure = types.diagnostics.find(
-        (item) => item.code === 'cancelled' || item.code === 'resource_limit',
-      );
+      const typeFailure = typeRecoveryFailure(types);
       if (typeFailure) throw new OperationError(typeFailure);
       context.progress('structure', 5, 7);
       // The source view structures again once block contents are known (the
@@ -603,9 +601,7 @@ export async function executeDecompilation(
         max_work: context.budget.work,
         transfers: source.memory_transfers ?? [],
       });
-      const refinementFailure = types.diagnostics.find(
-        (item) => item.code === 'cancelled' || item.code === 'resource_limit',
-      );
+      const refinementFailure = typeRecoveryFailure(types);
       if (refinementFailure) throw new OperationError(refinementFailure);
       const imageTypes = recoverImageTypes(sourceInput, localTypes, types);
       // Pointer-ness reaches every value derived from, joined with or compared
@@ -708,10 +704,14 @@ export async function executeDecompilation(
           );
       }
       const abiPartial = types.signatures.some((signature) => signature.abi_state !== 'complete');
+      // Capacities a complete type recovery worked around (a generated type citing only
+      // its first observations).
+      const typeLimits = types.diagnostics.filter((item) => item.code === 'resource_limit');
       const analysisReasons = [
         ...new Set([
           ...graph.coverage.reasons,
           ...(types.state === 'partial' ? ['Source metadata or type recovery is incomplete'] : []),
+          ...typeLimits.map((diagnostic) => diagnostic.message),
           ...(debug.status === 'partial' ? ['Debug metadata recovery is incomplete'] : []),
           ...(source.diagnostics ?? []).map((diagnostic) => diagnostic.message),
         ]),
@@ -739,6 +739,7 @@ export async function executeDecompilation(
           state:
             graph.coverage.state === 'complete' &&
             types.state === 'complete' &&
+            !typeLimits.length &&
             debug.status !== 'partial' &&
             !source.diagnostics?.length
               ? 'complete'
@@ -819,23 +820,38 @@ export async function executeDecompilation(
           address: item.object.address,
         });
       }
-      const catalog = {
-        ...semanticTypes,
-        subjects: [...semanticTypes.subjects, ...dataSubjects.values()],
-        types: bounded.types,
-      };
+      const subjects = boundedSubjects(
+        [...semanticTypes.subjects, ...dataSubjects.values()],
+        context,
+      );
+      const catalog = { ...semanticTypes, subjects: subjects.subjects, types: bounded.types };
       const evidence = bounded.evidence;
       const encoded = encodeEmission(emitted.emission);
       const shed = bounded.emission
         ? encoded
         : shedEmissionMetadata(encoded, ['inferences', 'mappings', 'requirements']);
-      const emission = bounded.omitted
-        ? {
-            ...shed,
-            omitted: mergeOmissions(shed.omitted, [
-              { kind: 'evidence', reason: 'output_limit', omitted: bounded.omitted },
-            ]),
-          }
+      const omissions: EmissionOmission[] = [
+        ...(bounded.omitted
+          ? [
+              {
+                kind: 'evidence' as const,
+                reason: 'output_limit' as const,
+                omitted: bounded.omitted,
+              },
+            ]
+          : []),
+        ...(subjects.omitted
+          ? [
+              {
+                kind: 'subjects' as const,
+                reason: 'output_limit' as const,
+                omitted: subjects.omitted,
+              },
+            ]
+          : []),
+      ];
+      const emission = omissions.length
+        ? { ...shed, omitted: mergeOmissions(shed.omitted, omissions) }
         : shed;
       const metadata: ResultMetadata = {
         schema_version: SCHEMA_VERSION,

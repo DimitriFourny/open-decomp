@@ -4,7 +4,7 @@ import {
   type CanonicalValue,
   type OperationContext,
 } from '../../core/index.js';
-import { recoverTypes } from '../../analysis/types/index.js';
+import { recoverTypes, typeRecoveryFailure } from '../../analysis/types/index.js';
 import { analyzeCalls, type SuppliedCallContract } from '../../analysis/calls/index.js';
 import { observePreparedCallInterfaces } from '../../analysis/calls/observed.js';
 import { createCallResultDemandIndex } from '../../analysis/calls/result-demands.js';
@@ -169,9 +169,7 @@ export function prepareNativeContext(
       ],
       resolutions: calls.resolutions,
     });
-    const failure = types.diagnostics.find(
-      (item) => item.code === 'resource_limit' || item.code === 'cancelled',
-    );
+    const failure = typeRecoveryFailure(types);
     if (failure) throw new OperationError(failure);
     analysis = types.calls;
     if (!analysis)
