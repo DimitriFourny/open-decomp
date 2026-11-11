@@ -125,6 +125,7 @@ type PendingJob = {
 
 /** Grace between a job's deadline and the host stopping its owner: a quarter of the
  * deadline, between 1 and 10 seconds. */
+const MAX_DEADLINE_MS = 300_000;
 const deadlineGrace = (deadline: number): number =>
   Math.min(10_000, Math.max(1_000, Math.floor(deadline / 4)));
 
@@ -430,7 +431,13 @@ export class ProjectWorker {
       const id = newIdentity('job'),
         accepted = deferred<WireJob>(),
         outcome = deferred<JobOutcome>();
-      const deadline = Date.now() + budgetSchema.parse(request.budget).deadline_ms;
+      // A deadline sized from the function is known only where the request runs: bound
+      // the job by the schema's maximum here, its context by the resolved deadline there.
+      const deadlineMs =
+        request.kind === 'execute' && request.sized_budget?.fields.includes('deadline_ms')
+          ? MAX_DEADLINE_MS
+          : budgetSchema.parse(request.budget).deadline_ms;
+      const deadline = Date.now() + deadlineMs;
       // The job's own context stops it at `deadline` and fails it alone. Stopping the owner
       // (every job in flight with it) is the backstop for a loop that cannot reach a
       // checkpoint, so it waits a grace period past the deadline.
@@ -438,7 +445,7 @@ export class ProjectWorker {
         () => {
           void this.#interrupt(id, 'deadline').catch(() => {});
         },
-        request.budget.deadline_ms + deadlineGrace(request.budget.deadline_ms),
+        deadlineMs + deadlineGrace(deadlineMs),
       );
       const onAbort = (): void => {
         void this.#interrupt(id, 'cancelled').catch(() => {});

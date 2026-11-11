@@ -254,6 +254,49 @@ export const DEFAULT_BUDGET = Object.freeze({
   deadline_ms: 30_000,
   output_bytes: 1_048_576,
 });
+/** The budget fields a `function_decompile` request's defaults scale with the selected
+ * function's size (`decompileBudgetDefaults`); `output_bytes` keeps its default. */
+export const SIZED_BUDGET_FIELDS = Object.freeze([
+  'instructions',
+  'blocks',
+  'ir_nodes',
+  'work',
+  'deadline_ms',
+] as const);
+/** Function bytes up to which the decompile defaults are `DEFAULT_BUDGET`. */
+const SIZED_BUDGET_BYTES = 5_000;
+
+/** The defaults of a `function_decompile` request for a function of `bytes` bytes (its
+ * decoded instructions at the request's revision), for each field the caller did not
+ * give. Up to 5,000 bytes they are `DEFAULT_BUDGET`. Above, work is 3,000 per byte (SQLite
+ * bodies of 8-21 KB need 11-38M; `sqlite3ExprCodeTarget`, 8.7 KB, failed at 2,000 per byte
+ * and printed at 2,500), the IR capacities grow in proportion to the size, and the deadline
+ * allows 12 s per million work (three times the slowest rate measured on a loaded 4-core
+ * machine, 3.8 s per million); each is bounded by the schema maximum. A pure function of the size: the same
+ * function and request resolve to the same budget, which is what the cache identity
+ * records. */
+export function decompileBudgetDefaults(
+  bytes: number,
+): Pick<z.output<typeof budgetSchema>, (typeof SIZED_BUDGET_FIELDS)[number]> {
+  if (!(bytes > SIZED_BUDGET_BYTES))
+    return {
+      instructions: DEFAULT_BUDGET.instructions,
+      blocks: DEFAULT_BUDGET.blocks,
+      ir_nodes: DEFAULT_BUDGET.ir_nodes,
+      work: DEFAULT_BUDGET.work,
+      deadline_ms: DEFAULT_BUDGET.deadline_ms,
+    };
+  const scale = (base: number, max: number): number =>
+    Math.min(max, Math.ceil((base * bytes) / SIZED_BUDGET_BYTES));
+  const work = Math.min(100_000_000, 3_000 * Math.ceil(bytes));
+  return {
+    instructions: scale(DEFAULT_BUDGET.instructions, 1_000_000),
+    blocks: scale(DEFAULT_BUDGET.blocks, 100_000),
+    ir_nodes: scale(DEFAULT_BUDGET.ir_nodes, 10_000_000),
+    work,
+    deadline_ms: Math.min(300_000, Math.ceil(work / 1_000_000) * 12_000),
+  };
+}
 export const budgetSchema = z.strictObject({
   instructions: z.number().int().min(1).max(1_000_000).default(DEFAULT_BUDGET.instructions),
   blocks: z.number().int().min(1).max(100_000).default(DEFAULT_BUDGET.blocks),
