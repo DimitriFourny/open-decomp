@@ -1283,6 +1283,11 @@ function nextEntry(
   return follow;
 }
 
+/** Bounds of a branching tail copy (see planLayout): blocks, and lines (each
+ * retained statement and edge copy, a return, and an `if` with its brace). */
+const BRANCHED_TAIL_BLOCKS = 5;
+const BRANCHED_TAIL_LINES = 8;
+
 export interface LayoutPlan {
   readonly body: Region;
   /** Shallow block copies owned by a duplicated tail; never labeled. */
@@ -1291,6 +1296,8 @@ export interface LayoutPlan {
   readonly duplicated: readonly { readonly transfer: ParallelTransfer; readonly tail: string }[];
   /** Tails whose every incoming edge now ends in an owned copy. */
   readonly hidden: readonly string[];
+  /** Entries of the branching tails copied (see planLayout, `branched`). */
+  readonly branched: readonly string[];
 }
 
 /** Source-view tail copies, after structuring (which already orders regions,
@@ -1337,6 +1344,113 @@ export function planLayout(
     if (size > 0) tails.set(id, size);
     return size;
   };
+  // A branching tail: the regions laid out from a block to the end of its
+  // sequence, when they are closed (every edge falls through to a block inside
+  // them; no loop or switch), all reached from that block, and every path through them
+  // ends in a return, trap or indirect jump. Its copy is the same regions.
+  const homes = new Map<string, { readonly items: readonly Region[]; readonly index: number }>();
+  {
+    const pending: Region[] = [body];
+    while (pending.length) {
+      active.checkpoint(1);
+      const region = pending.pop()!;
+      if (region.kind === 'loop') pending.push(region.body);
+      else if (region.kind === 'sequence')
+        region.regions.forEach((child, index) => {
+          if (child.kind === 'block') homes.set(child.id, { items: region.regions, index });
+          pending.push(child);
+        });
+      else
+        for (const arm of controlArms(region.control))
+          if (arm.body) {
+            if (arm.body.kind === 'block') homes.set(arm.body.id, { items: [arm.body], index: 0 });
+            pending.push(arm.body);
+          }
+    }
+  }
+  // Lexical actions at home: a copy of closed regions repeats each one.
+  const homeActions = new Map<ParallelTransfer, TransferAction>();
+  /** Gotos into each block at home: a branching tail is copied only onto its
+   * one goto (two copies of a few lines read worse than one label, and the
+   * operands of one `a || b` condition would split into one copy each). */
+  const homeGotos = new Map<string, number>();
+  visitTransfers(body, language, active, (occurrence) => {
+    const action = occurrenceAction(occurrence, language);
+    homeActions.set(occurrence.transfer, action);
+    if (action === 'goto') {
+      const target = occurrence.transfer.target;
+      homeGotos.set(target, (homeGotos.get(target) ?? 0) + 1);
+    }
+  });
+  const branchedTails = new Map<
+    string,
+    { readonly regions: readonly Region[]; readonly members: readonly string[] } | null
+  >();
+  const branchedTail = (
+    id: string,
+  ): { readonly regions: readonly Region[]; readonly members: readonly string[] } | null => {
+    const known = branchedTails.get(id);
+    if (known !== undefined) return known;
+    branchedTails.set(id, null);
+    const home = homes.get(id);
+    if (!home || id === program.function.entry || homeGotos.get(id) !== 1) return null;
+    const regions = home.items.slice(home.index);
+    const members: BlockRegion[] = [];
+    const pending = [...regions];
+    let branches = 0,
+      cost = 0;
+    while (pending.length) {
+      active.checkpoint(1);
+      const region = pending.pop()!;
+      if (region.kind === 'loop') return null;
+      if (region.kind === 'sequence') {
+        pending.push(...region.regions);
+        continue;
+      }
+      const control = region.control;
+      if (
+        region.id === program.function.entry ||
+        !(silent(region) || small(region)) ||
+        control.kind === 'switch' ||
+        control.kind === 'unknown' ||
+        members.length >= BRANCHED_TAIL_BLOCKS
+      )
+        return null;
+      members.push(region);
+      if (control.kind === 'if') branches++;
+      cost +=
+        (control.kind === 'if' ? 2 : control.kind === 'jump' ? copies(control.transfer) : 1) +
+        region.statements.filter((node) => program.retained.has(node.id)).length;
+      for (const arm of controlArms(control)) {
+        if (copies(arm.transfer) > 4 || arm.shared || arm.joins) return null;
+        cost += copies(arm.transfer);
+        if (arm.body) pending.push(arm.body);
+      }
+      if (control.kind === 'jump' && copies(control.transfer) > 4) return null;
+    }
+    if (!branches || cost > BRANCHED_TAIL_LINES) return null;
+    const inside = new Set(members.map((block) => block.id));
+    for (const block of members)
+      for (const transfer of controlTransfers(block.control))
+        if (homeActions.get(transfer) !== 'fallthrough' || !inside.has(transfer.target))
+          return null;
+    // Every copied block runs on some path from the entry (no other code that
+    // only shares the sequence is copied).
+    const reached = new Set([id]),
+      walk = [id];
+    while (walk.length) {
+      const block = blocks.get(walk.pop()!)!;
+      for (const transfer of controlTransfers(block.control))
+        if (!reached.has(transfer.target)) {
+          reached.add(transfer.target);
+          walk.push(transfer.target);
+        }
+    }
+    if (reached.size !== inside.size) return null;
+    const result = { regions, members: [...inside] };
+    branchedTails.set(id, result);
+    return result;
+  };
   // Each copy prints at most four edge copies and one return per level (depth <= 4).
   let budget = 128;
   // A copied jump falls into the copy of its target, while the renderer keeps
@@ -1345,7 +1459,30 @@ export function planLayout(
   // holds it, and that edge keeps its goto. `roots`: copy -> that edge.
   let roots = new Map<BlockRegion, ParallelTransfer>();
   const refused = new Set<ParallelTransfer>();
+  /** A copy of a branching tail's home regions; every block copy belongs to `root`. */
+  const copyRegion = (region: Region, root: ParallelTransfer): Region => {
+    active.checkpoint(1);
+    if (region.kind === 'sequence')
+      return sequence(region.regions.map((child) => copyRegion(child, root)));
+    if (region.kind === 'loop') throw new Error('A branching tail holds no loop');
+    const copy: BlockRegion = {
+      ...region,
+      control: mapArms(region.control, (item) =>
+        item.body ? { ...item, body: copyRegion(item.body, root) } : item,
+      ),
+    };
+    clones.add(copy);
+    roots.set(copy, root);
+    budget--;
+    return copy;
+  };
   const clone = (id: string, transfer: ParallelTransfer, root = transfer): Region => {
+    const tail = tailSize(id) > 0 ? undefined : branchedTail(id);
+    if (tail) {
+      duplicated.push({ transfer, tail: id });
+      branched.add(id);
+      return sequence(tail.regions.map((region) => copyRegion(region, root)));
+    }
     const block = blocks.get(id)!,
       copy: BlockRegion = { ...block };
     clones.add(copy);
@@ -1386,8 +1523,9 @@ export function planLayout(
       nested: readonly Nest[],
     ): boolean =>
       !refused.has(transfer) &&
-      tailSize(transfer.target) > 0 &&
-      budget >= tailSize(transfer.target) &&
+      (tailSize(transfer.target) > 0
+        ? budget >= tailSize(transfer.target)
+        : budget >= (branchedTail(transfer.target)?.members.length ?? Infinity)) &&
       transferAction(transfer, nested, destination, language, true) === 'goto';
     if (control.kind === 'jump') {
       if (!labeled(control.transfer, follow, nesting)) return region;
@@ -1412,15 +1550,17 @@ export function planLayout(
   };
   // 2. A tail no longer reached lexically at home is printed only as its copies.
   let hidden = new Set<string>();
+  let branched = new Set<string>();
   const expand = (base: Region): Region => {
     clones = new Set();
     roots = new Map();
     duplicated = [];
     expansions = new Map();
     hidden = new Set();
+    branched = new Set();
     budget = 128;
     let result = duplicate(base, null, []);
-    for (let round = 0; clones.size && round <= tails.size; round++) {
+    for (let round = 0; clones.size && round <= tails.size + homes.size; round++) {
       const reached = new Set<string>();
       visitTransfers(result, language, active, (occurrence) => {
         const destination = occurrence.destination;
@@ -1433,13 +1573,17 @@ export function planLayout(
       });
       const drop = new Set<string>();
       for (const [id, tail] of tails) if (tail && !reached.has(id) && !hidden.has(id)) drop.add(id);
+      for (const id of branched)
+        for (const member of branchedTail(id)!.members)
+          if (!reached.has(member) && !hidden.has(member)) drop.add(member);
       if (!drop.size) break;
       const prune = (region: Region): Region | null => {
         active.checkpoint(1);
         const owner = expansions.get(region);
         if (owner && drop.has(owner.id)) return null;
         if (region.kind === 'block') {
-          // Clones contain only jumps/returns, so have no owned arms to rebuild.
+          // Clones (a branching tail's copies included) are kept whole: a
+          // copy's arm bodies are copies of the same tail.
           // Keep their identity for subsequent pruning rounds and label planning.
           if (clones.has(region)) return region;
           if (drop.has(region.id)) return null;
@@ -1492,6 +1636,7 @@ export function planLayout(
     clones,
     duplicated,
     hidden: [...hidden],
+    branched: [...branched],
   };
 }
 

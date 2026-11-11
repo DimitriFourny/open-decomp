@@ -300,6 +300,8 @@ interface AttemptPlans {
    * graph, the conditions asked in order with their answers, and the layout. */
   structures?: {
     readonly graph: StructuredFunction;
+    /** StructuringOptions.reached. */
+    readonly reached: boolean;
     readonly queries: readonly StructuringQuery[];
     readonly result: StructuringResult;
   }[];
@@ -357,6 +359,13 @@ export class Renderer {
   private cloneIds: ReadonlySet<string> = new Set();
   /** Source view: a block that prints nothing but its jump (see planSourceControl). */
   private quietJump: (block: BlockRegion) => boolean = () => false;
+  /** Source view, C: a do-while test block printing nothing but its test (see
+   * planSourceControl); an edge into it from the loop body is a `continue`. */
+  private quietTest: (block: BlockRegion) => boolean = () => false;
+  /** The test block of each do-while whose body may `continue` into it, by header. */
+  private readonly continueTests = new Map<string, string>();
+  /** Transfers into a do-while test printed as `continue` (rule do_while_continue). */
+  private readonly testContinues = new Set<ParallelTransfer>();
   /** Blocks printing nothing whose jump prints nothing either, by the block it
    * falls to: an edge reaching one of them arrives where it falls. Filled by
    * findLabels, later blocks first. */
@@ -793,7 +802,31 @@ export class Renderer {
       this.loopTests.clear();
       this.silentNext.clear();
       this.crossed.clear();
+      this.continueTests.clear();
+      this.testContinues.clear();
       this.quietJump = () => false;
+      this.findLabels(this.body, [], 0);
+    }
+    if (
+      this.testContinues.size &&
+      !this.localValidation.presentation(
+        'do_while_continue',
+        this.input.function.id,
+        "an edge from a do-while body into the loop's test block, which prints nothing but its test and whose repeat edge prints no copy, prints as `continue`: C continues a do-while by evaluating its test (C11 6.8.6.2), exactly where the edge goes",
+        [...new Set([...this.testContinues].map((transfer) => transfer.target))],
+      )
+    ) {
+      this.labels.clear();
+      this.gotos.clear();
+      this.actions.clear();
+      this.consumed.clear();
+      this.fallthrough.clear();
+      this.loopTests.clear();
+      this.silentNext.clear();
+      this.crossed.clear();
+      this.continueTests.clear();
+      this.testContinues.clear();
+      this.quietTest = () => false;
       this.findLabels(this.body, [], 0);
     }
     if (validate) validateReconstruction(this.program, context);
@@ -5892,6 +5925,8 @@ export class Renderer {
     }
     if (region.kind === 'loop') {
       this.loopHeaders.add(region.header);
+      const test = region.form?.kind === 'do_while' ? this.continueTest(region) : undefined;
+      if (test) this.continueTests.set(region.header, test);
       if (region.form) {
         this.loopTests.set(region.form.test, region.form);
         if (region.form.kind === 'while')
@@ -5913,7 +5948,7 @@ export class Renderer {
     ): void => {
       if (!this.program.blocks.has(item.target))
         this.invalid('Transfer target has no structured block');
-      const action =
+      let action =
         (this.loopExits.has(item) ? 'loop-exit' : performed) ??
         transferAction(
           item,
@@ -5925,6 +5960,15 @@ export class Renderer {
           this.normalizeLoopTargets,
           (from, target) => this.crossing(from, target) !== null,
         );
+      // C `continue` in a do-while evaluates its test: an edge from the body
+      // into a test block printing nothing else (no repeat copy either) is one.
+      if (action === 'goto') {
+        const loop = [...nested].reverse().find((entry) => entry.kind === 'loop');
+        if (loop?.kind === 'loop' && this.continueTests.get(loop.header) === item.target) {
+          action = 'continue';
+          this.testContinues.add(item);
+        }
+      }
       if (
         !performed &&
         !this.loopExits.has(item) &&
@@ -5999,6 +6043,28 @@ export class Renderer {
         arm(control.otherwise, nested);
       }
     }
+  }
+
+  /** The block holding a do-while's test when a `continue` inside its body
+   * reaches exactly that test: it is the body's lexically last block, prints
+   * nothing but the test, and its repeat arm prints no copy. */
+  private continueTest(loop: Extract<Region, { kind: 'loop' }>): string | undefined {
+    const form = loop.form;
+    if (form?.kind !== 'do_while' || this.language !== 'c-like' || !this.sourceView)
+      return undefined;
+    let last: Region = loop.body;
+    while (last.kind === 'sequence') {
+      this.context.checkpoint(1);
+      const next = last.regions.at(-1);
+      if (!next) return undefined;
+      last = next;
+    }
+    if (last.kind !== 'block' || last.control.kind !== 'if' || last.control.id !== form.test)
+      return undefined;
+    const repeat = form.repeat ? last.control.when_true : last.control.when_false;
+    if (repeat.body || this.printedCopies(repeat.transfer).length || !this.quietTest(last))
+      return undefined;
+    return last.id;
   }
 
   private transfer(transfer: ParallelTransfer, depth: number, origin: Control): void {
@@ -8266,7 +8332,7 @@ export class Renderer {
     // evaluated, asked again in the same order, answers the same: structuring
     // is deterministic in its graph (the shared reconstruction's) and these
     // answers, so it would ask the same questions and lay out the same body.
-    const structure = (facts: StructuringConditions): StructuringResult => {
+    const structure = (facts: StructuringConditions, reached = false): StructuringResult => {
       const asked = (query: StructuringQuery): boolean | number =>
         query.kind === 'operand'
           ? facts.operand(query.block)
@@ -8274,6 +8340,7 @@ export class Renderer {
       for (const memo of (plans.structures ??= []))
         if (
           memo.graph === program.function &&
+          memo.reached === reached &&
           memo.queries.every((query) => asked(query) === query.answer)
         )
           return memo.result;
@@ -8292,6 +8359,7 @@ export class Renderer {
               TEXT_RENDER_WORK * renderUnits(this.input.function),
           ),
           transfers: (block, slot) => edges.get(`${block}:${slot}`),
+          ...(reached ? { reached } : {}),
           conditions: {
             operand: (block) => {
               const answer = facts.operand(block);
@@ -8312,10 +8380,12 @@ export class Renderer {
         },
       );
       // A partial result (exhausted work) is not a layout: it is never reused.
-      if (result.value) plans.structures.push({ graph: program.function, queries, result });
+      if (result.value)
+        plans.structures.push({ graph: program.function, reached, queries, result });
       return result;
     };
-    let result = structure(conditions);
+    let facts = conditions;
+    let result = structure(facts);
     if (
       result.value &&
       result.conditions.length &&
@@ -8326,12 +8396,43 @@ export class Renderer {
         result.conditions,
       )
     )
-      result = structure({ ...conditions, operand: () => false });
+      result = structure((facts = { ...conditions, operand: () => false }));
+    // Labels left: structure again letting a node own a labeled target that
+    // the label's source reaches (StructuringOptions.reached), and keep that
+    // layout when it labels fewer edges. Greedy selection makes either one
+    // better on some graphs; the second run needs four times the first's work.
+    let reached = false;
+    if (
+      result.value &&
+      result.labeled &&
+      (this.context.remainingWork?.() ?? Infinity) -
+        TEXT_RENDER_WORK * renderUnits(this.input.function) >
+        4 * result.work
+    ) {
+      const other = structure(facts, true);
+      if (
+        other.value &&
+        other.labeled < result.labeled &&
+        other.conditions.join() === result.conditions.join() &&
+        this.localValidation.presentation(
+          'reached_label_owner',
+          this.input.function.id,
+          'structured with fewer labeled edges by letting a node own a block entered by labeled transfers from another node that reaches it: that node is laid out first, so every label stays a forward jump; edges, copies and effects are unchanged',
+          [this.input.function.id],
+        )
+      ) {
+        result = other;
+        reached = true;
+      }
+    }
     // Nothing collapsed or labeled first: the searched layout is the given one,
     // kept (a provisional layout skipped the search and is replaced).
     if (
       !result.value ||
-      (!result.conditions.length && !result.tails.length && !program.function.provisional)
+      (!reached &&
+        !result.conditions.length &&
+        !result.tails.length &&
+        !program.function.provisional)
     )
       return;
     const blocks = new Map<string, BlockRegion>(),
@@ -8925,14 +9026,25 @@ export class Renderer {
           (program.returns.get(block.control.id)?.outputs.length ?? 9) <= 8),
     );
     let body = this.body;
+    const branched = new Set(layout.branched);
+    const chains = [...new Set(layout.duplicated.map((item) => item.tail))].filter(
+      (id) => !branched.has(id),
+    );
     if (
-      !layout.duplicated.length ||
-      this.localValidation.presentation(
-        'return_tail_duplication',
-        subject,
-        'a labeled edge into an acyclic return, tail-call or trap tail of at most four blocks, each with at most four assignments/loads/stores/calls and four edge copies, ends in an owned copy; effects execute once on the same path in the same order, and copies retain original identities',
-        [...new Set(layout.duplicated.map((item) => item.tail))],
-      )
+      (!chains.length ||
+        this.localValidation.presentation(
+          'return_tail_duplication',
+          subject,
+          'a labeled edge into an acyclic return, tail-call or trap tail of at most four blocks, each with at most four assignments/loads/stores/calls and four edge copies, ends in an owned copy; effects execute once on the same path in the same order, and copies retain original identities',
+          chains,
+        )) &&
+      (!branched.size ||
+        this.localValidation.presentation(
+          'branching_tail_duplication',
+          subject,
+          "the only labeled edge into a branching tail ends in an owned copy of it: the regions laid out from its entry to the end of their sequence, at most five blocks and eight printed lines, every block reached from that entry, with no loop, switch or short-circuit arm, every edge falling through to a block inside them and every path ending in a return, tail call or trap; the copy runs the same tests and effects in the same order on the edge's path as the label would, and copies retain original identities",
+          [...branched],
+        ))
     ) {
       body = layout.body;
       this.clones = layout.clones;
@@ -9164,6 +9276,13 @@ export class Renderer {
         'break and continue select the nearest enclosing loop by exact lexical successor/header identity, not the structurer annotation; a C switch never captures a loop break',
         [...new Set(normalized)],
       );
+    this.quietTest = (block) =>
+      block.control.kind === 'if' &&
+      silent(block) &&
+      !this.notes.has(block.id) &&
+      !this.notes.has(block.control.id) &&
+      !anchored(block.control.id) &&
+      block.statements.every((node) => !anchored(node.id));
     this.quietJump = (block) =>
       block.control.kind === 'jump' &&
       silent(block) &&

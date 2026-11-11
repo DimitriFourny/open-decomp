@@ -111,6 +111,7 @@ interface Graph {
   readonly orphans: Set<CollapseNode>;
   /** Nodes without structured exits. */
   readonly sinks: Set<CollapseNode>;
+  readonly reachable: boolean;
 }
 
 /** Slot numbers: -1 is a jump; if arms are 0 (true) and 1 (false); switch
@@ -170,6 +171,7 @@ export function structureControlFlow(
   options: StructuringOptions = {},
 ): StructuringResult {
   const maxDepth = options.max_depth ?? 32;
+  const ownReached = options.reached === true;
   if (!Number.isSafeInteger(maxDepth) || maxDepth < 1 || maxDepth > 64)
     throw new RangeError('Structuring depth must be 1..64');
   const budget = new AnalysisBudget({
@@ -275,6 +277,8 @@ export function structureControlFlow(
     const chains = new Map<EntityId, readonly LoopScope[]>();
     /** Structured edges that stay labeled transfers. */
     const labeled = new Set<string>();
+    /** Loop exits to a target other than the loop's follow and not a small tail. */
+    let exits = 0;
     // Edge selection is bounded separately; past it, the remaining nodes of a
     // scope are laid out in dependency order without further search. The search
     // also ends once this structuring has charged `search_work`.
@@ -360,7 +364,11 @@ export function structureControlFlow(
         if (item.kind !== 'seq') item.parent = parent;
       }
     };
+    /** Whether `from` reaches `to` over structured edges. Edges change only in
+     * detach, so answers hold until then. */
+    let reachAnswers = new Map<CollapseNode, Map<CollapseNode, boolean>>();
     const detach = (edge: CollapseEdge): void => {
+      if (reachAnswers.size) reachAnswers = new Map();
       budget.charge(edge.from.outs.length + edge.to.ins.length);
       edge.from.outs = edge.from.outs.filter((item) => item !== edge);
       edge.to.ins = edge.to.ins.filter((item) => item !== edge);
@@ -680,8 +688,10 @@ export function structureControlFlow(
               !loop.body.has(target) &&
               !(loopScope && target === entry) &&
               owner.get(target)!.entry === target
-            )
+            ) {
               owner.get(target)!.gotos.push({ block: id, source: loop.node });
+              if (!tailBlock(target, 0)) exits++;
+            }
           }
         }
       }
@@ -754,17 +764,50 @@ export function structureControlFlow(
       }
       return false;
     };
+    const reachesNode = (from: CollapseNode, to: CollapseNode): boolean => {
+      budget.charge();
+      // Reverse postorder is topological for the acyclic scope graph.
+      if (from.rpo >= to.rpo) return false;
+      let answers = reachAnswers.get(from);
+      const known = answers?.get(to);
+      if (known !== undefined) return known;
+      const seen = new Set<CollapseNode>([from]),
+        stack = [from];
+      let found = false;
+      while (stack.length && !found) {
+        const node = stack.pop()!;
+        for (const edge of node.outs) {
+          budget.charge();
+          if (edge.to === to) found = true;
+          if (!seen.has(edge.to) && edge.to.rpo < to.rpo) {
+            seen.add(edge.to);
+            stack.push(edge.to);
+          }
+        }
+      }
+      if (!answers) reachAnswers.set(from, (answers = new Map()));
+      answers.set(to, found);
+      return found;
+    };
     /** Every labeled transfer into `target` comes from inside `host`, and
-     * (in the real layout) before position `at` of `host`. */
+     * (in the real layout) before position `at` of `host`. With `reached`
+     * (StructuringOptions.reached), a transfer may also come from another
+     * node that reaches `host`: that node is laid out before `host`, so the
+     * label still jumps forward. */
     const forward = (
       graph: Graph,
       target: CollapseNode,
       host: CollapseNode,
       at?: () => number[],
+      reached = false,
     ): boolean => {
       let position: number[] | undefined;
       for (const pending of target.gotos) {
-        if (resolve(graph, pending.source) !== host) return false;
+        const from = resolve(graph, pending.source);
+        if (from !== host) {
+          if (reached && graph.reachable && reachesNode(from, host)) continue;
+          return false;
+        }
         if (!at || graph.simulated) continue;
         const source = pathOf(graph.loops.get(pending.block) ?? leaves.get(pending.block)!);
         position ??= at();
@@ -807,7 +850,7 @@ export function structureControlFlow(
           target !== graph.entry &&
           outs.every((edge) => edge.to === target) &&
           target.ins.every((edge) => edge.from === node) &&
-          forward(graph, target, node)
+          forward(graph, target, node, undefined, ownReached)
         ) {
           const rule: Rule = { kind: 'sequence', target };
           // In a loop body, a branch whose other arm repeats the loop owns a
@@ -849,7 +892,7 @@ export function structureControlFlow(
             ? [...steps.slice(0, -1), steps.at(-1)! + 1]
             : [...steps, 1];
         };
-        if (!forward(graph, target, node, at)) continue;
+        if (!forward(graph, target, node, at, ownReached)) continue;
         // Simulations ignore nesting bounds; the real layout never exceeds them.
         if (!graph.simulated) {
           let depth: number;
@@ -1058,6 +1101,7 @@ export function structureControlFlow(
         buckets: [0, 1, 2, 3, 4].map(() => new Set<CollapseNode>()),
         orphans: new Set(),
         sinks: new Set(),
+        reachable: nodes.every((node) => node.rpo < blocks.size),
       };
       for (const node of nodes) refresh(graph, node);
       return graph;
@@ -1531,6 +1575,17 @@ export function structureControlFlow(
         terminator_id: block.terminator.id,
       };
     });
+    // Labeled edges into blocks other than small tails (the source view copies those).
+    const gotos =
+      exits +
+      [...labeled].filter((key) => {
+        budget.charge();
+        const split = key.lastIndexOf(':'),
+          block = key.slice(0, split),
+          slot = Number(key.slice(split + 1));
+        const target = slots(block).find((item) => item.slot === slot)!.target;
+        return !tailBlock(target, 0);
+      }).length;
     const value: StructuredFunction = {
       kind: 'structured_function',
       id: input.id,
@@ -1548,6 +1603,7 @@ export function structureControlFlow(
       work: budget.work,
       conditions: [...conditionHeads].map((node) => node.entry),
       tails: [...tailSources],
+      labeled: gotos,
     };
   } catch (error) {
     const result = budget.result(null, error);

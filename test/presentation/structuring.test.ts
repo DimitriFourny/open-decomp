@@ -704,6 +704,80 @@ test('reducible programs without multi-level exits structure without labeled tra
   }
 });
 
+test('with reached, a block labeled from an earlier node is owned by a node that node reaches', () => {
+  // n0 -> n3 | n1; n1 -> n2; n2 -> n3 | n6; n3 -> n5 | n4; n4 -> n7;
+  // n5 -> n6 | n7; n6 -> n7; n7 returns after five stores (not a small tail).
+  // Strict forward labels keep n6 waiting for n2's node; `reached` lets n5
+  // own it because n2's node reaches n5's, and one label less remains.
+  const shape = [[3, 1], [2], [3, 6], [5, 4], [7], [6, 7], [7], []] as const;
+  const b = ssa('structured-reached-owner'),
+    list = shape.map((_, id) => b.block(`n${id}`));
+  list.forEach((block, id) => {
+    block.store(block.constant(i64, 0x1080n + 4n * BigInt(id)), block.constant(i32, BigInt(id)));
+    const out = shape[id]!;
+    if (!out.length) {
+      for (let k = 0; k < 5; k++)
+        block.store(block.constant(i64, 0x10c0n + 4n * BigInt(k)), block.constant(i32, 9n));
+      block.return([]);
+    } else if (out.length === 1) block.jump(list[out[0]]!);
+    else
+      block.branch(
+        block.compare(
+          'ne',
+          block.load(i32, block.constant(i64, 0x1000n + 4n * BigInt(id % 4))),
+          block.constant(i32, 0n),
+        ),
+        block.edge(list[out[0]]!),
+        block.edge(list[out[1]!]!),
+      );
+  });
+  const input = b.finish(list[0]!, []);
+  const bytes = (values: readonly number[]): Uint8Array => {
+    const result = new Uint8Array(0x100);
+    values.forEach((value, index) => (result[index * 4] = value));
+    return result;
+  };
+  const inputs = [0, 1, 2, 3, 5, 10, 12, 15].map((bits) => ({
+    memory: [
+      { base: 0x1000n, bytes: bytes([0, 1, 2, 3].map((k) => (bits >> k) & 1)), writable: true },
+    ],
+  }));
+  const strict = structureControlFlow(input, createOperationContext());
+  assert.ok(strict.state === 'complete');
+  const result = structureControlFlow(input, createOperationContext(), { reached: true });
+  assert.ok(result.state === 'complete' && result.value);
+  assert.equal(strict.labeled, 2);
+  assert.equal(result.labeled, 1);
+  const lowered = lower(result.value);
+  for (const options of inputs)
+    assert.deepEqual(evaluateIR(lowered, options), evaluateIR(input, options));
+  // Text order: every labeled transfer still jumps forward.
+  const position = new Map<string, number>();
+  const walk = (region: Region): void => {
+    if (region.kind === 'sequence') region.regions.forEach(walk);
+    else if (region.kind === 'loop') walk(region.body);
+    else {
+      position.set(region.id, position.size);
+      const control = region.control;
+      if (control.kind === 'if')
+        for (const arm of [control.when_true, control.when_false]) if (arm.body) walk(arm.body);
+    }
+  };
+  walk(result.value.body);
+  for (const block of blocks(result.value)) {
+    const control = block.control;
+    const own =
+      control.kind === 'jump'
+        ? [control.transfer]
+        : control.kind === 'if'
+          ? [control.when_true.transfer, control.when_false.transfer]
+          : [];
+    for (const transfer of own)
+      if (transfer.mode === 'goto')
+        assert.ok(position.get(transfer.target)! > position.get(block.id)!);
+  }
+});
+
 test('random acyclic graphs with shared joins keep every labeled transfer forward', () => {
   let seed = 0x1b873593;
   const next = (bound: number): number => {

@@ -172,15 +172,23 @@ for (const language of ['c-like', 'python-like'] as const)
         const { input, pointer } = joinedExits(carried);
         const output = emit(input, { source }, language).emission;
         const text = output.text;
+        // Either the joined exit `if (a || (x = f()) == 0) goto L;`, or the
+        // layout with fewer labeled edges (reached_label_owner) that keeps the
+        // call as a comma operand of `if (b && (x = f()) != 0) { …; L: … }`.
+        const joined = rules(output.local_validation).includes('joined_exit_condition');
+        assert.ok(joined || rules(output.local_validation).includes('reached_label_owner'), text);
         assert.match(
           text,
-          c
-            ? /if \(.+ \|\| \(\w+ = sub_4000\(\w+\)\) == 0\) \{\n\s+goto (\w+);\n/
-            : /if .+ or \(\w+ := sub_4000\(\w+\)\) == 0:\n\s+goto (\w+)\n/,
+          joined
+            ? c
+              ? /if \(.+ \|\| \(\w+ = sub_4000\(\w+\)\) == 0\) \{\n\s+goto (\w+);\n/
+              : /if .+ or \(\w+ := sub_4000\(\w+\)\) == 0:\n\s+goto (\w+)\n/
+            : c
+              ? /if \(.+ && \(\w+ = sub_4000\(\w+\)\) != 0\) \{\n/
+              : /if .+ and \(\w+ := sub_4000\(\w+\)\) != 0:\n/,
           text,
         );
         assert.equal(text.match(/\bgoto\b/g)?.length, 1, text);
-        assert.ok(rules(output.local_validation).includes('joined_exit_condition'), text);
         for (const [enter, flags, result] of [
           [0, 0, 7n],
           [1, 0, 7n],

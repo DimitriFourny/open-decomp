@@ -148,6 +148,11 @@ export interface StructuringOptions {
    * scope are laid out in dependency order. The source view's restructure passes the
    * request's remaining work less the text render's reserve. Unbounded when absent. */
   readonly search_work?: number;
+  /** A target with labeled transfers from another collapse node may still be
+   * owned (as an arm or the next statement) by a node those sources reach,
+   * in scopes whose blocks are all reachable: the label stays forward, and
+   * the target no longer waits for every source to join the owner first. */
+  readonly reached?: boolean;
   /** Block contents known after reconstruction (source view): short-circuit
    * conditions collapse first, Ghidra's `collapseConditions`. */
   readonly conditions?: StructuringConditions;
@@ -189,6 +194,9 @@ export type StructuringResult =
       /** Branch blocks whose constant-return edges were labeled first (see
        * StructuringConditions.returnsConstants). */
       readonly tails: readonly EntityId[];
+      /** Edges laid out as labeled transfers into blocks other than small
+       * tails (the source view copies those): the gotos this layout leaves. */
+      readonly labeled: number;
     }
   | {
       readonly state: 'partial';
