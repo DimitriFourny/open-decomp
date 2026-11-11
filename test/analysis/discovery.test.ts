@@ -26,12 +26,14 @@ import { PELoader } from '../../src/loaders/pe/index.js';
 import { Arm64Lifter } from '../../src/lifters/arm64/index.js';
 import { DarwinArm64Abi } from '../../src/abi/darwin-arm64/index.js';
 import {
+  UNWINDER_ENTRY_REASONS,
   discoverFunctions,
   prepareDiscoveryIndex,
   type DiscoveryInput,
   type FunctionAssertion,
 } from '../../src/analysis/discovery/index.js';
 import { bindPltEntries } from '../../src/analysis/discovery/stubs.js';
+import { exceptionFacts } from '../../src/analysis/discovery/exceptions.js';
 
 function load(path: string, loader: Loader): LoadedImage {
   const bytes = readFileSync(path);
@@ -984,6 +986,7 @@ test('a function an unwinder can re-enter at a landing pad is never proven noret
     eh: 'lsda' | 'null-lsda' | 'none' | 'corrupt',
     format: 'elf' | 'pe' = 'elf',
     inner = false,
+    partial = false,
   ) => {
     const lead = inner ? 1 : 0,
       start = 0x1006 + lead;
@@ -1066,6 +1069,16 @@ test('a function an unwinder can re-enter at a landing pad is never proven noret
           }
         : {
             ...base,
+            capabilities: partial
+              ? [
+                  {
+                    layer: 'format',
+                    feature: 'PE exception directory',
+                    status: 'partial',
+                    limitations: ['unread'],
+                  },
+                ]
+              : base.capabilities,
             hints: [
               {
                 kind: 'unwind',
@@ -1136,6 +1149,19 @@ test('a function an unwinder can re-enter at a landing pad is never proven noret
   assert.equal(corrupt.c.function.noreturn, undefined);
   assert.equal(corrupt.m.function.noreturn, undefined);
   assert.ok(corrupt.t.function.noreturn);
+  // Their graphs say that handler code may be missing; a call-free one cannot be re-entered.
+  for (const graph of [corrupt.c, corrupt.m]) {
+    assert.ok(graph.coverage.reasons.includes('exception handlers unknown'));
+    assert.ok(graph.coverage.reasons.every((reason) => UNWINDER_ENTRY_REASONS.has(reason)));
+  }
+  assert.ok(!corrupt.t.coverage.reasons.includes('exception handlers unknown'));
+  // PE structured exception handlers resume after any faulting instruction: with an exception
+  // directory that was only partly read not even a call-free root is proven.
+  const seh = image(pad, 'null-lsda', 'pe', false, true);
+  assert.equal(seh.t.function.noreturn, undefined);
+  assert.equal(seh.c.function.noreturn, undefined);
+  assert.ok(seh.t.coverage.reasons.includes('exception handlers unknown'));
+  assert.ok(image(pad, 'null-lsda', 'pe').t.function.noreturn);
 });
 
 test('a setjmp-style call that returns twice keeps the path to its second return', () => {
@@ -1744,4 +1770,133 @@ test('an ARM64 frame popped by post-index writeback before `b` is a tail jump', 
     arm64Image([...frame.slice(0, 7), 0xd503201f, ...frame.slice(8)], 0x10),
   );
   assert.deepEqual(promoted(unpopped), []);
+});
+
+test('exception facts: a named handler survives unread metadata, a compact entry is authoritative', () => {
+  const context = createOperationContext();
+  const facts = (image: LoadedImage, ...addresses: number[]) => {
+    const found = exceptionFacts(image, context);
+    return addresses.map((value) => found.at(BigInt(value), context));
+  };
+  const section = (image: LoadedImage, name: string, at: number, size: number) => ({
+    id: `section-${name}`,
+    name,
+    segment_id: null,
+    kind: 'section' as const,
+    virtual_range: {
+      start: { image_id: image.id, space: 'va' as const, value: BigInt(at) },
+      size: BigInt(size),
+    },
+    file_range: {
+      start: { image_id: image.id, space: 'file' as const, value: BigInt(at - 0x1000) },
+      size: BigInt(size),
+    },
+    permissions: ['read'] as 'read'[],
+    flags: 0n,
+    evidence_ids: [],
+  });
+  const unwind = (
+    image: LoadedImage,
+    start: number,
+    size: number,
+    encoding: string,
+    handler: number | null = null,
+  ) => ({
+    kind: 'unwind' as const,
+    range: {
+      start: { image_id: image.id, space: 'va' as const, value: BigInt(start) },
+      size: BigInt(size),
+    },
+    encoding,
+    record: {
+      start: { image_id: image.id, space: 'va' as const, value: 0x1000n },
+      size: 8n,
+    },
+    handler:
+      handler === null
+        ? null
+        : { image_id: image.id, space: 'va' as const, value: BigInt(handler) },
+    evidence_ids: [],
+  });
+  const warning = (message: string) => ({
+    code: 'unavailable_semantics' as const,
+    severity: 'warning' as const,
+    layer: 'format' as const,
+    message,
+    evidence_ids: [],
+  });
+  const bytes = new Array<number>(0x80).fill(0);
+
+  // Mach-O arm64: frame (mode 4), frame with an LSDA whose personality slot was not resolved,
+  // frame with a personality index only, DWARF (mode 3), then an address no entry covers.
+  const macho = raw(bytes, 'arm64');
+  const entries = [
+    unwind(macho, 0x1000, 0x10, 'compact-unwind-arm64:04000001'),
+    unwind(macho, 0x1010, 0x10, 'compact-unwind-arm64:44000001'),
+    unwind(macho, 0x1020, 0x10, 'compact-unwind-arm64:14000001'),
+    unwind(macho, 0x1030, 0x10, 'compact-unwind-arm64:03000040'),
+    unwind(macho, 0x1040, 0x10, 'compact-unwind-arm64:04000001', 0x1000),
+  ];
+  assert.deepEqual(
+    facts({ ...macho, hints: entries }, 0x1004, 0x1014, 0x1024, 0x1034, 0x1044, 0x1054),
+    ['none', 'handler', 'handler', 'unknown', 'handler', 'none'],
+  );
+  // With an `__eh_frame` section only an address no compact entry covers is looked up there.
+  const framed: LoadedImage = {
+    ...macho,
+    hints: entries,
+    sections: [section(macho, '__eh_frame', 0x1060, 0x20)],
+    diagnostics: [
+      warning('DWARF CFI records retained; PC ranges require DWARF augmentation decoding'),
+    ] as LoadedImage['diagnostics'],
+  };
+  assert.deepEqual(facts(framed, 0x1004, 0x1014, 0x1034, 0x1054), [
+    'none',
+    'handler',
+    'unknown',
+    'unknown',
+  ]);
+  // Compact unwind the loader could not read: nothing is known except the handlers it named.
+  const dropped: LoadedImage = {
+    ...macho,
+    hints: entries,
+    diagnostics: [
+      warning('Compact unwind second-level page is malformed'),
+    ] as LoadedImage['diagnostics'],
+  };
+  assert.deepEqual(facts(dropped, 0x1004, 0x1014, 0x1054), ['unknown', 'handler', 'unknown']);
+
+  // PE: a partial exception directory keeps the handlers of the records that were read.
+  const pe = raw(bytes);
+  const partial: LoadedImage = {
+    ...pe,
+    hints: [
+      unwind(pe, 0x1000, 0x10, 'PE_AMD64_UNWIND_INFO_V1'),
+      unwind(pe, 0x1010, 0x10, 'PE_AMD64_UNWIND_INFO_V1', 0x1000),
+    ],
+    capabilities: [
+      { layer: 'format', feature: 'PE exception directory', status: 'partial', limitations: ['x'] },
+    ] as LoadedImage['capabilities'],
+  };
+  assert.deepEqual(facts(partial, 0x1004, 0x1014, 0x1024), ['unknown', 'handler', 'unknown']);
+  assert.deepEqual(facts({ ...partial, capabilities: [] }, 0x1004, 0x1014, 0x1024), [
+    'none',
+    'handler',
+    'none',
+  ]);
+
+  // ELF: only zero padding may follow the `.eh_frame` terminator (`.eh_frame_hdr` can index
+  // records placed after one).
+  const elf = (tail: number[]) => {
+    const frame = [0, 0, 0, 0, ...tail];
+    const base = raw([...new Array<number>(0x40).fill(0x90), ...frame]);
+    return {
+      ...base,
+      target: { ...base.target, format: 'elf', abi: 'sysv-amd64' },
+      sections: [section(base, '.eh_frame', 0x1040, frame.length)],
+    } as LoadedImage;
+  };
+  assert.deepEqual(facts(elf([]), 0x1004), ['none']);
+  assert.deepEqual(facts(elf([0, 0, 0, 0]), 0x1004), ['none']);
+  assert.deepEqual(facts(elf([0x10, 0, 0, 0, 0, 0, 0, 0]), 0x1004), ['unknown']);
 });

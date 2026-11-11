@@ -75,7 +75,7 @@ flowchart LR
 
 **ELF (ELF64 LE x86-64, `ET_EXEC`/`ET_DYN`).**
 
-- Mappings only from `PT_LOAD` (congruence checks); section table is _required_ and cross-checked against segments, `PT_DYNAMIC` and `DT_*` pointers — contradictions are malformed.
+- Mappings only from `PT_LOAD` (congruence checks); section table is _required_ and cross-checked against segments, `PT_DYNAMIC` and `DT_*` pointers — contradictions are malformed. One exception: a TLS `NOBITS` section (`.tbss`) needs no `PT_LOAD` — its address continues the `PT_TLS` template, which lld places past the end of the mapped data; it gets no owning segment and no data hint.
 - **Optional** (dropped whole with a warning + `partial` capability, its hints/headers rolled back): GNU symbol versions (`.gnu.version`, `.gnu.version_r`, their `DT_VER*` cross-checks; imports then have no `library`), `.symtab` (`.dynsym` stays structural: relocations and versions index it), the entry point. When something was dropped the loader also reports the `Native symbol and export tables` capability (partial only if `.symtab` went). Version-need records may be laid out in any order (GNU ld interleaves each `Verneed` with its `Vernaux`, lld writes all `Verneed` first); records must stay inside the section and never share bytes.
 - `.symtab`/`.dynsym` → symbols; exports from `.dynsym` only.
 - Relocations: known x86-64 types get width/target; unknown ones keep raw bytes + unsupported diagnostic. `GLOB_DAT`/`JUMP_SLOT`/absolute relocation on a non-executable site → import with `slot`; a possible instruction patch site → import with no slot.

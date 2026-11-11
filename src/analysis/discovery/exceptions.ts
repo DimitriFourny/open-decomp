@@ -8,7 +8,7 @@ import type { LoadedImage, OperationContext } from '../../core/index.js';
 export type ExceptionFact = 'none' | 'handler' | 'unknown';
 
 export interface ExceptionFacts {
-  /** The fact of the unwind record covering a function entry (its own record only). */
+  /** The strongest fact of the unwind records covering an address. */
   at(entry: bigint, context: OperationContext): ExceptionFact;
 }
 
@@ -18,14 +18,20 @@ interface Covered {
   readonly fact: ExceptionFact;
 }
 
-/** Exception facts per function entry, read once per image. ELF parses `.eh_frame` CIE/FDE
- * framing and the `zPLR` augmentation (pointer encodings absptr/udata/sdata, pc-relative or
- * absolute); any record it cannot read makes every entry `unknown`. PE and Mach-O read the
- * loaders' unwind hints; dropped unwind metadata (a partial PE exception directory, a Mach-O
- * compact unwind warning) and Mach-O entries that defer to DWARF CFI are `unknown`. */
+/** Exception facts per address, read once per image. ELF parses `.eh_frame` CIE/FDE framing
+ * and the `zPLR` augmentation (pointer encodings absptr/udata/sdata, pc-relative or absolute);
+ * any record it cannot read makes every address without a named handler `unknown`. PE and
+ * Mach-O read the loaders' unwind hints; dropped unwind metadata (a partial PE exception
+ * directory, a Mach-O compact unwind warning) does the same. A Mach-O compact entry is what the
+ * unwinder uses for its range: it names a handler by its personality index or LSDA flag (whether
+ * or not the personality slot was resolved), defers to a DWARF FDE in mode 3 (`unknown`), and
+ * only an address no entry covers is looked up in `__eh_frame`, whose ranges are not read here
+ * (`unknown` when that section exists). */
 export function exceptionFacts(image: LoadedImage, context: OperationContext): ExceptionFacts {
   const ranges: Covered[] = [];
   let complete = true;
+  /** The fact of an address no record covers. */
+  let uncovered: ExceptionFact = 'none';
   if (image.target.format === 'elf') {
     for (const section of image.sections) {
       context.checkpoint(1);
@@ -42,32 +48,38 @@ export function exceptionFacts(image: LoadedImage, context: OperationContext): E
           item.status === 'partial' &&
           /exception|unwind/i.test(item.feature),
       ) ||
-      image.diagnostics.some((item) => /^(Compact unwind|DWARF CFI)/.test(item.message))
+      image.diagnostics.some((item) => /^Compact unwind/.test(item.message))
     )
       complete = false;
+    if (
+      image.target.format === 'macho' &&
+      image.sections.some((section) => section.name === '__eh_frame')
+    )
+      uncovered = 'unknown';
     for (const hint of image.hints) {
       context.checkpoint(1);
       if (hint.kind !== 'unwind') continue;
       const start = virtual(image, hint.range.start);
       if (start === null) continue;
+      const compact = /^compact-unwind-arm64:/.test(hint.encoding)
+        ? Number.parseInt(hint.encoding.slice(hint.encoding.indexOf(':') + 1), 16)
+        : null;
+      // UNWIND_HAS_LSDA and UNWIND_PERSONALITY_MASK: a handler even when the loader could not
+      // resolve the personality slot.
+      const handler = hint.handler !== null || (compact !== null && (compact & 0x70000000) !== 0);
       // arm64 compact unwind mode 3 defers to a DWARF FDE whose personality is not read here.
-      const dwarf =
-        /^compact-unwind-arm64:/.test(hint.encoding) &&
-        ((Number.parseInt(hint.encoding.slice(hint.encoding.indexOf(':') + 1), 16) >>> 24) &
-          0xf) ===
-          3;
+      const dwarf = compact !== null && ((compact >>> 24) & 0xf) === 3;
       ranges.push({
         start,
         end: start + hint.range.size,
-        fact: hint.handler ? 'handler' : dwarf ? 'unknown' : 'none',
+        fact: handler ? 'handler' : dwarf ? 'unknown' : 'none',
       });
     }
   }
   ranges.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
   return {
     at(entry, operation) {
-      if (!complete) return 'unknown';
-      let fact: ExceptionFact = 'none';
+      let fact: ExceptionFact | null = null;
       // Records may overlap (PE chained records): the strongest fact of any covering one wins.
       let low = 0,
         high = ranges.length;
@@ -83,10 +95,12 @@ export function exceptionFacts(image: LoadedImage, context: OperationContext): E
         operation.checkpoint(1);
         const range = ranges[index]!;
         if (range.end <= entry) continue;
+        // A named handler is a fact whatever else of the image could not be read.
         if (range.fact === 'handler') return 'handler';
-        if (range.fact === 'unknown') fact = 'unknown';
+        if (range.fact === 'unknown' || fact === null) fact = range.fact;
       }
-      return fact;
+      if (!complete) return 'unknown';
+      return fact ?? uncovered;
     },
   };
 }
@@ -239,7 +253,12 @@ function parseEhFrame(
       context.checkpoint(1);
       if (p + 4 > size) fail();
       const length = view.getUint32(p, true);
-      if (length === 0) break;
+      if (length === 0) {
+        // A terminator ends the records an unwinder walks, but `.eh_frame_hdr` can still index
+        // records placed after one: only zero padding may follow it.
+        for (let rest = p + 4; rest < size; rest++) if (bytes[rest] !== 0) fail();
+        break;
+      }
       if (length === 0xffffffff) fail();
       const body = p + 4,
         end = body + length;

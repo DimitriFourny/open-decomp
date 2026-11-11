@@ -759,3 +759,23 @@ test('absolute text relocations preserve instruction operands instead of creatin
     decoder.dispose();
   }
 });
+
+test('a TLS NOBITS section may lie outside every PT_LOAD; any other allocated section may not', () => {
+  // lld continues `.tbss` after `.tdata` in the PT_TLS template, past the end of the PT_LOAD.
+  const header = SHOFF + 3 * 64;
+  const outside = (flags: bigint) => {
+    const b = boundaryImage();
+    b.writeBigUInt64LE(flags, header + 8);
+    b.writeBigUInt64LE(BASE + 0x3000n, header + 16);
+    return b;
+  };
+  const image = load(outside(0x403n));
+  const section = image.sections.find((item) => item.name === '.bss')!;
+  assert.equal(section.segment_id, null);
+  assert.equal(section.virtual_range.start.value, BASE + 0x3000n);
+  // No data claim is made for addresses the process image does not have.
+  assert.ok(
+    !image.hints.some((hint) => hint.kind === 'data' && hint.range.start.value === BASE + 0x3000n),
+  );
+  failure(outside(3n));
+});

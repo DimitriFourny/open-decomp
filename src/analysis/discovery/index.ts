@@ -37,6 +37,15 @@ const TAIL_TARGET_RULE = 'unconditional jump at entry stack depth to code outsid
 const EXCEPTION_HANDLERS = 'exception handlers not decompiled';
 const EXCEPTION_HANDLERS_MESSAGE =
   'An unwind record covering this function names an exception handler (LSDA, language handler or personality): landing pads and handler code the unwinder enters are not decompiled';
+const EXCEPTION_UNREAD = 'exception handlers unknown';
+const EXCEPTION_UNREAD_MESSAGE =
+  'The unwind data covering this function was not read: an unwinder may enter landing pads or handler code that is not decompiled';
+/** Coverage reasons of a graph an exception unwinder may enter at code the graph lacks: what
+ * holds on the graph's static paths says nothing about the paths through that code. */
+export const UNWINDER_ENTRY_REASONS: ReadonlySet<string> = new Set([
+  EXCEPTION_HANDLERS,
+  EXCEPTION_UNREAD,
+]);
 /** Linker-synthesized import trampoline sections (ELF PLT variants, Mach-O stub sections). */
 const STUB_SECTION = /(^|[.,])(plt|plt\.sec|plt\.got|iplt)$|__(auth_|objc_)?stubs$|__stub_helper$/;
 
@@ -1064,7 +1073,13 @@ function discoverOnce(
         if (!instruction || instruction.validity !== 'valid') return undefined;
         const flow = instruction.flow;
         const fact = index.exceptions.at(address, context);
-        if (fact === 'handler' || (fact === 'unknown' && flow.kind === 'call')) return undefined;
+        // Unread unwind data may name a handler here: C++ pads are entered only from a call, PE
+        // structured exception handlers from any faulting instruction.
+        if (
+          fact === 'handler' ||
+          (fact === 'unknown' && (flow.kind === 'call' || image.target.format === 'pe'))
+        )
+          return undefined;
         if (
           flow.kind === 'return' ||
           flow.kind === 'unknown' ||
@@ -1440,17 +1455,26 @@ function discoverOnce(
       });
     // Code an unwinder enters at a landing pad is no static successor of anything: the graph
     // lacks it, and says so whenever its entry or any of its instructions lies in a range whose
-    // unwind record names a handler.
-    const handlers =
-      index.exceptions.at(item.entry.value, context) === 'handler' ||
-      members.some(
-        (instruction) => index.exceptions.at(instruction.address.value, context) === 'handler',
-      );
-    if (handlers)
+    // unwind record names a handler, or may name one in unwind data that was not read (there
+    // only where a handler can be entered: after a call, on PE after any instruction).
+    const unwinds = [
+      index.exceptions.at(item.entry.value, context),
+      ...members.map((instruction) => {
+        const fact = index.exceptions.at(instruction.address.value, context);
+        return fact === 'unknown' &&
+          instruction.flow.kind !== 'call' &&
+          image.target.format !== 'pe'
+          ? 'none'
+          : fact;
+      }),
+    ];
+    const handlers = unwinds.includes('handler');
+    const unread = !handlers && unwinds.slice(1).includes('unknown');
+    if (handlers || unread)
       localDiagnostics.push({
         code: 'unavailable_semantics',
         severity: 'warning',
-        message: EXCEPTION_HANDLERS_MESSAGE,
+        message: handlers ? EXCEPTION_HANDLERS_MESSAGE : EXCEPTION_UNREAD_MESSAGE,
         address: item.entry,
         evidence_ids: [...item.evidence],
       });
@@ -1472,7 +1496,7 @@ function discoverOnce(
           )
           .map(() => 'unresolved control flow'),
         ...(conflict ? ['conflicting boundaries'] : []),
-        ...(handlers ? [EXCEPTION_HANDLERS] : []),
+        ...(handlers ? [EXCEPTION_HANDLERS] : unread ? [EXCEPTION_UNREAD] : []),
       ]),
     ];
     const name = [...item.names].sort()[0] ?? null;
