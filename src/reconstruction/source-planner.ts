@@ -418,6 +418,7 @@ export function planSource(
       callee.written_registers ? [[callee.call_id, callee.written_registers] as const] : [],
     ),
   );
+  const preservedOutputs = new Set<string>();
   const preserveThroughCall = (node: Extract<Instruction, { kind: 'call' }>): void => {
     const written = writtenByCall.get(node.id);
     if (!written) return;
@@ -434,8 +435,10 @@ export function planSource(
         [node.id],
       )
     )
-      for (const [value, input] of preserved)
+      for (const [value, input] of preserved) {
         alias(value, { kind: 'cast', op: 'bitcast', value: input });
+        preservedOutputs.add(value.id);
+      }
   };
   if (view === 'source')
     for (const callee of evidence.source_callees ?? []) inferred.set(callee.call_id, callee);
@@ -1986,6 +1989,9 @@ export function planSource(
     declaredExtension,
     presentation,
     forcedInline,
+    /** Source view: call outputs aliased to the cell before the call
+     * (`callee_preserved_register`). */
+    preserved: preservedOutputs as ReadonlySet<string>,
     alias,
     make,
     /** Source view (E3): one whole output replaces the cells of a root that a

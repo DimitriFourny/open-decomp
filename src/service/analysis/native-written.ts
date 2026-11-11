@@ -1,4 +1,4 @@
-import type { OperationContext } from '../../core/index.js';
+import type { AbiProfile, OperationContext } from '../../core/index.js';
 import type { StackRecoveryResult } from '../../analysis/stack/index.js';
 import {
   bitWidth,
@@ -24,6 +24,26 @@ const fpGuardArms = new Set<string>([
 ]);
 const fpGuardEffect = fpEnvironmentGuard.unsupported_effect;
 
+const domains = new WeakMap<AbiProfile, ReadonlySet<string>>();
+/** The roots a written-register set speaks for: the general integer and vector
+ * registers of the ABI's call clobber set (`preservedCallOutputs` refines no other). */
+export function writtenRegisterDomain(abi: AbiProfile): ReadonlySet<string> {
+  let domain = domains.get(abi);
+  if (!domain) {
+    domain = new Set(
+      abi.unknown_call_clobbers.registers
+        .filter(
+          (register) =>
+            register.role === 'general' &&
+            (register.bank === 'integer' || register.bank === 'vector'),
+        )
+        .map((register) => register.root),
+    );
+    domains.set(abi, domain);
+  }
+  return domain;
+}
+
 const mask = (offset: number, width: number): bigint =>
   ((1n << BigInt(width)) - 1n) << BigInt(offset);
 
@@ -38,7 +58,9 @@ const mask = (offset: number, width: number): bigint =>
  * written, unless it is restored: reloaded from a frame slot that only its save
  * writes (push/pop of a caller-saved register, as Win64 stack probes do). Calls without such a summary (imports, indirect or unresolved calls, a
  * callee the worklist cut) write their whole clobber set, which also covers the
- * roots this body tracks no cell for. Flags are left out: callers never refine them.
+ * roots this body tracks no cell for. Only the general registers of the ABI's call
+ * clobber set are covered (`domain`): flags, preserved and other registers are never
+ * refined by a caller, so the set makes no claim about them.
  *
  * Undefined (no set; callers keep the ABI clobbers) for a body that is not
  * complete: an unknown effect, an unknown exit (other than an FP-environment guard
@@ -54,36 +76,39 @@ const mask = (offset: number, width: number): bigint =>
 export function nativeWrittenRegisters(
   ir: SSAForm,
   interfaces: ReadonlyMap<string, NativeInterface>,
+  /** The roots the set speaks for: the general registers of the ABI's call clobber
+   * set (the only ones a caller refines). Others are outside its claims. */
+  domain: ReadonlySet<string>,
   context: OperationContext,
   index?: NativeInterfaceIndex,
   stack?: StackRecoveryResult,
 ): readonly RegisterSlice[] | undefined {
-  for (const block of ir.blocks) {
-    context.checkpoint(1 + block.instructions.length);
-    const control = block.terminator;
-    // The lifter's FP-environment guard arm stands for the same instruction under
-    // another FP control state: it writes the same registers and continues on paths
-    // this body already has (or traps), so it adds nothing to the set.
-    if (control.kind === 'unknown' && fpGuardArms.has(control.reason)) {
-      if (
-        block.instructions.some(
-          (node) => node.kind === 'unknown_effect' && node.reason !== fpGuardEffect,
-        )
-      )
-        return undefined;
-      continue;
-    }
-    if (control.kind === 'unknown' || (control.kind === 'indirect' && !control.tail_call))
-      return undefined;
-    if (block.instructions.some((node) => node.kind === 'unknown_effect')) return undefined;
-  }
   const prepared = (index ?? createNativeInterfaceIndex(ir, undefined, context)).preparation(
     ir,
     context,
   );
+  for (const block of ir.blocks) {
+    context.checkpoint(1);
+    const control = block.terminator,
+      effects = prepared.effects.get(block.id) ?? [];
+    // The lifter's FP-environment guard arm stands for the same instruction under
+    // another FP control state: it writes the same registers and continues on paths
+    // this body already has (or traps), so it adds nothing to the set.
+    if (control.kind === 'unknown' && fpGuardArms.has(control.reason)) {
+      if (effects.some((reason) => reason !== fpGuardEffect)) return undefined;
+      continue;
+    }
+    if (
+      effects.length ||
+      control.kind === 'unknown' ||
+      (control.kind === 'indirect' && !control.tail_call)
+    )
+      return undefined;
+  }
   const written = new Map<string, bigint>(),
     represented = new Map<string, bigint>();
   const add = (into: Map<string, bigint>, register: RegisterSlice): void => {
+    if (!domain.has(register.root)) return;
     into.set(
       register.root,
       (into.get(register.root) ?? 0n) | mask(register.offset_bits, register.width_bits),
@@ -100,6 +125,7 @@ export function nativeWrittenRegisters(
     if (seen.has(callee)) continue;
     seen.add(callee);
     for (const slice of callee) {
+      if (!domain.has(slice.root)) continue;
       context.checkpoint(1);
       const bits = mask(slice.offset_bits, slice.width_bits) & ~(represented.get(slice.root) ?? 0n);
       if (bits) written.set(slice.root, (written.get(slice.root) ?? 0n) | bits);
@@ -124,26 +150,31 @@ export function nativeWrittenRegisters(
   // the body writes (same offset and width, no other store touching its bytes), that
   // store dominating the load, whose bytes the stack recovery still holds from that
   // store at the load, in order, with no alias barrier (call, unknown or dynamic
-  // store) on any path before it, reads that store's value.
-  const slotStore = new Map<bigint, string | null>(),
-    stores = new Map<string, Extract<Instruction, { kind: 'store' }>>(),
-    sites = new Map<string, { readonly block: string; readonly index: number }>();
-  if (stack?.state === 'complete')
-    for (const block of ir.blocks)
-      for (const [index, node] of block.instructions.entries()) {
-        if (node.kind !== 'store' && node.kind !== 'load') continue;
-        context.checkpoint(1);
-        sites.set(node.id, { block: block.id, index });
-        if (node.kind !== 'store') continue;
-        stores.set(node.id, node);
-        const address = stack.values.get(node.address.id)?.value;
-        if (address?.kind !== 'stack') continue;
-        const size = BigInt(Math.ceil(bitWidth(node.value.type) / 8));
-        for (let byte = 0n; byte < size; byte++) {
-          const at = address.offset + byte;
-          slotStore.set(at, slotStore.has(at) ? null : node.id);
-        }
+  // store) on any path before it, reads that store's value. Indexed on first use.
+  let slots:
+    | {
+        readonly owner: ReadonlyMap<bigint, string | null>;
+        readonly stores: ReadonlyMap<string, Extract<Instruction, { kind: 'store' }>>;
       }
+    | undefined;
+  const slotIndex = () => {
+    if (slots) return slots;
+    const owner = new Map<bigint, string | null>(),
+      stores = new Map<string, Extract<Instruction, { kind: 'store' }>>();
+    for (const node of prepared.stores) {
+      context.checkpoint(1);
+      stores.set(node.id, node);
+      const address = stack?.values.get(node.address.id)?.value;
+      if (address?.kind !== 'stack') continue;
+      const size = BigInt(Math.ceil(bitWidth(node.value.type) / 8));
+      for (let byte = 0n; byte < size; byte++) {
+        const at = address.offset + byte;
+        owner.set(at, owner.has(at) ? null : node.id);
+      }
+    }
+    return (slots = { owner, stores });
+  };
+  const sites = prepared.sites;
   let dominance: Dominance | undefined;
   const before = (store: string, load: string): boolean => {
     const from = sites.get(store)!,
@@ -157,9 +188,17 @@ export function nativeWrittenRegisters(
     const load = id === undefined ? undefined : prepared.loads.get(id);
     const address = load && stack?.values.get(load.address.id)?.value;
     const snapshot = load && stack?.snapshots.get(load.id);
-    if (!load || address?.kind !== 'stack' || !snapshot || snapshot.aliased) return undefined;
+    if (
+      stack?.state !== 'complete' ||
+      !load ||
+      address?.kind !== 'stack' ||
+      !snapshot ||
+      snapshot.aliased
+    )
+      return undefined;
     const size = BigInt(Math.ceil(bitWidth(value.type) / 8));
-    const store = stores.get(slotStore.get(address.offset) ?? '');
+    const { owner, stores } = slotIndex();
+    const store = stores.get(owner.get(address.offset) ?? '');
     const stored = store && stack?.values.get(store.address.id)?.value;
     if (
       !store ||
@@ -174,7 +213,7 @@ export function nativeWrittenRegisters(
     for (let byte = 0n; byte < size; byte++) {
       const held = snapshot.memory.get(address.offset + byte);
       if (
-        slotStore.get(address.offset + byte) !== store.id ||
+        owner.get(address.offset + byte) !== store.id ||
         !held?.fact.value_ids.includes(store.value.id) ||
         held.value_offset_bits !== Number(byte) * 8
       )
@@ -238,8 +277,8 @@ export function nativeWrittenRegisters(
   for (const block of [...prepared.exits, ...prepared.tails]) {
     const tail = tails.get(block.id);
     for (const { register, value } of prepared.states.get(block.id)?.exit ?? []) {
+      if (!domain.has(register.root) || (tail && writesRegister(tail, register))) continue;
       context.checkpoint(1);
-      if (register.bank === 'flags' || (tail && writesRegister(tail, register))) continue;
       if (!holds(value, register.root, register.offset_bits)) add(written, register);
     }
   }

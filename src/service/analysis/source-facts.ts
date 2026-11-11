@@ -143,7 +143,7 @@ import { nativeLibraryTails } from './native-library-tails.js';
 import { objcSourceFacts } from './objc-messages.js';
 import { calleeReadsGuess, likelyArities } from './likely-arity.js';
 import { nativeVariadicInterface } from './native-variadic.js';
-import { nativeWrittenRegisters } from './native-written.js';
+import { nativeWrittenRegisters, writtenRegisterDomain } from './native-written.js';
 import { preservedCallOutputs } from '../../analysis/calls/preserved.js';
 import { likelyTypes } from './likely-types.js';
 import { namingAnnotations } from '../../project/annotations/naming.js';
@@ -2059,6 +2059,7 @@ function observeNativeUnit(
     : nativeWrittenRegisters(
         unit.ir,
         interfaces,
+        writtenRegisterDomain(input.components.abi),
         context,
         unit.interface_index,
         unit.analysis?.stack,

@@ -25,6 +25,8 @@ interface CellPlan {
   alias(value: Value, expression: Expression): void;
   /** Replace an instruction's register outputs in the source view. */
   outputs(node: Writer, bindings: readonly RegisterBinding[]): void;
+  /** Call outputs aliased to the cell before the call (`callee_preserved_register`). */
+  readonly preserved?: ReadonlySet<string>;
 }
 
 /** How one incoming edge writes every cell of a phi group at once. */
@@ -304,7 +306,22 @@ export function recombineSourceCells(
   }
   const jointSource = (group: CellGroup, pieces: readonly Value[]): EdgeSource | null => {
     const { bindings, width, exact } = group;
-    const carried = byCells.get(pieces.map(({ id }) => id).join(','));
+    // A call output its callee leaves unwritten is a bitcast alias of the cell
+    // before the call (`callee_preserved_register`): the same cell's bits.
+    const carried =
+      byCells.get(pieces.map(({ id }) => id).join(',')) ??
+      byCells.get(
+        pieces
+          .map((piece) => {
+            const expression = expressions.get(piece.id);
+            return expression?.kind === 'cast' &&
+              expression.op === 'bitcast' &&
+              plan.preserved?.has(piece.id)
+              ? expression.value.id
+              : piece.id;
+          })
+          .join(','),
+      );
     if (
       !exact &&
       carried &&
