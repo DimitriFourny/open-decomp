@@ -26,11 +26,14 @@ import { PELoader } from '../../src/loaders/pe/index.js';
 import { Arm64Lifter } from '../../src/lifters/arm64/index.js';
 import { DarwinArm64Abi } from '../../src/abi/darwin-arm64/index.js';
 import {
+  UNWINDER_ENTRY_REASONS,
   discoverFunctions,
   prepareDiscoveryIndex,
   type DiscoveryInput,
   type FunctionAssertion,
 } from '../../src/analysis/discovery/index.js';
+import { bindPltEntries } from '../../src/analysis/discovery/stubs.js';
+import { exceptionFacts } from '../../src/analysis/discovery/exceptions.js';
 
 function load(path: string, loader: Loader): LoadedImage {
   const bytes = readFileSync(path);
@@ -730,6 +733,446 @@ test('a final call to a declared noreturn callee ends flow before the next funct
   }
 });
 
+test('a call through a noreturn import slot, directly or through a thunk, ends flow', () => {
+  const le32 = (value: number): number[] => [
+    value & 0xff,
+    (value >> 8) & 0xff,
+    (value >> 16) & 0xff,
+    (value >>> 24) & 0xff,
+  ];
+  const slots = new Map([[0x1200n, ['evidence_import_binding']]]);
+  const ends = (
+    bytes: readonly number[],
+    noreturn_slots: ReadonlyMap<bigint, readonly string[]>,
+    next = 6,
+  ): boolean => {
+    // f at +0 ends in a call whose return address is g's entry at `next`.
+    const image = raw(bytes);
+    const result = discover(image, { assertions: [assertion(image, next)], noreturn_slots });
+    const caller = result.graphs.find((graph) => graph.function.entry.value === 0x1000n)!;
+    const kinds = caller.blocks.flatMap((block) => block.edges.map((edge) => edge.kind));
+    assert.deepEqual(kinds, [caller.function.boundary === 'conflicting' ? 'fallthrough' : 'trap']);
+    if (kinds[0] === 'trap') {
+      // The trap's proof chain reaches the import binding.
+      const proofs = new Map(result.evidence.map((item) => [item.id, item]));
+      const cites = (id: string): boolean =>
+        id === 'evidence_import_binding' || (proofs.get(id)?.derived_from ?? []).some(cites);
+      assert.ok(caller.blocks[0]!.edges[0]!.evidence_ids.some(cites));
+    }
+    return kinds[0] === 'trap';
+  };
+  // f: call qword [rip+0x1fa] (slot 0x1200); g: ret
+  const direct = [0xff, 0x15, ...le32(0x1fa), 0xc3];
+  assert.equal(ends(direct, slots), true);
+  assert.equal(ends(direct, new Map()), false);
+  // f: call thunk (+6); g: ret; thunk: [endbr64] jmp qword [rip+disp] (slot 0x1200)
+  const thunk = (endbr: boolean, disp: number): number[] => [
+    0xe8,
+    ...le32(1),
+    0xc3,
+    ...(endbr ? [0xf3, 0x0f, 0x1e, 0xfa] : []),
+    0xff,
+    0x25,
+    ...le32(disp),
+  ];
+  assert.equal(ends(thunk(false, 0x1200 - 0x100c), slots, 5), true);
+  assert.equal(ends(thunk(true, 0x1200 - 0x1010), slots, 5), true);
+  assert.equal(ends(thunk(false, 0x1200 - 0x100c), new Map(), 5), false);
+  // The thunk reads another slot, or the slot's value reaches the call through a register.
+  assert.equal(ends(thunk(false, 0x1208 - 0x100c), slots, 5), false);
+  // f: mov rax, qword [rip+0x1f3] (slot 0x1200); call rax; g: ret
+  const register = raw([0x48, 0x8b, 0x05, ...le32(0x1f3), 0xff, 0xd0, 0xc3]);
+  const viaRegister = discover(register, {
+    assertions: [assertion(register, 9)],
+    noreturn_slots: slots,
+  }).graphs.find((graph) => graph.function.entry.value === 0x1000n)!;
+  assert.equal(viaRegister.function.boundary, 'conflicting');
+});
+
+test('a root whose every path ends in a trap or a noreturn call never returns, and calls to it end flow', () => {
+  // f (+0): call die (+6); g (+5): ret; die (+6): BODY
+  const run = (body: readonly number[], format: 'pe' | 'elf' = 'pe') => {
+    const pe = raw([0xe8, 0x01, 0, 0, 0, 0xc3, ...body]);
+    const image: LoadedImage =
+      format === 'pe' ? pe : { ...pe, target: { ...pe.target, format, abi: 'sysv-amd64' } };
+    const result = discover(image, { assertions: [assertion(image, 5), assertion(image, 6)] });
+    const at = (offset: number) =>
+      result.graphs.find((graph) => graph.function.entry.value === 0x1000n + BigInt(offset))!;
+    return { result, f: at(0), g: at(5), die: at(6) };
+  };
+  // ud2: die never returns, so f's call ends its block and f never returns either.
+  const proven = run([0x0f, 0x0b]);
+  assert.ok(proven.die.function.noreturn);
+  assert.ok(proven.f.function.noreturn);
+  assert.equal(proven.g.function.noreturn, undefined);
+  assert.equal(proven.f.function.boundary, 'established');
+  assert.deepEqual(
+    proven.f.blocks.flatMap((block) => block.edges.map((edge) => edge.kind)),
+    ['trap'],
+  );
+  // f's proof cites die's root, proven by the same fixpoint.
+  const proofs = new Map(proven.result.evidence.map((item) => [item.id, item]));
+  assert.ok(
+    proven.f.function.noreturn!.some((id) =>
+      proofs
+        .get(id)
+        ?.derived_from.some((parent) => proven.die.function.evidence_ids.includes(parent)),
+    ),
+  );
+  // Windows `__fastfail` (`int 0x29`) never returns; on ELF the vector proves nothing.
+  assert.ok(run([0xcd, 0x29]).die.function.noreturn);
+  assert.equal(run([0xcd, 0x29], 'elf').die.function.noreturn, undefined);
+  // int3 (a debugger may continue), a path to ret, an unresolved indirect branch: no proof.
+  for (const body of [[0xcc], [0x74, 0x01, 0xc3, 0x0f, 0x0b], [0xff, 0xe0]]) {
+    const unproven = run(body);
+    assert.equal(unproven.die.function.noreturn, undefined, JSON.stringify(body));
+    assert.equal(unproven.f.function.noreturn, undefined);
+    assert.equal(unproven.f.function.boundary, 'conflicting');
+  }
+  // Code after a call to a proven root that nothing else reaches roots its own candidate.
+  // f (+0): call die (+11); h (+5): mov eax, 1; ret; die (+11): ud2
+  const hidden = raw([0xe8, 0x06, 0, 0, 0, 0xb8, 0x01, 0, 0, 0, 0xc3, 0x0f, 0x0b]);
+  const swept = discover(hidden, { assertions: [assertion(hidden, 11)] });
+  const h = swept.graphs.find((graph) => graph.function.entry.value === 0x1005n)!;
+  assert.equal(h.function.boundary, 'candidate');
+  assert.equal(h.instructions.length, 2);
+  assert.equal(swept.enumeration, 'complete');
+  assert.ok(
+    swept.graphs.find((graph) => graph.function.entry.value === 0x1000n)!.function.noreturn,
+  );
+  // Recursion: f (+0) calls itself last and g (+5) returns; f never returns, g does.
+  const recursive = raw([0xe8, 0xfb, 0xff, 0xff, 0xff, 0xc3]);
+  const self = discover(recursive, { assertions: [assertion(recursive, 5)] });
+  assert.ok(self.graphs.find((graph) => graph.function.entry.value === 0x1000n)!.function.noreturn);
+  assert.equal(
+    self.graphs.find((graph) => graph.function.entry.value === 0x1005n)!.function.noreturn,
+    undefined,
+  );
+  // Two roots that only jump to each other never return; one that may also return does.
+  const loop = raw([0xeb, 0x00, 0xeb, 0xfc]);
+  const cycle = discover(loop, { assertions: [assertion(loop, 2)] });
+  assert.ok(cycle.graphs.every((graph) => graph.function.noreturn));
+  const exit = raw([0xeb, 0x00, 0x74, 0xfc, 0xc3]);
+  const escapes = discover(exit, { assertions: [assertion(exit, 2)] });
+  assert.ok(escapes.graphs.every((graph) => graph.function.noreturn === undefined));
+  // A published proof ends the call in a selected-entry graph.
+  const image = raw([0xe8, 0x01, 0, 0, 0, 0xc3, 0xc3]);
+  const record = (offset: number, noreturn?: readonly string[]) => ({
+    id: `entity_${offset}`,
+    original_name: null,
+    display_name: null,
+    evidence_ids: [],
+    entry: address(image, offset),
+    ranges: [{ start: address(image, offset), size: 1n }],
+    boundary: 'established' as const,
+    signature: null,
+    analysis: 'complete' as const,
+    ...(noreturn ? { noreturn } : {}),
+  });
+  for (const noreturn of [undefined, ['evidence_published_proof']]) {
+    const selected = discover(image, {
+      selected_entry: address(image, 0),
+      functions: [record(5), record(6, noreturn)],
+    }).graphs[0]!;
+    assert.deepEqual(
+      selected.blocks.flatMap((block) => block.edges.map((edge) => edge.kind)),
+      [noreturn ? 'trap' : 'fallthrough'],
+    );
+  }
+});
+
+test('IBT `.plt.sec` entries bind at their endbr64; weak, aliased or misaligned slots do not', () => {
+  const le32 = (value: number): number[] => [
+    value & 0xff,
+    (value >> 8) & 0xff,
+    (value >> 16) & 0xff,
+    (value >>> 24) & 0xff,
+  ];
+  // endbr64; bnd jmp qword [rip+disp]; nop5 — at +0 (slot +0x30) and +0x10 (slot +0x38);
+  // then at +0x24 a bare jmp (slot +0x30) that is not 8-byte aligned.
+  const entry = (jmp: number, slot: number) => [
+    0xf3,
+    0x0f,
+    0x1e,
+    0xfa,
+    0xf2,
+    0xff,
+    0x25,
+    ...le32(slot - (jmp + 7)),
+    0x0f,
+    0x1f,
+    0x44,
+    0,
+    0,
+  ];
+  const bytes = [
+    ...entry(0x1004, 0x1030),
+    ...entry(0x1014, 0x1038),
+    0x90,
+    0x90,
+    0x90,
+    0x90,
+    0xff,
+    0x25,
+    ...le32(0x1030 - 0x102a),
+    0x90,
+    0x90,
+    ...Array<number>(16).fill(0),
+  ];
+  const base = raw(bytes);
+  const va = (value: bigint): Address => ({ image_id: base.id, space: 'va', value });
+  const section = {
+    id: 'section-plt-sec',
+    name: '.plt.sec',
+    segment_id: null,
+    kind: 'section' as const,
+    virtual_range: { start: va(0x1000n), size: 0x2cn },
+    file_range: null,
+    permissions: ['read', 'execute'] as ('read' | 'execute')[],
+    flags: 0n,
+    evidence_ids: ['evidence_section'],
+  };
+  const slot = (name: string, value: bigint, weak = false) => ({
+    id: `import-${name}`,
+    original_name: name,
+    display_name: name,
+    library: 'libc.so.6',
+    ordinal: null,
+    slot: va(value),
+    callable_entry: null,
+    delayed: false,
+    weak,
+    evidence_ids: [`evidence_${name}`],
+  });
+  const bind = (imports: LoadedImage['imports']) => {
+    const image: LoadedImage = {
+      ...base,
+      target: { ...base.target, format: 'elf', abi: 'sysv-amd64' },
+      sections: [section],
+      imports,
+    };
+    const decoder = new X86Decoder({ formatting: false });
+    try {
+      return bindPltEntries(image, decoder, 0, createOperationContext())
+        .imports.filter((item) => item.callable_entry !== null)
+        .map((item) => [item.original_name, item.callable_entry!.value]);
+    } finally {
+      decoder.dispose();
+    }
+  };
+  assert.deepEqual(bind([slot('exit', 0x1030n), slot('puts', 0x1038n)]), [
+    ['exit', 0x1000n],
+    ['puts', 0x1010n],
+  ]);
+  assert.deepEqual(bind([slot('exit', 0x1030n), slot('puts', 0x1038n, true)]), [['exit', 0x1000n]]);
+  assert.deepEqual(bind([slot('exit', 0x1030n), slot('abort', 0x1030n), slot('puts', 0x1038n)]), [
+    ['puts', 0x1010n],
+  ]);
+});
+
+test('a function an unwinder can re-enter at a landing pad is never proven noreturn', () => {
+  const le32 = (value: number): number[] => [
+    value & 0xff,
+    (value >> 8) & 0xff,
+    (value >> 16) & 0xff,
+    (value >>> 24) & 0xff,
+  ];
+  const call = (from: number, to: number) => [0xe8, ...le32(to - (from + 5))];
+  /** m (+0): call c; ret. c (+6): [nop when `inner`]; call t; BODY. t: ud2. The `.eh_frame` (a
+   * `zLR` CIE, both pointers pc-relative sdata4) has one FDE for c, with LSDA pointer `lsda` (0:
+   * null); `inner` starts that FDE (or PE record) after c's entry, at its call. */
+  const image = (
+    body: (at: number, t: number) => number[],
+    eh: 'lsda' | 'null-lsda' | 'none' | 'corrupt',
+    format: 'elf' | 'pe' = 'elf',
+    inner = false,
+    partial = false,
+  ) => {
+    const lead = inner ? 1 : 0,
+      start = 0x1006 + lead;
+    const bodyBytes = body(0x100b + lead, 0);
+    const t = 0x100b + lead + bodyBytes.length;
+    const code = [
+      ...call(0x1000, 0x1006),
+      0xc3,
+      ...(inner ? [0x90] : []),
+      ...call(start, t),
+      ...body(0x100b + lead, t),
+      0x0f,
+      0x0b,
+    ];
+    while (code.length % 8) code.push(0xcc);
+    const ehAt = 0x1000 + code.length;
+    const cieBody = [0, 0, 0, 0, 1, 0x7a, 0x4c, 0x52, 0, 1, 0x78, 0x10, 2, 0x1b, 0x1b];
+    const cie = [...le32(cieBody.length), ...cieBody];
+    const fdeAt = ehAt + cie.length;
+    const fdeBody = [
+      ...le32(fdeAt + 4 - ehAt),
+      ...le32(start - (fdeAt + 8)),
+      ...le32(t - start),
+      4,
+      ...le32(eh === 'null-lsda' ? 0 : 0x40),
+    ];
+    const frame =
+      eh === 'none'
+        ? [0, 0, 0, 0]
+        : eh === 'corrupt'
+          ? [
+              ...le32(cieBody.length),
+              0,
+              0,
+              0,
+              0,
+              9,
+              0x7a,
+              0x4c,
+              0x52,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+            ]
+          : [...cie, ...le32(fdeBody.length), ...fdeBody, 0, 0, 0, 0];
+    const base = raw([...code, ...frame]);
+    const va = (value: number): Address => ({
+      image_id: base.id,
+      space: 'va',
+      value: BigInt(value),
+    });
+    const section = {
+      id: 'section-eh-frame',
+      name: '.eh_frame',
+      segment_id: null,
+      kind: 'section' as const,
+      virtual_range: { start: va(ehAt), size: BigInt(frame.length) },
+      file_range: {
+        start: { image_id: base.id, space: 'file' as const, value: BigInt(ehAt - 0x1000) },
+        size: BigInt(frame.length),
+      },
+      permissions: ['read'] as 'read'[],
+      flags: 0n,
+      evidence_ids: [],
+    };
+    const result: LoadedImage =
+      format === 'elf'
+        ? {
+            ...base,
+            target: { ...base.target, format: 'elf', abi: 'sysv-amd64' },
+            sections: [section],
+          }
+        : {
+            ...base,
+            capabilities: partial
+              ? [
+                  {
+                    layer: 'format',
+                    feature: 'PE exception directory',
+                    status: 'partial',
+                    limitations: ['unread'],
+                  },
+                ]
+              : base.capabilities,
+            hints: [
+              {
+                kind: 'unwind',
+                range: { start: va(start), size: BigInt(t - start) },
+                encoding: 'PE_AMD64_UNWIND_INFO_V1',
+                record: { start: va(ehAt), size: 8n },
+                handler: eh === 'lsda' ? va(0x1000) : null,
+                evidence_ids: [],
+              },
+            ],
+          };
+    const found = discover(result, {
+      assertions: [assertion(result, 6), assertion(result, t - 0x1000)],
+    });
+    const at = (offset: number) =>
+      found.graphs.find((graph) => graph.function.entry.value === 0x1000n + BigInt(offset))!;
+    // A PE unwind record's begin address is itself a function start (a root).
+    const record =
+      found.graphs.find((graph) => graph.function.entry.value === BigInt(start)) ?? at(6);
+    return { m: at(0), c: at(6), t: at(t - 0x1000), record };
+  };
+  // c: call t; mov eax, 7; ret — the catch pad sits right after the call.
+  const pad = () => [0xb8, 7, 0, 0, 0, 0xc3];
+  for (const format of ['elf', 'pe'] as const) {
+    const caught = image(pad, 'lsda', format);
+    assert.ok(caught.t.function.noreturn, format);
+    assert.equal(caught.c.function.noreturn, undefined, format);
+    // The caller keeps its continuation: m's call falls through to its ret.
+    assert.deepEqual(
+      caught.m.blocks.flatMap((block) => block.edges.map((edge) => edge.kind)),
+      ['fallthrough', 'return'],
+      format,
+    );
+    assert.equal(caught.m.function.noreturn, undefined);
+    // c's own graph says its handlers are not decompiled.
+    assert.ok(caught.c.coverage.reasons.includes('exception handlers not decompiled'));
+    assert.ok(caught.c.diagnostics.some((item) => item.code === 'unavailable_semantics'));
+  }
+  // A record that starts after c's entry still covers the throwing call: the proof reads the
+  // unwind facts of every instruction on c's paths, not only of its entry.
+  for (const format of ['elf', 'pe'] as const) {
+    const inner = image(pad, 'lsda', format, true);
+    assert.ok(inner.t.function.noreturn, format);
+    assert.equal(inner.c.function.noreturn, undefined, format);
+    assert.equal(inner.m.function.noreturn, undefined, format);
+    assert.deepEqual(
+      inner.m.blocks.flatMap((block) => block.edges.map((edge) => edge.kind)),
+      ['fallthrough', 'return'],
+      format,
+    );
+    assert.ok(inner.record.coverage.reasons.includes('exception handlers not decompiled'), format);
+    const plain = image(pad, 'null-lsda', format, true);
+    assert.ok(plain.c.function.noreturn, format);
+  }
+  // A cleanup pad ending in a call that never returns (`_Unwind_Resume`) is not read: an LSDA
+  // alone makes c unprovable, the conservative verdict.
+  const cleanup = image((at, t) => call(at, t), 'lsda');
+  assert.equal(cleanup.c.function.noreturn, undefined);
+  // Without an LSDA (a C `abort()` wrapper, a null LSDA pointer or no FDE) c stays proven.
+  for (const eh of ['null-lsda', 'none'] as const) {
+    const plain = image(pad, eh);
+    assert.ok(plain.c.function.noreturn, eh);
+    assert.ok(plain.m.function.noreturn, eh);
+    assert.ok(!plain.c.coverage.reasons.includes('exception handlers not decompiled'));
+  }
+  // Unreadable unwind data: roots with a call are not proven, call-free ones still are.
+  const corrupt = image(pad, 'corrupt');
+  assert.equal(corrupt.c.function.noreturn, undefined);
+  assert.equal(corrupt.m.function.noreturn, undefined);
+  assert.ok(corrupt.t.function.noreturn);
+  // Their graphs say that handler code may be missing; a call-free one cannot be re-entered.
+  for (const graph of [corrupt.c, corrupt.m]) {
+    assert.ok(graph.coverage.reasons.includes('exception handlers unknown'));
+    assert.ok(graph.coverage.reasons.every((reason) => UNWINDER_ENTRY_REASONS.has(reason)));
+  }
+  assert.ok(!corrupt.t.coverage.reasons.includes('exception handlers unknown'));
+  // PE structured exception handlers resume after any faulting instruction: with an exception
+  // directory that was only partly read not even a call-free root is proven.
+  const seh = image(pad, 'null-lsda', 'pe', false, true);
+  assert.equal(seh.t.function.noreturn, undefined);
+  assert.equal(seh.c.function.noreturn, undefined);
+  assert.ok(seh.t.coverage.reasons.includes('exception handlers unknown'));
+  assert.ok(image(pad, 'null-lsda', 'pe').t.function.noreturn);
+});
+
+test('a setjmp-style call that returns twice keeps the path to its second return', () => {
+  // f (+0): call s; test eax, eax; jne +1; ret; ud2. s (+12, a root): ret. The second return of
+  // a setjmp is the same call continuation, so the path to f's ret keeps f unproven.
+  const image = raw([0xe8, 0x07, 0, 0, 0, 0x85, 0xc0, 0x75, 0x01, 0xc3, 0x0f, 0x0b, 0xc3]);
+  const result = discover(image, { assertions: [assertion(image, 12)] });
+  const f = result.graphs.find((graph) => graph.function.entry.value === 0x1000n)!;
+  assert.equal(f.function.noreturn, undefined);
+});
+
 test("selected discovery publishes every proof its diagnostics cite, including another root's seed proofs", () => {
   // A (entry, +0): jz +4 -> B (+4, asserted root). Conditional flow into a foreign
   // root is a boundary conflict whose diagnostic cites B's seed proof, not A's.
@@ -1327,4 +1770,133 @@ test('an ARM64 frame popped by post-index writeback before `b` is a tail jump', 
     arm64Image([...frame.slice(0, 7), 0xd503201f, ...frame.slice(8)], 0x10),
   );
   assert.deepEqual(promoted(unpopped), []);
+});
+
+test('exception facts: a named handler survives unread metadata, a compact entry is authoritative', () => {
+  const context = createOperationContext();
+  const facts = (image: LoadedImage, ...addresses: number[]) => {
+    const found = exceptionFacts(image, context);
+    return addresses.map((value) => found.at(BigInt(value), context));
+  };
+  const section = (image: LoadedImage, name: string, at: number, size: number) => ({
+    id: `section-${name}`,
+    name,
+    segment_id: null,
+    kind: 'section' as const,
+    virtual_range: {
+      start: { image_id: image.id, space: 'va' as const, value: BigInt(at) },
+      size: BigInt(size),
+    },
+    file_range: {
+      start: { image_id: image.id, space: 'file' as const, value: BigInt(at - 0x1000) },
+      size: BigInt(size),
+    },
+    permissions: ['read'] as 'read'[],
+    flags: 0n,
+    evidence_ids: [],
+  });
+  const unwind = (
+    image: LoadedImage,
+    start: number,
+    size: number,
+    encoding: string,
+    handler: number | null = null,
+  ) => ({
+    kind: 'unwind' as const,
+    range: {
+      start: { image_id: image.id, space: 'va' as const, value: BigInt(start) },
+      size: BigInt(size),
+    },
+    encoding,
+    record: {
+      start: { image_id: image.id, space: 'va' as const, value: 0x1000n },
+      size: 8n,
+    },
+    handler:
+      handler === null
+        ? null
+        : { image_id: image.id, space: 'va' as const, value: BigInt(handler) },
+    evidence_ids: [],
+  });
+  const warning = (message: string) => ({
+    code: 'unavailable_semantics' as const,
+    severity: 'warning' as const,
+    layer: 'format' as const,
+    message,
+    evidence_ids: [],
+  });
+  const bytes = new Array<number>(0x80).fill(0);
+
+  // Mach-O arm64: frame (mode 4), frame with an LSDA whose personality slot was not resolved,
+  // frame with a personality index only, DWARF (mode 3), then an address no entry covers.
+  const macho = raw(bytes, 'arm64');
+  const entries = [
+    unwind(macho, 0x1000, 0x10, 'compact-unwind-arm64:04000001'),
+    unwind(macho, 0x1010, 0x10, 'compact-unwind-arm64:44000001'),
+    unwind(macho, 0x1020, 0x10, 'compact-unwind-arm64:14000001'),
+    unwind(macho, 0x1030, 0x10, 'compact-unwind-arm64:03000040'),
+    unwind(macho, 0x1040, 0x10, 'compact-unwind-arm64:04000001', 0x1000),
+  ];
+  assert.deepEqual(
+    facts({ ...macho, hints: entries }, 0x1004, 0x1014, 0x1024, 0x1034, 0x1044, 0x1054),
+    ['none', 'handler', 'handler', 'unknown', 'handler', 'none'],
+  );
+  // With an `__eh_frame` section only an address no compact entry covers is looked up there.
+  const framed: LoadedImage = {
+    ...macho,
+    hints: entries,
+    sections: [section(macho, '__eh_frame', 0x1060, 0x20)],
+    diagnostics: [
+      warning('DWARF CFI records retained; PC ranges require DWARF augmentation decoding'),
+    ] as LoadedImage['diagnostics'],
+  };
+  assert.deepEqual(facts(framed, 0x1004, 0x1014, 0x1034, 0x1054), [
+    'none',
+    'handler',
+    'unknown',
+    'unknown',
+  ]);
+  // Compact unwind the loader could not read: nothing is known except the handlers it named.
+  const dropped: LoadedImage = {
+    ...macho,
+    hints: entries,
+    diagnostics: [
+      warning('Compact unwind second-level page is malformed'),
+    ] as LoadedImage['diagnostics'],
+  };
+  assert.deepEqual(facts(dropped, 0x1004, 0x1014, 0x1054), ['unknown', 'handler', 'unknown']);
+
+  // PE: a partial exception directory keeps the handlers of the records that were read.
+  const pe = raw(bytes);
+  const partial: LoadedImage = {
+    ...pe,
+    hints: [
+      unwind(pe, 0x1000, 0x10, 'PE_AMD64_UNWIND_INFO_V1'),
+      unwind(pe, 0x1010, 0x10, 'PE_AMD64_UNWIND_INFO_V1', 0x1000),
+    ],
+    capabilities: [
+      { layer: 'format', feature: 'PE exception directory', status: 'partial', limitations: ['x'] },
+    ] as LoadedImage['capabilities'],
+  };
+  assert.deepEqual(facts(partial, 0x1004, 0x1014, 0x1024), ['unknown', 'handler', 'unknown']);
+  assert.deepEqual(facts({ ...partial, capabilities: [] }, 0x1004, 0x1014, 0x1024), [
+    'none',
+    'handler',
+    'none',
+  ]);
+
+  // ELF: only zero padding may follow the `.eh_frame` terminator (`.eh_frame_hdr` can index
+  // records placed after one).
+  const elf = (tail: number[]) => {
+    const frame = [0, 0, 0, 0, ...tail];
+    const base = raw([...new Array<number>(0x40).fill(0x90), ...frame]);
+    return {
+      ...base,
+      target: { ...base.target, format: 'elf', abi: 'sysv-amd64' },
+      sections: [section(base, '.eh_frame', 0x1040, frame.length)],
+    } as LoadedImage;
+  };
+  assert.deepEqual(facts(elf([]), 0x1004), ['none']);
+  assert.deepEqual(facts(elf([0, 0, 0, 0]), 0x1004), ['none']);
+  assert.deepEqual(facts(elf([0x10, 0, 0, 0, 0, 0, 0, 0]), 0x1004), ['unknown']);
 });
