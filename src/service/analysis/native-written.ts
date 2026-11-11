@@ -214,7 +214,8 @@ export function nativeWrittenRegisters(
       const held = snapshot.memory.get(address.offset + byte);
       if (
         owner.get(address.offset + byte) !== store.id ||
-        !held?.fact.value_ids.includes(store.value.id) ||
+        held?.fact.value_ids.length !== 1 ||
+        held.fact.value_ids[0] !== store.value.id ||
         held.value_offset_bits !== Number(byte) * 8
       )
         return undefined;
