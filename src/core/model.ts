@@ -338,6 +338,9 @@ export const functionSchema = z.strictObject({
   boundary: z.enum(['candidate', 'established', 'conflicting']),
   /** Present only for a recognized import stub/thunk/PLT entry; its name is the import's. */
   kind: z.literal('import_stub').optional(),
+  /** Present only when discovery proved that no path from the entry returns: the evidence of
+   * that proof (every path ends in a trap or a call that does not return). */
+  noreturn: evidenceRefsSchema.min(1).optional(),
   signature: signatureSchema.nullable(),
   analysis: z.enum(['not_analyzed', 'partial', 'complete', 'unsupported']),
 });

@@ -46,6 +46,7 @@ __register_atfork|i|prepare:p,parent:p,child:p,dso_handle:*v||0
 __sigsetjmp|i|env:*v,savemask:i||0
 __snprintf_chk|i|s:*c,maxlen:z,flag:i,slen:z,format:^c|vf4|0
 __sprintf_chk|i|s:*c,flag:i,slen:z,format:^c|vf3|0
+__stack_chk_fail|v||n|0
 __stpcpy_chk|*c|dest:*c,src:^c,destlen:z||0
 __stpncpy_chk|*c|dest:*c,src:^c,len:z,destlen:z||0
 __strcat_chk|*c|dest:*c,src:^c,destlen:z||0

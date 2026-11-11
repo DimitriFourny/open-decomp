@@ -141,7 +141,7 @@ do {
 
 `findSymbols(options?, callOptions?)`, `findStrings(options?, callOptions?)` and `getReferences(options, callOptions?)` are the same pattern for `symbols_find`, `strings_find` and `xrefs_get` (the last takes the `target`, `direction` and `kinds` fields); `getFunction(functionId, options?, callOptions?)` returns `function_get` metadata, compact/full disassembly or CFG pages. `selectFunction(selector, options?)` resolves a selector to one `BinaryFunction` exactly as `decompile()` does, and `decompileFunction(functionId, options?)` decompiles a function ID already obtained from `findFunctions` or `selectFunction` without repeating selector resolution. `completeDiscovery(budget?, callOptions?)` continues whole-image function discovery step by step (`functions_discover`, each step under `budget`) until a step makes no progress and returns whether any step progressed; each progressing step commits one project revision and updates `session.revision`. The CLI `export` command is built from these methods.
 
-A recognized import stub/thunk/PLT entry has `kind: "import_stub"` (omitted otherwise) and the import's name; `decompile({ name })` selects it by that name.
+A recognized import stub/thunk/PLT entry has `kind: "import_stub"` (omitted otherwise) and the import's name; `decompile({ name })` selects it by that name. A function that discovery proved never to return (every path from its entry ends in a trap or a call that does not return) has `noreturn` with the evidence IDs of that proof (omitted otherwise).
 
 ## Image structure types
 

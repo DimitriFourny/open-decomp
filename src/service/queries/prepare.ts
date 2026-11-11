@@ -15,9 +15,16 @@ import { X86Decoder } from '../../decoders/x86_64/index.js';
 import { discoverFunctions } from '../../analysis/discovery/index.js';
 import { buildStringIndex } from '../../analysis/strings/index.js';
 import { buildReferenceIndex } from '../../analysis/references/index.js';
-import { classifyImportStubs, type ImportStub } from '../../analysis/discovery/stubs.js';
+import {
+  bindPltEntries,
+  classifyImportStubs,
+  type ImportStub,
+} from '../../analysis/discovery/stubs.js';
 import { recoverRuntimeMetadata } from '../../metadata/runtime/index.js';
-import { libraryNoreturnCalls } from '../../metadata/library-contracts/index.js';
+import {
+  libraryNoreturnCalls,
+  libraryNoreturnSlots,
+} from '../../metadata/library-contracts/index.js';
 import { decorateImageNames } from '../../metadata/symbols/index.js';
 import { targetAbi } from '../analysis/versions.js';
 
@@ -34,7 +41,7 @@ export async function prepareQueryImport(
     { ...image, symbols: [...image.symbols, ...runtime.symbols] },
     context,
   );
-  const decorated = {
+  const named = {
     ...image,
     symbols: names.symbols,
     imports: names.imports,
@@ -42,7 +49,7 @@ export async function prepareQueryImport(
     evidence: [...image.evidence, ...runtime.evidence],
     diagnostics: [...image.diagnostics, ...runtime.diagnostics, ...names.diagnostics],
   };
-  if (decorated.diagnostics.length > 1000)
+  if (named.diagnostics.length > 1000)
     throw new OperationError({
       code: 'resource_limit',
       severity: 'error',
@@ -73,14 +80,23 @@ export async function prepareQueryImport(
     image.target.architecture === 'arm64'
       ? new Arm64Decoder()
       : new X86Decoder({ formatting: false });
-  let discovery;
+  let decorated: LoadedImage, discovery;
   try {
+    // ELF PLT entries become callable import entries before discovery: they are then roots
+    // named after their import, and a call to a noreturn import ends its block.
+    const plt = bindPltEntries(named, decoder, revision, context);
+    decorated = {
+      ...named,
+      imports: plt.imports,
+      evidence: [...named.evidence, ...plt.evidence],
+    };
     discovery = discoverFunctions(
       {
         image: decorated,
         decoder,
         revision,
         noreturn_calls: libraryNoreturnCalls(decorated, context),
+        noreturn_slots: libraryNoreturnSlots(decorated, context),
         preserved_registers: targetAbi(image.target)?.preserved ?? [],
       },
       context,
@@ -121,7 +137,7 @@ export async function prepareQueryImport(
     publish(tx) {
       for (const item of evidence.values()) tx.putEvidence(item);
       for (const item of names.symbols) tx.putRecord(image.id, 'symbol', item);
-      for (const item of names.imports) tx.putRecord(image.id, 'import', item);
+      for (const item of decorated.imports) tx.putRecord(image.id, 'import', item);
       for (const item of names.exports) tx.putRecord(image.id, 'export', item);
       publishFunctions(tx, image.id, discovery.graphs, labels, stubs);
       for (const item of references.strings?.strings ?? strings.strings)
@@ -221,6 +237,7 @@ export function prepareDiscoveryStep(
         functions: input.functions,
         resume: input.frontier,
         noreturn_calls: libraryNoreturnCalls(image, context),
+        noreturn_slots: libraryNoreturnSlots(image, context),
         preserved_registers: targetAbi(image.target)?.preserved ?? [],
       },
       context,
@@ -250,6 +267,7 @@ export function prepareDiscoveryStep(
   const cited = [
     ...discovery.graphs.flatMap((graph) => [
       ...graph.function.evidence_ids,
+      ...(graph.function.noreturn ?? []),
       ...graph.diagnostics.flatMap((diagnostic) => diagnostic.evidence_ids),
       ...graph.instructions.flatMap((instruction) => [
         ...instruction.evidence_ids,
