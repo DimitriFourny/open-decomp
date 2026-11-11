@@ -14,6 +14,7 @@ import { abiObservableRegisterMasks } from '../../analysis/ssa/observable-masks.
 import { simplifySSA } from '../../analysis/values/index.js';
 import {
   recoverTypes,
+  typeRecoveryFailure,
   type SuppliedTypeRecord,
   type TypeRecoveryResult,
 } from '../../analysis/types/index.js';
@@ -480,9 +481,7 @@ export function prepareNativeUnit(
       contracts: [...libraryContracts, ...declarations.contracts],
       resolutions: calls.resolutions,
     });
-    const failure = types.diagnostics.find(
-      (diagnostic) => diagnostic.code === 'cancelled' || diagnostic.code === 'resource_limit',
-    );
+    const failure = typeRecoveryFailure(types);
     if (failure) throw new OperationError(failure);
     const active = nativeAnnotations(input, ir, types, calls, local);
     if (active.annotations.length || active.types.length !== input.native_types.length) {
@@ -500,9 +499,7 @@ export function prepareNativeUnit(
         contracts: [...libraryContracts, ...active.declarations.contracts],
         resolutions: calls.resolutions,
       });
-      const failure = types.diagnostics.find(
-        (item) => item.code === 'cancelled' || item.code === 'resource_limit',
-      );
+      const failure = typeRecoveryFailure(types);
       if (failure) throw new OperationError(failure);
     }
     if (types.state !== 'complete')

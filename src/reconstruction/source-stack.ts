@@ -806,30 +806,91 @@ export function planSourceStack(
     escapeFloors = new Map<bigint, boolean>();
   // Known frame offsets of every address a tainted value is derived from (cell
   // halves, indexed/phi'd pointers, pointers spilled to the frame and reloaded),
-  // or null when some tainted leaf has no known origin.
-  const baseOffsets = (start: Value): bigint[] | null => {
-    const bases = new Set<bigint>(),
-      seen = new Set<string>(),
-      pending = [start];
-    while (pending.length) {
-      context.checkpoint(1);
-      const value = pending.pop()!;
-      if (seen.has(value.id) || !tainted.has(value.id)) continue;
-      seen.add(value.id);
+  // or null when some tainted leaf has no known origin. Solved once per strongly
+  // connected component of the derivation graph and memoized: every exposure of a
+  // large body walked the same graph again (`sqlite3WhereBegin`: 10M work of 40M).
+  const solvedBases = new Map<string, ReadonlySet<bigint> | null>();
+  const solveBases = (start: Value): void => {
+    const index = new Map<string, number>(),
+      low = new Map<string, number>(),
+      own = new Map<string, ReadonlySet<bigint> | null>(),
+      next = new Map<string, readonly Value[]>(),
+      stack: Value[] = [],
+      onStack = new Set<string>(),
+      frames: { value: Value; cursor: number }[] = [];
+    const enter = (value: Value): void => {
+      index.set(value.id, index.size);
+      low.set(value.id, index.get(value.id)!);
+      stack.push(value);
+      onStack.add(value.id);
+      frames.push({ value, cursor: 0 });
       const offset = addresses.get(value.id);
       if (offset !== undefined) {
-        bases.add(offset);
-        continue;
+        own.set(value.id, new Set([offset]));
+        next.set(value.id, []);
+        return;
       }
       const expression = expressions.get(value.id);
-      if (expression) pending.push(...expressionOperands(expression));
-      else {
-        const sources = incoming.get(value.id) ?? memoryDependencies.get(value.id);
-        if (!sources?.length) return null;
-        pending.push(...sources);
+      const sources = expression
+        ? expressionOperands(expression)
+        : (incoming.get(value.id) ?? memoryDependencies.get(value.id));
+      own.set(value.id, expression || sources?.length ? new Set() : null);
+      next.set(
+        value.id,
+        (sources ?? []).filter((source) => tainted.has(source.id)),
+      );
+    };
+    enter(start);
+    while (frames.length) {
+      context.checkpoint(1);
+      const frame = frames.at(-1)!,
+        id = frame.value.id,
+        successors = next.get(id)!;
+      if (frame.cursor < successors.length) {
+        const successor = successors[frame.cursor++]!;
+        if (solvedBases.has(successor.id)) continue;
+        if (!index.has(successor.id)) enter(successor);
+        else if (onStack.has(successor.id))
+          low.set(id, Math.min(low.get(id)!, index.get(successor.id)!));
+        continue;
       }
+      frames.pop();
+      const parent = frames.at(-1);
+      if (parent) low.set(parent.value.id, Math.min(low.get(parent.value.id)!, low.get(id)!));
+      if (low.get(id) !== index.get(id)) continue;
+      // A component: its members share one result, the union of their own bases
+      // and of every solved component they reach (null absorbs).
+      const members: Value[] = [];
+      let member: Value;
+      do {
+        member = stack.pop()!;
+        onStack.delete(member.id);
+        members.push(member);
+      } while (member.id !== id);
+      const inside = new Set(members.map((item) => item.id));
+      let bases: Set<bigint> | null = new Set();
+      for (const item of members) {
+        const parts = [
+          own.get(item.id)!,
+          ...next
+            .get(item.id)!
+            .filter((successor) => !inside.has(successor.id))
+            .map((successor) => solvedBases.get(successor.id)!),
+        ];
+        for (const part of parts) {
+          context.checkpoint(1 + (part?.size ?? 0));
+          if (part === null) bases = null;
+          else if (bases) for (const offset of part) bases.add(offset);
+        }
+      }
+      for (const item of members) solvedBases.set(item.id, bases);
     }
-    return [...bases];
+  };
+  const baseOffsets = (start: Value): bigint[] | null => {
+    if (!tainted.has(start.id)) return [];
+    if (!solvedBases.has(start.id)) solveBases(start);
+    const bases = solvedBases.get(start.id)!;
+    return bases && [...bases];
   };
   // Number of low bits that can be nonzero; fewer than the width means the
   // value is a nonnegative two's-complement addend.

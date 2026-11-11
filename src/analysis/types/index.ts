@@ -106,6 +106,22 @@ function libraryWithheld(options: TypeRecoveryOptions): boolean {
  * one conflicting association. On budget/cancellation failure no partial source
  * conclusions are published. Input SSA and metadata are never mutated.
  */
+/** Proofs one type record cites (the wire bound of a citation list). */
+const TYPE_RECORD_CITATIONS = 1000;
+
+/** The diagnostic that makes a type recovery unusable: a cancellation or a limit
+ * that cut the pass (its result is then partial). A complete recovery may still
+ * report a capacity of the body it worked around (a generated type citing only its
+ * first observations). */
+export function typeRecoveryFailure(result: {
+  readonly state: TypeRecoveryResult['state'];
+  readonly diagnostics: readonly Diagnostic[];
+}): Diagnostic | undefined {
+  return result.state === 'partial'
+    ? result.diagnostics.find((item) => item.code === 'cancelled' || item.code === 'resource_limit')
+    : undefined;
+}
+
 export function recoverTypes(
   input: SSAForm,
   abi: AbiProfile,
@@ -306,14 +322,28 @@ export function recoverTypes(
           declaredFieldTypes.set(field.id, alternatives);
         }
     };
+    // A generated record (a machine type such as `uint64_t`) cites the observations it was
+    // generated for, as support. Past the 1,000 citations a record holds it keeps those it
+    // has, and the capacity is reported once: the record is the same with any of them, and
+    // merging further citations into a full list cost about 1,000 work per use.
+    const fullCitations = new Set<string>();
     const generated = (definition: RecoveredType, proof: readonly string[]): string => {
       const type_id = id('type', typeKey(definition));
       const existing = records.get(type_id)?.[0];
-      if (existing) {
+      if (existing && fullCitations.has(type_id)) budget.charge();
+      else if (existing) {
         const merged = [...new Set([...existing.evidence_ids, ...proof])].sort();
         budget.charge(existing.evidence_ids.length + proof.length);
-        if (merged.length > 1000) budget.charge(budget.limit + 1);
-        records.set(type_id, [{ ...existing, evidence_ids: merged }]);
+        if (merged.length > TYPE_RECORD_CITATIONS) {
+          fullCitations.add(type_id);
+          diagnostics.push({
+            code: 'resource_limit',
+            severity: 'warning',
+            message: `A generated ${definition.kind} type is observed by more than ${TYPE_RECORD_CITATIONS} proofs; it cites the first ${existing.evidence_ids.length}`,
+            entity_id: type_id,
+            evidence_ids: [],
+          });
+        } else records.set(type_id, [{ ...existing, evidence_ids: merged }]);
       } else
         addType({
           id: type_id,
@@ -1215,6 +1245,25 @@ export function recoverTypes(
     for (const block of input.blocks)
       if (block.terminator.kind === 'return')
         for (const value of block.terminator.values) escapes.add(affine(value).base);
+    // A view whose observations together are more proofs than one record cites stays
+    // unshaped: its accesses keep their own field types, and no other shape points to it.
+    // A capacity of this body, reported; it no longer fails the recovery.
+    for (const [key, group] of groups) {
+      const proofs = new Set<string>();
+      for (const field of group.fields.values()) {
+        budget.charge(field.evidence_ids.length);
+        for (const proof of field.evidence_ids) proofs.add(proof);
+      }
+      if (proofs.size <= TYPE_RECORD_CITATIONS) continue;
+      groups.delete(key);
+      diagnostics.push({
+        code: 'resource_limit',
+        severity: 'warning',
+        message: `The memory view ${group.base.kind === 'stack' ? 'of the stack frame' : 'through one base value'} is observed by ${proofs.size} proofs, more than one shape cites (${TYPE_RECORD_CITATIONS}); it is left unshaped`,
+        ...(group.base.kind === 'value' ? { entity_id: group.base.value_id } : {}),
+        evidence_ids: [],
+      });
+    }
     const shapes: MemoryShape[] = [];
     for (const [key, group] of groups) {
       const built = buildMemoryShape(

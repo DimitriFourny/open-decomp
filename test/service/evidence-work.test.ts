@@ -12,6 +12,7 @@ import { integer } from '../../src/ir/index.js';
 import type { Expression, Value } from '../../src/ir/index.js';
 import {
   boundedEvidence,
+  boundedSubjects,
   emissionEvidenceReferences,
   evidenceReferences,
 } from '../../src/service/analysis/catalog.js';
@@ -234,4 +235,91 @@ test('diagnostics whose proofs exceed the catalog bound are published without ci
   assert.equal(bounded.emission, true);
   assert.equal(bounded.omitted, 4000);
   assert.deepEqual(boundedEvidence({ ...input, context: createOperationContext() }), bounded);
+});
+
+test('proofs past the catalog byte bound are omitted and counted, not failed', () => {
+  const proof = (name: string, derived_from: string[] = []): Evidence => ({
+    id: `evidence_${fingerprint(name)}`,
+    origin: { kind: 'analysis', analyzer: 'open-decomp/test', version: '1', rule: 'byte bound' },
+    claim: name,
+    derived_from,
+    conflicts_with: [],
+    revision: 1,
+  });
+  // Few proofs, each deriving from 900 shared fields: under 10,000 proofs, far over 8 MiB.
+  const fields = Array.from({ length: 900 }, (_, index) => proof(`field-${index}`));
+  const parents = fields.map((item) => item.id);
+  const transfers = Array.from({ length: 3000 }, (_, index) => proof(`transfer-${index}`, parents));
+  const signature = proof('signature');
+  const types = Array.from({ length: 3 }, (_, index) => ({
+    id: entityIdentity(slice, 'type', `byte-bounded-${index}`),
+    definition: { kind: 'integer' as const, bits: 32, signed: false },
+    source: 'analysis' as const,
+    status: 'established' as const,
+    evidence_ids: transfers.slice(index * 1000, (index + 1) * 1000).map((item) => item.id),
+  }));
+  const input = {
+    store: { readEvidence: (): Evidence[] => [] },
+    revision: 1,
+    available: [signature, ...fields, ...transfers],
+    context: createOperationContext(),
+    types,
+    optional: [],
+    required: [{ evidence_ids: [signature.id] }],
+    emission: { evidence: [] },
+  };
+  const bounded = boundedEvidence(input);
+  const published = new Map(bounded.evidence.map((item) => [item.id, item]));
+  assert.ok(published.has(signature.id));
+  let bytes = 0;
+  for (const item of bounded.evidence)
+    bytes += JSON.stringify(item, (_key, value: unknown) =>
+      typeof value === 'bigint' ? value.toString() : value,
+    ).length;
+  assert.ok(bytes <= 8 * 1024 * 1024, `${bytes} bytes published`);
+  for (const item of bounded.evidence)
+    for (const parent of item.derived_from) assert.ok(published.has(parent));
+  const kept = bounded.types.reduce((count, record) => count + record.evidence_ids.length, 0);
+  assert.ok(kept > 0 && kept < 3000);
+  assert.equal(bounded.omitted, 3000 - kept);
+  for (const record of bounded.types)
+    for (const id of record.evidence_ids) assert.ok(published.has(id));
+  assert.deepEqual(boundedEvidence({ ...input, context: createOperationContext() }), bounded);
+});
+
+test('value subjects past the catalog subject bound are omitted and counted; others stay', () => {
+  const subject = (kind: 'value' | 'call' | 'function', index: number) => ({
+    id: entityIdentity(slice, kind, `subject-${index}`),
+    kind,
+    image_id: image,
+    slice_id: slice,
+    abi: 'sysv-amd64' as const,
+  });
+  const small = [subject('function', 0), subject('value', 1), subject('call', 2)];
+  assert.deepEqual(boundedSubjects(small, createOperationContext()), {
+    subjects: small,
+    omitted: 0,
+  });
+  // 30,000 values (with calls among them): past the 3 MiB the stored form allows.
+  const many = Array.from({ length: 30_000 }, (_, index) =>
+    subject(index % 100 === 99 ? 'call' : 'value', index),
+  );
+  const bounded = boundedSubjects(many, createOperationContext());
+  assert.ok(bounded.omitted > 0);
+  assert.equal(bounded.subjects.length + bounded.omitted, many.length);
+  // Every call stays; the kept values are a prefix of the values, in order.
+  const calls = many.filter((item) => item.kind === 'call');
+  assert.deepEqual(
+    bounded.subjects.filter((item) => item.kind === 'call'),
+    calls,
+  );
+  const values = many.filter((item) => item.kind === 'value');
+  const kept = bounded.subjects.filter((item) => item.kind === 'value');
+  assert.deepEqual(kept, values.slice(0, kept.length));
+  assert.equal(values.length - kept.length, bounded.omitted);
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(bounded.subjects)) <= 3 * 1024 * 1024,
+    'the kept subjects fit the bound in their stored form',
+  );
+  assert.deepEqual(boundedSubjects(many, createOperationContext()), bounded);
 });

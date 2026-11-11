@@ -152,9 +152,11 @@ export const localValidationSchema = z.strictObject({
  * the records known to be dropped, `null` when the bound hit before they were counted).
  * `output_limit`: a size bound of the emission or its stored artifact; `budget`: the
  * request's work went to the text render first. `evidence` counts proof references
- * (type and emission citations) left out of the published proof catalog. */
+ * (type and emission citations) left out of the published proof catalog; `subjects` counts
+ * SSA value subjects left out of the published annotation catalog (those values cannot be
+ * annotated by their entity id). */
 export const emissionOmissionSchema = z.strictObject({
-  kind: z.enum(['mappings', 'inferences', 'requirements', 'evidence']),
+  kind: z.enum(['mappings', 'inferences', 'requirements', 'evidence', 'subjects']),
   reason: z.enum(['output_limit', 'budget']),
   omitted: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).nullable(),
 });
@@ -177,7 +179,7 @@ export const emissionSchema = z
     local_validation: z.array(localValidationSchema).max(1000).optional(),
     inferences: z.array(inferenceSchema).max(10000).optional(),
     requirements: z.array(requirementSchema).max(1000).optional(),
-    omitted: z.array(emissionOmissionSchema).max(4).optional(),
+    omitted: z.array(emissionOmissionSchema).max(5).optional(),
     /** `options.structures: "external"`: the C declarations the text refers to by name (a
      * `typedef struct N N;` or the partial body of `struct N`), for the caller to keep
      * once per image. Absent when the text carries them (the default) or none are used. */
