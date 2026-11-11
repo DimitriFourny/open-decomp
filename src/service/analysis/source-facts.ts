@@ -144,7 +144,7 @@ import { objcSourceFacts } from './objc-messages.js';
 import { calleeReadsGuess, likelyArities } from './likely-arity.js';
 import { nativeVariadicInterface } from './native-variadic.js';
 import { nativeWrittenRegisters, writtenRegisterDomain } from './native-written.js';
-import { preservedCallOutputs } from '../../analysis/calls/preserved.js';
+import { preservedCallOutputs, writesRegister } from '../../analysis/calls/preserved.js';
 import { likelyTypes } from './likely-types.js';
 import { namingAnnotations } from '../../project/annotations/naming.js';
 
@@ -2064,7 +2064,41 @@ function observeNativeUnit(
         unit.interface_index,
         unit.analysis?.stack,
       );
-  if (written) observed = { ...observed, written_registers: written };
+  if (written) {
+    // A result register the body leaves holding its entry value on every returning
+    // path (a push/pop restore, as Win64 stack probes do with rax) is the caller's
+    // own value, not a result.
+    const domain = writtenRegisterDomain(input.components.abi);
+    const kept = observed.returns.flatMap((register, index) =>
+      !domain.has(register.root) || writesRegister(written, register) ? [index] : [],
+    );
+    observed = {
+      ...observed,
+      written_registers: written,
+      ...(kept.length === observed.returns.length
+        ? {}
+        : {
+            returns: kept.map((index) => observed.returns[index]!),
+            ...(observed.return_types
+              ? { return_types: kept.flatMap((index) => observed.return_types?.[index] ?? []) }
+              : {}),
+            ...(observed.written_result
+              ? {
+                  written_result: {
+                    registers: observed.written_result.registers.filter(
+                      (register) => !domain.has(register.root) || writesRegister(written, register),
+                    ),
+                    types: observed.written_result.types.filter(
+                      (_, index) =>
+                        !domain.has(observed.written_result!.registers[index]!.root) ||
+                        writesRegister(written, observed.written_result!.registers[index]!),
+                    ),
+                  },
+                }
+              : {}),
+          }),
+    };
+  }
   if (unit.budget_truncated) {
     const { argument_list_closure: _closure, ...truncated } = observed;
     observed = {
