@@ -976,20 +976,25 @@ test('a function an unwinder can re-enter at a landing pad is never proven noret
     (value >>> 24) & 0xff,
   ];
   const call = (from: number, to: number) => [0xe8, ...le32(to - (from + 5))];
-  /** m (+0): call c; ret. c (+6): call t; BODY. t: ud2. The `.eh_frame` (a `zLR` CIE, both
-   * pointers pc-relative sdata4) has one FDE for c, with LSDA pointer `lsda` (0: null). */
+  /** m (+0): call c; ret. c (+6): [nop when `inner`]; call t; BODY. t: ud2. The `.eh_frame` (a
+   * `zLR` CIE, both pointers pc-relative sdata4) has one FDE for c, with LSDA pointer `lsda` (0:
+   * null); `inner` starts that FDE (or PE record) after c's entry, at its call. */
   const image = (
     body: (at: number, t: number) => number[],
     eh: 'lsda' | 'null-lsda' | 'none' | 'corrupt',
     format: 'elf' | 'pe' = 'elf',
+    inner = false,
   ) => {
-    const bodyBytes = body(0x100b, 0);
-    const t = 0x100b + bodyBytes.length;
+    const lead = inner ? 1 : 0,
+      start = 0x1006 + lead;
+    const bodyBytes = body(0x100b + lead, 0);
+    const t = 0x100b + lead + bodyBytes.length;
     const code = [
       ...call(0x1000, 0x1006),
       0xc3,
-      ...call(0x1006, t),
-      ...body(0x100b, t),
+      ...(inner ? [0x90] : []),
+      ...call(start, t),
+      ...body(0x100b + lead, t),
       0x0f,
       0x0b,
     ];
@@ -1000,8 +1005,8 @@ test('a function an unwinder can re-enter at a landing pad is never proven noret
     const fdeAt = ehAt + cie.length;
     const fdeBody = [
       ...le32(fdeAt + 4 - ehAt),
-      ...le32(0x1006 - (fdeAt + 8)),
-      ...le32(t - 0x1006),
+      ...le32(start - (fdeAt + 8)),
+      ...le32(t - start),
       4,
       ...le32(eh === 'null-lsda' ? 0 : 0x40),
     ];
@@ -1064,7 +1069,7 @@ test('a function an unwinder can re-enter at a landing pad is never proven noret
             hints: [
               {
                 kind: 'unwind',
-                range: { start: va(0x1006), size: BigInt(t - 0x1006) },
+                range: { start: va(start), size: BigInt(t - start) },
                 encoding: 'PE_AMD64_UNWIND_INFO_V1',
                 record: { start: va(ehAt), size: 8n },
                 handler: eh === 'lsda' ? va(0x1000) : null,
@@ -1077,7 +1082,10 @@ test('a function an unwinder can re-enter at a landing pad is never proven noret
     });
     const at = (offset: number) =>
       found.graphs.find((graph) => graph.function.entry.value === 0x1000n + BigInt(offset))!;
-    return { m: at(0), c: at(6), t: at(t - 0x1000) };
+    // A PE unwind record's begin address is itself a function start (a root).
+    const record =
+      found.graphs.find((graph) => graph.function.entry.value === BigInt(start)) ?? at(6);
+    return { m: at(0), c: at(6), t: at(t - 0x1000), record };
   };
   // c: call t; mov eax, 7; ret — the catch pad sits right after the call.
   const pad = () => [0xb8, 7, 0, 0, 0, 0xc3];
@@ -1095,6 +1103,25 @@ test('a function an unwinder can re-enter at a landing pad is never proven noret
     // c's own graph says its handlers are not decompiled.
     assert.ok(caught.c.coverage.reasons.includes('exception handlers not decompiled'));
     assert.ok(caught.c.diagnostics.some((item) => item.code === 'unavailable_semantics'));
+  }
+  // A record that starts after c's entry still covers the throwing call: the proof reads the
+  // unwind facts of every instruction on c's paths, not only of its entry.
+  for (const format of ['elf', 'pe'] as const) {
+    const inner = image(pad, 'lsda', format, true);
+    assert.ok(inner.t.function.noreturn, format);
+    assert.equal(inner.c.function.noreturn, undefined, format);
+    assert.equal(inner.m.function.noreturn, undefined, format);
+    assert.deepEqual(
+      inner.m.blocks.flatMap((block) => block.edges.map((edge) => edge.kind)),
+      ['fallthrough', 'return'],
+      format,
+    );
+    assert.ok(
+      inner.record.coverage.reasons.includes('exception handlers not decompiled'),
+      format,
+    );
+    const plain = image(pad, 'null-lsda', format, true);
+    assert.ok(plain.c.function.noreturn, format);
   }
   // A cleanup pad ending in a call that never returns (`_Unwind_Resume`) is not read: an LSDA
   // alone makes c unprovable, the conservative verdict.

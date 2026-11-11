@@ -36,7 +36,7 @@ const JUMP_TABLE_RULE =
 const TAIL_TARGET_RULE = 'unconditional jump at entry stack depth to code outside the root body';
 const EXCEPTION_HANDLERS = 'exception handlers not decompiled';
 const EXCEPTION_HANDLERS_MESSAGE =
-  'The unwind record of this function names an exception handler (LSDA, language handler or personality): landing pads and handler code the unwinder enters are not decompiled';
+  'An unwind record covering this function names an exception handler (LSDA, language handler or personality): landing pads and handler code the unwinder enters are not decompiled';
 /** Linker-synthesized import trampoline sections (ELF PLT variants, Mach-O stub sections). */
 const STUB_SECTION = /(^|[.,])(plt|plt\.sec|plt\.got|iplt)$|__(auth_|objc_)?stubs$|__stub_helper$/;
 
@@ -1019,12 +1019,15 @@ function discoverOnce(
       .sort((a, b) => (a.entry.value < b.entry.value ? -1 : a.entry.value > b.entry.value ? 1 : 0));
     /** The evidence of every path end, or undefined when some path may return; a call of or an
      * entry into a root in `group` ends a path. `group` null ends every path at a call or another
-     * root (a root that may return even then never qualifies). */
+     * root (a root that may return even then never qualifies). An unwinder can resume a path at
+     * a landing pad or handler after a throwing call (or, under PE structured exception handling,
+     * a fault) inside a range whose unwind record names one, and that pad may return: a visited
+     * instruction in such a range, or a call in a range whose unwind data was not read, may
+     * return. */
     const walk = (
       entry: bigint,
       group: ReadonlySet<bigint> | null,
       uses?: Set<bigint>,
-      calls?: { seen: boolean },
     ): readonly string[] | undefined => {
       const parents = new Set<string>();
       const visited = new Set<bigint>();
@@ -1060,6 +1063,8 @@ function discoverOnce(
         const instruction = decoded.get(address);
         if (!instruction || instruction.validity !== 'valid') return undefined;
         const flow = instruction.flow;
+        const fact = index.exceptions.at(address, context);
+        if (fact === 'handler' || (fact === 'unknown' && flow.kind === 'call')) return undefined;
         if (
           flow.kind === 'return' ||
           flow.kind === 'unknown' ||
@@ -1071,7 +1076,6 @@ function discoverOnce(
           for (const id of instructionEvidence.get(instruction.id) ?? instruction.evidence_ids)
             parents.add(id);
         if (flow.kind === 'call') {
-          if (calls) calls.seen = true;
           if (group === null) continue;
           if (ends(flow.target?.value ?? null, noreturnOf(instruction))) continue;
         }
@@ -1079,25 +1083,17 @@ function discoverOnce(
       }
       return [...parents];
     };
-    // A root an unwinder can re-enter at a landing pad (its own unwind record names a handler)
-    // may return from there: never proven. Unreadable unwind data proves only call-free roots.
+    // A root whose own unwind record names a handler, or whose paths pass through a range with
+    // one, can be re-entered at a landing pad and return from there: never proven (walk).
     const group = new Set(
       roots
-        .filter((item) => {
-          if (
-            neverReturns.has(item.entry.value) ||
-            index.noreturn.has(item.entry.value) ||
-            input.noreturn_calls?.has(item.entry.value)
-          )
-            return false;
-          const fact = index.exceptions.at(item.entry.value, context);
-          if (fact === 'handler') return false;
-          const calls = { seen: false };
-          return (
-            walk(item.entry.value, null, undefined, calls) !== undefined &&
-            (fact === 'none' || !calls.seen)
-          );
-        })
+        .filter(
+          (item) =>
+            !neverReturns.has(item.entry.value) &&
+            !index.noreturn.has(item.entry.value) &&
+            !input.noreturn_calls?.has(item.entry.value) &&
+            walk(item.entry.value, null) !== undefined,
+        )
         .map((item) => item.entry.value),
     );
     // Each root is walked again only when a member its last walk relied on leaves the set.
@@ -1443,8 +1439,13 @@ function discoverOnce(
         },
       });
     // Code an unwinder enters at a landing pad is no static successor of anything: the graph
-    // lacks it, and says so.
-    const handlers = index.exceptions.at(item.entry.value, context) === 'handler';
+    // lacks it, and says so whenever its entry or any of its instructions lies in a range whose
+    // unwind record names a handler.
+    const handlers =
+      index.exceptions.at(item.entry.value, context) === 'handler' ||
+      members.some(
+        (instruction) => index.exceptions.at(instruction.address.value, context) === 'handler',
+      );
     if (handlers)
       localDiagnostics.push({
         code: 'unavailable_semantics',
