@@ -1209,7 +1209,10 @@ export function recoverImageTypes(
       error.code !== 'resource_limit' ||
       details?.kind !== 'limit' ||
       details.resource !== 'work' ||
-      details.limit !== limit
+      // The merge's own analysis budgets are derived from what remains of this
+      // share, so their limits lie within it: the optional merge stops, the
+      // selected function does not fail.
+      details.limit > limit
     )
       throw error;
     context.checkpoint(0);
