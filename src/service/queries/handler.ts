@@ -1,7 +1,9 @@
 import {
   CursorError,
   OperationError,
+  createOperationContext,
   decodeAddress,
+  decompileBudgetDefaults,
   decodeCursor,
   decodeRange,
   encodeCursor,
@@ -18,6 +20,7 @@ import {
 import type {
   Address,
   Annotation,
+  Budget,
   CanonicalValue,
   CursorBinding,
   Evidence,
@@ -36,7 +39,7 @@ import { debugSummary } from '../../metadata/debug/index.js';
 import { cSourceName } from '../../metadata/symbols/c-names.js';
 import type { WorkerHandler } from '../../workers/runtime.js';
 import { wireValue } from '../../project/store/encoding.js';
-import { MAX_FRAME_BYTES } from '../../workers/protocol.js';
+import { MAX_FRAME_BYTES, type SizedBudget } from '../../workers/protocol.js';
 import { prepareQueryImport } from './prepare.js';
 import { executeDiscoveryStep } from './discover.js';
 import { queryEnvelope, queryFailure } from './shared.js';
@@ -370,11 +373,48 @@ function encodeInstruction(instruction: unknown): unknown {
   return visit(instruction);
 }
 
+/** Graph limits of the size probe: the schema's maxima, so the probe sees the whole body. */
+const SIZE_PROBE_BUDGET = {
+  instructions: 1_000_000,
+  blocks: 100_000,
+  ir_nodes: 10_000_000,
+  work: 100_000_000,
+} as const;
+
+/** A decompile request's budget with each omitted field set from the selected function's
+ * size (`decompileBudgetDefaults`): the bytes of the instructions of its graph at the
+ * request's revision, the graph the request itself decodes. The whole-image discovery
+ * record is not used: before discovery reaches a function it covers only a few
+ * instructions. A pure function of the image, the revision and the function; the probe
+ * runs under its own context, so the request's work is what it would be with the same
+ * budget spelled out. */
+function sizeDecompileBudget(
+  store: ProjectStore,
+  args: ToolArgs<'function_decompile'>,
+  sized: SizedBudget,
+  deadline: number,
+): Budget {
+  const context = createOperationContext({
+    budget: { ...SIZE_PROBE_BUDGET, deadline_ms: Math.max(1, deadline - Date.now()) },
+  });
+  const scope = { store, context };
+  const loaded = loadFunctionScope(scope, args.revision, args.function_id);
+  const graph = loadFunctionGraph(scope, args.revision, loaded);
+  let bytes = 0;
+  for (const instruction of graph.instructions) bytes += instruction.size;
+  const defaults = decompileBudgetDefaults(bytes);
+  const budget: Budget = { ...args.budget };
+  for (const field of sized.fields)
+    budget[field] = Math.min(defaults[field], sized.ceiling?.[field] ?? Infinity);
+  return budget;
+}
+
 /** Statically composed child service; CPU work and durable mutations stay with
  * the owning project process, never the protocol host. */
 export const queryWorkerHandler: WorkerHandler = {
   prepareImport: prepareQueryImport,
   prepareUnits: (store, options) => runNativeOpenJob(store, options),
+  sizeBudget: sizeDecompileBudget,
   async execute<K extends ToolName>(
     operation: K,
     input: ToolArgs<K>,

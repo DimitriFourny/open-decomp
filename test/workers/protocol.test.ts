@@ -63,6 +63,31 @@ test('coarse command schemas reject extra code, SQL, lifecycle dispatch and malf
   );
 });
 
+test('a decompile request names the budget fields to size, and only those', () => {
+  const admit = (sized_budget: unknown) =>
+    commandSchema.safeParse({
+      kind: 'admit',
+      id: newIdentity('job'),
+      deadline: Date.now() + 1000,
+      request: {
+        kind: 'execute',
+        operation: 'function_decompile',
+        args: {
+          project_id: newIdentity('project'),
+          revision: 1,
+          function_id: `entity_${'a'.repeat(64)}`,
+          budget: DEFAULT_BUDGET,
+        },
+        budget: DEFAULT_BUDGET,
+        sized_budget,
+      },
+    }).success;
+  assert.equal(admit({ fields: ['work', 'deadline_ms'] }), true);
+  assert.equal(admit({ fields: ['work'], ceiling: { work: 10_000_000 } }), true);
+  assert.equal(admit({ fields: ['output_bytes'] }), false);
+  assert.equal(admit({ fields: [] }), false);
+});
+
 test(
   'the real child process exits on an oversized frame rather than allocating the claimed payload',
   { timeout: 30000 },

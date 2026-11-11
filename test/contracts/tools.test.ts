@@ -13,7 +13,12 @@ import {
   analysisCancelResultSchema,
   emissionSchema,
 } from '../../src/core/tools.js';
-import { DEFAULT_BUDGET, DEFAULT_ANALYSIS_OPTIONS } from '../../src/core/primitives.js';
+import {
+  DEFAULT_BUDGET,
+  DEFAULT_ANALYSIS_OPTIONS,
+  budgetSchema,
+  decompileBudgetDefaults,
+} from '../../src/core/primitives.js';
 import {
   validateToolRequest,
   validateToolResponse,
@@ -623,4 +628,39 @@ test('serialized output budgets and job/project bindings are enforced at deliver
     }).success,
     false,
   );
+});
+
+test('decompile defaults are the plain defaults up to 5,000 bytes and scale with the size above', () => {
+  const plain = {
+    instructions: DEFAULT_BUDGET.instructions,
+    blocks: DEFAULT_BUDGET.blocks,
+    ir_nodes: DEFAULT_BUDGET.ir_nodes,
+    work: DEFAULT_BUDGET.work,
+    deadline_ms: DEFAULT_BUDGET.deadline_ms,
+  };
+  for (const bytes of [0, 1, 471, 4096, 5000])
+    assert.deepEqual(decompileBudgetDefaults(bytes), plain);
+  // 10 KB: twice the capacities, 3,000 work per byte, 12 s per million work (at most 300 s).
+  assert.deepEqual(decompileBudgetDefaults(10_000), {
+    instructions: 20_000,
+    blocks: 20_000,
+    ir_nodes: 200_000,
+    work: 30_000_000,
+    deadline_ms: 300_000,
+  });
+  assert.equal(decompileBudgetDefaults(6_000).deadline_ms, 216_000);
+  // Every value stays within the schema; the largest bodies reach its maxima.
+  for (const bytes of [5_001, 21_737, 42_419, 10_000_000]) {
+    const sized = decompileBudgetDefaults(bytes);
+    budgetSchema.parse(sized);
+    for (const field of Object.keys(plain) as (keyof typeof plain)[])
+      assert.ok(sized[field] >= plain[field], `${bytes}: ${field}`);
+  }
+  assert.deepEqual(decompileBudgetDefaults(10_000_000), {
+    instructions: 1_000_000,
+    blocks: 100_000,
+    ir_nodes: 10_000_000,
+    work: 100_000_000,
+    deadline_ms: 300_000,
+  });
 });

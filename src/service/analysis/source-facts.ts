@@ -2153,6 +2153,28 @@ function observeNativeUnit(
  * after selected-body analysis, and never the selected body's tail reserve
  * (`optionalWorkPool`). Their local limits retain explicit metadata;
  * outer cancellation/deadline/work and selected-path invariants still propagate. */
+/** A diagnostic message holds at most 8,192 characters. */
+const MAX_MESSAGE = 8192;
+
+/** `Native callee NAME remains partial: R1; R2; …`, keeping whole reasons in order while they
+ * fit a diagnostic message and counting the rest (a large callee closure, `sqlite3WhereBegin`
+ * at 43M work, listed more than the schema holds and failed the request). */
+export function calleePartialMessage(name: string, reasons: readonly string[]): string {
+  const head = `Native callee ${name} remains partial: `;
+  const whole = head + reasons.join('; ');
+  if (whole.length <= MAX_MESSAGE) return whole;
+  let text = head,
+    kept = 0;
+  for (const reason of reasons) {
+    const part = (kept ? '; ' : '') + reason;
+    const rest = `; … ${reasons.length - kept - 1} more`;
+    if (text.length + part.length + rest.length > MAX_MESSAGE) break;
+    text += part;
+    kept++;
+  }
+  return `${text}${kept ? '; ' : ''}… ${reasons.length - kept} more`.slice(0, MAX_MESSAGE);
+}
+
 export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
   const { scope, components, image, revision } = input,
     { context } = scope,
@@ -2490,7 +2512,10 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
           // A callee cut by a bounded share is a budget limit, not unsupported semantics.
           code: summary.reasons.some(budgetReason) ? 'resource_limit' : 'unavailable_semantics',
           severity: 'warning',
-          message: `Native callee ${dependency.target.original_name ?? dependency.target.id} remains partial: ${summary.reasons.join('; ')}`,
+          message: calleePartialMessage(
+            dependency.target.original_name ?? dependency.target.id,
+            summary.reasons,
+          ),
           entity_id: dependency.target.id,
           evidence_ids: dependency.target.evidence_ids,
           details: {

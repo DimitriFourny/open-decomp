@@ -22,6 +22,7 @@ import {
   type Diagnostic,
   type Job,
   type OperationContext,
+  type Budget,
   type ProjectStore,
   type ToolArgs,
   type ToolName,
@@ -45,6 +46,7 @@ import {
   type WorkerEvent,
   type WorkerSnapshot,
   type ExecuteRequest,
+  type SizedBudget,
 } from './protocol.js';
 import { RequestPool, publishPooled, type PooledOutcome } from './request-pool.js';
 
@@ -71,6 +73,15 @@ export interface WorkerHandler {
       readonly analysis_cache?: boolean;
     },
   ): Promise<ToolResult<K>>;
+  /** The budget of a `function_decompile` request whose `sized_budget` fields the caller did
+   * not give: those fields set from the selected function's size, at most `ceiling`, the
+   * others as given. Runs before the request's context exists; `deadline` is the job's. */
+  sizeBudget?(
+    store: ProjectStore,
+    args: ToolArgs<'function_decompile'>,
+    sized: SizedBudget,
+    deadline: number,
+  ): Budget;
   /** Preparation runs before publication. The final image report and navigation
    * writes share the same transaction; failed preparation publishes neither. */
   prepareImport?(
@@ -145,6 +156,26 @@ export async function describeProject(store: ProjectStore): Promise<WorkerSnapsh
  * this many rows per slice, so a command arriving meanwhile waits for one slice at most. */
 const IDLE_FLUSH_DELAY_MS = 200;
 const IDLE_FLUSH_ROWS = 8;
+
+/** `request` with its sized budget fields resolved (`WorkerHandler.sizeBudget`); the
+ * request itself when it has none. */
+export function sizedRequest<R extends WorkRequest>(
+  handler: WorkerHandler | undefined,
+  store: ProjectStore,
+  request: R,
+  deadline: number,
+): R {
+  if (
+    request.kind !== 'execute' ||
+    request.operation !== 'function_decompile' ||
+    !request.sized_budget ||
+    !handler?.sizeBudget
+  )
+    return request;
+  const { sized_budget: sized, ...rest } = request;
+  const budget = handler.sizeBudget(store, request.args, sized, deadline);
+  return { ...rest, budget, args: { ...request.args, budget } } as R;
+}
 
 /** A request's operation context: its budget, its deadline counted from admission. */
 export function requestContext(
@@ -549,6 +580,7 @@ export function runProjectWorker(handler?: WorkerHandler, observer?: WorkerRunti
             });
           return;
         }
+        work.request = sizedRequest(handler, db, work.request, work.deadline);
         const context = requestContext(work.request.budget, work.deadline, throttled(onProgress));
         context.checkpoint(0);
         if (work.request.kind === 'import') {
