@@ -1116,10 +1116,7 @@ test('a function an unwinder can re-enter at a landing pad is never proven noret
       ['fallthrough', 'return'],
       format,
     );
-    assert.ok(
-      inner.record.coverage.reasons.includes('exception handlers not decompiled'),
-      format,
-    );
+    assert.ok(inner.record.coverage.reasons.includes('exception handlers not decompiled'), format);
     const plain = image(pad, 'null-lsda', format, true);
     assert.ok(plain.c.function.noreturn, format);
   }
