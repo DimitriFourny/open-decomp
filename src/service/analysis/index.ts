@@ -488,12 +488,15 @@ export async function executeDecompilation(
         const name = subject.display_name ?? subject.original_name;
         if (name) nativeNames.set(subject.id, name);
       }
+      const functionSubjects = new Set(functions.map((fn) => fn.id));
       const callNames = new Map<
         string,
         {
           readonly asserted: Set<string>;
           readonly hypotheses: Set<string>;
           readonly native: Set<string>;
+          /** The native names of the function subjects among the aliases. */
+          readonly local: Set<string>;
           readonly evidence: Set<string>;
           explicit: boolean;
         }
@@ -509,6 +512,7 @@ export async function executeDecompilation(
               asserted: new Set(),
               hypotheses: new Set(),
               native: new Set(),
+              local: new Set(),
               evidence: new Set(),
               explicit: false,
             };
@@ -524,7 +528,10 @@ export async function executeDecompilation(
                 ).add(annotation.value.value);
                 for (const proof of annotation.evidence_ids) candidates.evidence.add(proof);
               }
-          } else if (native) candidates.native.add(native);
+          } else if (native) {
+            candidates.native.add(native);
+            if (functionSubjects.has(subject)) candidates.local.add(native);
+          }
         }
       }
       for (const [entity_id, candidates] of callNames) {
@@ -533,7 +540,14 @@ export async function executeDecompilation(
         // A function and its export/import aliases can identify the same call.
         // One explicit assertion overrides native aliases, not another assertion
         // or a competing hypothesis; unresolved explicit names never fall back.
-        const chosen = candidates.explicit ? candidates.asserted : candidates.native;
+        // Native aliases that disagree (a Mach-O export keeps the mangled symbol the
+        // function presents demangled) defer to the one name the function itself
+        // carries: the name its own header prints.
+        const chosen = candidates.explicit
+          ? candidates.asserted
+          : candidates.native.size > 1 && candidates.local.size === 1
+            ? candidates.local
+            : candidates.native;
         const name = chosen.size === 1 ? chosen.values().next().value : undefined;
         let competing = false;
         if (candidates.explicit)
