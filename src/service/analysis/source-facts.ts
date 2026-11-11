@@ -2075,6 +2075,7 @@ function observeNativeUnit(
     ? undefined
     : nativeWrittenRegisters(
         unit.ir,
+        unit.reasons,
         interfaces,
         writtenRegisterDomain(input.components.abi),
         context,

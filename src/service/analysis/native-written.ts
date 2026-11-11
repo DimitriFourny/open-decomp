@@ -15,6 +15,7 @@ import {
 } from '../../analysis/calls/preserved.js';
 import { fpEnvironmentGuard } from '../../lifters/arm64/semantics.js';
 import { x86FpEnvironmentGuard } from '../../lifters/x86_64/semantics.js';
+import { UNWINDER_ENTRY_REASONS } from '../../analysis/discovery/index.js';
 import { createNativeInterfaceIndex, type NativeInterfaceIndex } from './native-entry.js';
 import type { NativeInterface } from './native-worklist.js';
 
@@ -23,6 +24,9 @@ const fpGuardArms = new Set<string>([
   fpEnvironmentGuard.unsupported_exit,
 ]);
 const fpGuardEffect = fpEnvironmentGuard.unsupported_effect;
+/** Discovery coverage reasons whose graph may lack paths without leaving an unknown
+ * exit, effect or unresolved jump in the lifted IR (see `nativeWrittenRegisters`). */
+const contested = new Set(['conflicting boundaries', 'overlapping instructions']);
 
 const domains = new WeakMap<AbiProfile, ReadonlySet<string>>();
 /** The roots a written-register set speaks for: the general integer and vector
@@ -65,7 +69,16 @@ const mask = (offset: number, width: number): bigint =>
  * Undefined (no set; callers keep the ABI clobbers) for a body that is not
  * complete: an unknown effect, an unknown exit (other than an FP-environment guard
  * arm) or an unresolved non-tail indirect transfer, or a tail transfer whose target
- * has no written-register set.
+ * has no written-register set; a graph an exception unwinder may enter at code it
+ * lacks (`UNWINDER_ENTRY_REASONS`) or with contested instruction boundaries; and a
+ * body with no return or tail exit at all. That last rule does not rely on the graph
+ * being complete: a call whose callee truly never returns needs no set, and one whose
+ * returning path discovery missed must not get the vacuous empty one. The other
+ * discovery coverage reasons leave a trace this function already refuses: an invalid,
+ * undefined, reserved or disabled encoding, a gap (truncated, unmapped, data) and an
+ * unresolved flow end their block in an unknown exit or unknown effect, a branch to an
+ * undiscovered or foreign address in an unresolved non-tail transfer, an indirect
+ * branch in an unresolved one; a budget-truncated graph never reaches it.
  *
  * Sound for recursion at any pre-fixpoint: if the sets assumed for the calls of a
  * group are supersets of what this computes from them, every returning execution
@@ -75,6 +88,8 @@ const mask = (offset: number, width: number): bigint =>
  */
 export function nativeWrittenRegisters(
   ir: SSAForm,
+  /** The coverage reasons of the unit's discovered graph (and preparation). */
+  coverage: readonly string[],
   interfaces: ReadonlyMap<string, NativeInterface>,
   /** The roots the set speaks for: the general registers of the ABI's call clobber
    * set (the only ones a caller refines). Others are outside its claims. */
@@ -83,10 +98,18 @@ export function nativeWrittenRegisters(
   index?: NativeInterfaceIndex,
   stack?: StackRecoveryResult,
 ): readonly RegisterSlice[] | undefined {
+  // A graph an unwinder may enter at code it lacks (a landing pad that returns), or
+  // whose instruction boundaries are contested, may return through paths it does not
+  // contain: nothing proved over its static exits holds for them.
+  if (coverage.some((reason) => UNWINDER_ENTRY_REASONS.has(reason) || contested.has(reason)))
+    return undefined;
   const prepared = (index ?? createNativeInterfaceIndex(ir, undefined, context)).preparation(
     ir,
     context,
   );
+  // No return or tail exit: "every returning path holds the entry bits" would hold
+  // vacuously, which proves nothing when a path is missing from the graph. No set.
+  if (!prepared.exits.length && !prepared.tails.length) return undefined;
   for (const block of ir.blocks) {
     context.checkpoint(1);
     const control = block.terminator,
