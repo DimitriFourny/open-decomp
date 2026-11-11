@@ -4,8 +4,9 @@ import type { WireEmission } from './tools.js';
 
 export type EmissionOmission = NonNullable<WireEmission['omitted']>[number];
 /** Metadata classes a size bound can shed from an emission; `evidence` (proof
- * references outside the catalog bound) is recorded, never shed by class. */
-export type EmissionMetadataKind = Exclude<EmissionOmission['kind'], 'evidence'>;
+ * references outside the catalog bound) and `subjects` (value subjects outside the
+ * annotation catalog bound) are recorded, never shed by class. */
+export type EmissionMetadataKind = Exclude<EmissionOmission['kind'], 'evidence' | 'subjects'>;
 
 /** Metadata classes in the order a size bound sheds them: the largest, most
  * derivative records first. The pseudocode text itself is never shed. */
@@ -20,6 +21,7 @@ const DESCRIPTION: Readonly<Record<EmissionOmission['kind'], string>> = {
   inferences: 'inference records',
   requirements: 'requirement proofs',
   evidence: 'proof references',
+  subjects: 'annotation catalog value subjects',
 };
 
 /** Merge omission records of one emission; a known count never hides an unknown one. */

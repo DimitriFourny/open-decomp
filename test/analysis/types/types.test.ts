@@ -15,6 +15,7 @@ import { constructSSA } from '../../../src/analysis/ssa/index.js';
 import {
   recoverTypes,
   stackTypeSubject,
+  typeRecoveryFailure,
   type SuppliedSignature,
   type SuppliedTypeRecord,
   type TypeRecoveryOptions,
@@ -1047,3 +1048,40 @@ for (const [op, count, expected] of [
     if (definition.kind === 'structure')
       assert.equal(definition.fields[0]!.offset, expected < 0n ? 0n : expected);
   });
+
+test('a type or view observed by more proofs than a record cites is bounded and reported, not failed', () => {
+  const abi = targets[0]!;
+  const ir = builder('type-citation-capacity'),
+    b = ir.block('entry');
+  const base = b.readRegister(parameterRegister(abi));
+  // 1,100 byte fields through one base: one machine type and one view, each observed
+  // by more than the 1,000 proofs a record cites.
+  for (let offset = 0n; offset < 1100n; offset++)
+    b.load(integer(8), offset === 0n ? base : b.int('add', base, b.constant(i64, offset)));
+  b.return();
+  const result = recoverTypes(ssa(ir.finish(b)), abi, createOperationContext(), {
+    ...baseOptions,
+    entry_address: entry,
+    max_work: 100_000_000,
+  });
+  assert.equal(result.state, 'complete', JSON.stringify(result.diagnostics));
+  assert.deepEqual(typeRecoveryFailure(result), undefined);
+  const limits = result.diagnostics.filter((item) => item.code === 'resource_limit');
+  assert.deepEqual(
+    limits.map((item) => item.message),
+    [
+      'A generated integer type is observed by more than 1000 proofs; it cites the first 1000',
+      'The memory view through one base value is observed by 1100 proofs, more than one shape cites (1000); it is left unshaped',
+    ],
+  );
+  // The view stays unshaped; every record still cites at most 1,000 proofs.
+  assert.ok(!result.shapes.some((shape) => shape.base.kind === 'value'));
+  for (const record of result.types) assert.ok(record.evidence_ids.length <= 1000);
+  // A pass cut by its work limit is still a failure.
+  const cut = recoverTypes(ssa(ir.finish(b)), abi, createOperationContext(), {
+    ...baseOptions,
+    entry_address: entry,
+    max_work: 1000,
+  });
+  assert.equal(typeRecoveryFailure(cut)?.code, 'resource_limit');
+});
