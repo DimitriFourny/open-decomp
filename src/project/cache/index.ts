@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import {
+  MAX_RESULT_DIAGNOSTICS,
   OperationError,
   SCHEMA_VERSION,
   addressSchema,
@@ -59,6 +60,7 @@ import {
   decodeStoredReadset,
   encodeStoredReadset,
   validateAnalysisReadset,
+  MAX_READS,
   type AnalysisDependencyCollector,
 } from './dependencies.js';
 
@@ -627,14 +629,35 @@ export async function runCachedDecompilation(
   let computation = candidate
     ? validateComputation(store, identity, candidate, context, true)
     : validateComputation(store, identity, await compute(), context);
-  if (enabled && !reused && input.dependencies !== undefined)
-    computation = { ...computation, dependencies: input.dependencies.finish() };
+  // A ledger past what one stored readset holds is not published: the artifact then serves
+  // its exact revision only, and the result says so.
+  let exactRevision = false;
+  if (enabled && !reused && input.dependencies !== undefined) {
+    if (input.dependencies.exceeded) exactRevision = true;
+    else computation = { ...computation, dependencies: input.dependencies.finish() };
+  }
+  if (exactRevision && computation.result.diagnostics.length < MAX_RESULT_DIAGNOSTICS)
+    computation = {
+      ...computation,
+      result: {
+        ...computation.result,
+        diagnostics: [
+          ...computation.result.diagnostics,
+          {
+            code: 'resource_limit',
+            severity: 'warning',
+            message: `Analysis read more than ${MAX_READS} recorded facts; the result is valid for revision ${identity.annotation_revision} only and is recomputed at a later revision`,
+            evidence_ids: [],
+          },
+        ],
+      },
+    };
   if (reused) context.progress('dependency-reuse', 1, 1);
   const serialize = (value: AnalysisComputation): Buffer => storedPayload(identity, value);
   let bytes = serialize(computation);
   // `computation.result` is the output of `functionDecompileResultSchema.parse` (the hit path's
   // parsed payload for a reuse); only shedding below replaces it with an unparsed value.
-  let shed = false;
+  let shed = exactRevision;
   // The artifact bound never costs the pseudocode. Derived data is shed in order: the
   // incremental-reuse readset (the artifact then serves only its exact revision), then
   // whole provenance classes of the emission, each named in `emission.omitted` and in a

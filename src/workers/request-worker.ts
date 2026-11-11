@@ -6,6 +6,7 @@ import {
   encodeDiagnostic,
   encodeJob,
   diskFull,
+  OperationError,
   type Diagnostic,
   type Job,
 } from '../core/index.js';
@@ -16,6 +17,7 @@ import { RequestStore } from './request-store.js';
 import {
   executeRequest,
   requestContext,
+  sizedRequest,
   throttled,
   workerDiagnostic,
   type WorkerHandler,
@@ -117,8 +119,16 @@ export function runRequestWorker(handler: WorkerHandler): void {
       return;
     }
     const overlay = new RequestStore(store, job);
+    let request = command.request,
+      result: unknown,
+      error: Diagnostic | undefined;
+    try {
+      request = sizedRequest(handler, overlay, command.request, command.deadline);
+    } catch (failure) {
+      error = workerDiagnostic(failure);
+    }
     const context = requestContext(
-      command.request.budget,
+      request.budget,
       command.deadline,
       throttled((phase, completed, total) => {
         if (process.stdout.writableLength === 0)
@@ -131,10 +141,10 @@ export function runRequestWorker(handler: WorkerHandler): void {
           );
       }),
     );
-    let result: unknown, error: Diagnostic | undefined;
     try {
+      if (error) throw new OperationError(error);
       context.checkpoint(0);
-      result = await executeRequest(handler, command.request, {
+      result = await executeRequest(handler, request, {
         store: overlay,
         context,
         job_id: job.id,
