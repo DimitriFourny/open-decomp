@@ -123,9 +123,11 @@ type PendingJob = {
   onProgress: ((job: WireJob) => void) | undefined;
 };
 
+/** The schema's largest `deadline_ms`: a job's bound while its deadline is still to be
+ * sized from the function where it runs. */
+const MAX_DEADLINE_MS = 300_000;
 /** Grace between a job's deadline and the host stopping its owner: a quarter of the
  * deadline, between 1 and 10 seconds. */
-const MAX_DEADLINE_MS = 300_000;
 const deadlineGrace = (deadline: number): number =>
   Math.min(10_000, Math.max(1_000, Math.floor(deadline / 4)));
 
