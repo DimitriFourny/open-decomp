@@ -9033,7 +9033,7 @@ export class Renderer {
         this.localValidation.presentation(
           'branching_tail_duplication',
           subject,
-          'a labeled edge into a branching tail ends in an owned copy of it: the regions laid out from its entry to the end of their sequence, at most five blocks and eight printed lines, every block reached from that entry, with no loop, switch or short-circuit arm, every edge falling through to a block inside them and every path ending in a return, tail call or trap; the copy runs the same tests and effects in the same order on the edge\'s path as the label would, and copies retain original identities',
+          'the only labeled edge into a branching tail ends in an owned copy of it: the regions laid out from its entry to the end of their sequence, at most five blocks and eight printed lines, every block reached from that entry, with no loop, switch or short-circuit arm, every edge falling through to a block inside them and every path ending in a return, tail call or trap; the copy runs the same tests and effects in the same order on the edge\'s path as the label would, and copies retain original identities',
           [...branched],
         ))
     ) {

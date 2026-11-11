@@ -1370,9 +1370,18 @@ export function planLayout(
   }
   // Lexical actions at home: a copy of closed regions repeats each one.
   const homeActions = new Map<ParallelTransfer, TransferAction>();
-  visitTransfers(body, language, active, (occurrence) =>
-    homeActions.set(occurrence.transfer, occurrenceAction(occurrence, language)),
-  );
+  /** Gotos into each block at home: a branching tail is copied only onto its
+   * one goto (two copies of a few lines read worse than one label, and the
+   * operands of one `a || b` condition would split into one copy each). */
+  const homeGotos = new Map<string, number>();
+  visitTransfers(body, language, active, (occurrence) => {
+    const action = occurrenceAction(occurrence, language);
+    homeActions.set(occurrence.transfer, action);
+    if (action === 'goto') {
+      const target = occurrence.transfer.target;
+      homeGotos.set(target, (homeGotos.get(target) ?? 0) + 1);
+    }
+  });
   const branchedTails = new Map<
     string,
     { readonly regions: readonly Region[]; readonly members: readonly string[] } | null
@@ -1384,7 +1393,7 @@ export function planLayout(
     if (known !== undefined) return known;
     branchedTails.set(id, null);
     const home = homes.get(id);
-    if (!home || id === program.function.entry) return null;
+    if (!home || id === program.function.entry || homeGotos.get(id) !== 1) return null;
     const regions = home.items.slice(home.index);
     const members: BlockRegion[] = [];
     const pending = [...regions];
