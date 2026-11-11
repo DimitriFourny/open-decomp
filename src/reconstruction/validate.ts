@@ -11,6 +11,7 @@ import { registerOutputs, stackEntry, variadicArea } from './source-model.js';
 import { boundParameters, validateEmittedUses } from './validate-uses.js';
 import {
   crossSilently,
+  doWhileTestBlock,
   jumpBlocks,
   type EmittedEdge,
   type EmittedLoopExits,
@@ -376,8 +377,10 @@ type Nest =
       readonly kind: 'loop';
       readonly header: string;
       readonly follow: string | null;
-      /** do-while: only its test may `continue` (elsewhere it reaches the test). */
+      /** do-while: only its test `continue`s to the header; elsewhere a
+       * `continue` reaches `tested`, the block holding the test. */
       readonly test?: string;
+      readonly tested?: string | null;
     }
   | { readonly kind: 'switch'; readonly id: string; readonly follow: string | null };
 
@@ -430,6 +433,7 @@ export function validateRenderedTransfers(
         const scope = nesting[i]!;
         if (scope.kind === 'loop') {
           if (scope.test === undefined || scope.test === origin.id) actual = scope.header;
+          else actual = scope.tested ?? null;
           break;
         }
       }
@@ -511,7 +515,7 @@ export function validateRenderedTransfers(
           kind: 'loop',
           header: region.header,
           follow,
-          ...(test === undefined ? {} : { test }),
+          ...(test === undefined ? {} : { test, tested: doWhileTestBlock(region.body, test) }),
         },
       ]);
       return;

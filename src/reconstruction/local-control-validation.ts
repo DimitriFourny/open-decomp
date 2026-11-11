@@ -52,6 +52,19 @@ export function jumpBlocks(body: Region): ReadonlyMap<string, ParallelTransfer> 
   return found;
 }
 
+/** The block holding a do-while's test `test`: the lexically last block of
+ * its body. C `continue` anywhere in the body evaluates that test, so it
+ * reaches this block; null when the last block holds another control. */
+export function doWhileTestBlock(body: Region, test: string): string | null {
+  let last: Region = body;
+  while (last.kind === 'sequence') {
+    const next = last.regions.at(-1);
+    if (!next) return null;
+    last = next;
+  }
+  return last.kind === 'block' && last.control.id === test ? last.id : null;
+}
+
 /** The block reached from `start` once `through` is crossed, or null when a
  * crossed block is not a jump block recorded as falling through to the next. */
 export function crossSilently(
@@ -78,11 +91,13 @@ export function validateEmittedControl(
   validation: LocalValidationSession,
   exits?: EmittedLoopExits,
 ): void {
-  /** `test`: a do-while's test control, the only site whose `continue` repeats. */
+  /** `test`: a do-while's test control, the only site whose `continue`
+   * repeats; a `continue` elsewhere reaches `tested`, the block holding it. */
   type Scope = {
     loop: string | null;
     after: string | null;
     test?: string;
+    tested?: string | null;
     id: string;
   };
   let work = 0;
@@ -124,7 +139,11 @@ export function validateEmittedControl(
         actual = crossSilently(scopes.at(-1)?.after ?? null, action.through, jumps, emitted);
       if (action.kind === 'continue') {
         const scope = [...scopes].reverse().find((item) => item.loop !== null);
-        actual = scope && (scope.test === undefined || scope.test === subject) ? scope.loop : null;
+        actual = !scope
+          ? null
+          : scope.test === undefined || scope.test === subject
+            ? scope.loop
+            : (scope.tested ?? null);
       }
       if (action.kind === 'loop-exit') {
         const outer = scopes.findIndex((scope) => scope.loop === action.loop);
@@ -198,7 +217,7 @@ export function validateEmittedControl(
           loop: region.header,
           id: region.header,
           after: follow,
-          ...(test === undefined ? {} : { test }),
+          ...(test === undefined ? {} : { test, tested: doWhileTestBlock(region.body, test) }),
         },
       ]);
     } else {

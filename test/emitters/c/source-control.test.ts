@@ -1639,6 +1639,7 @@ for (const language of ['c-like', 'python-like'] as const)
       );
     });
 
+
     /** Every combination of the given argument values. */
     const grid = (values: readonly Value[], choices: readonly bigint[]): Map<string, bigint>[] =>
       values.reduce<Map<string, bigint>[]>(
@@ -1646,6 +1647,117 @@ for (const language of ['c-like', 'python-like'] as const)
           rows.flatMap((row) => choices.map((bits) => new Map([...row, [value.id, bits]]))),
         [new Map()],
       );
+
+    test('a labeled edge into a branching return tail ends in a copy of the whole tail', () => {
+      // `aff` is set on two paths that meet at a three-way return cascade, as
+      // in SQLite's sqlite3IndexAffinityOk: the early path's label disappears.
+      const b = program('source-branching-tail'),
+        entry = b.block('entry', [i32, i32]),
+        early = b.block('early'),
+        none = b.block('none'),
+        shifted = b.block('shifted'),
+        join = b.block('join', [i32]),
+        high = b.block('high'),
+        merge = b.block('merge'),
+        tail = b.block('tail', [i32]),
+        low = b.block('low'),
+        next = b.block('next'),
+        equal = b.block('equal'),
+        other = b.block('other');
+      const [a, k] = entry.parameters as [Value, Value];
+      entry.store(entry.constant(i64, 0x1000n), k);
+      entry.branch(
+        entry.compare('ne', a, entry.constant(i32, 0n)),
+        entry.edge(join, [a]),
+        entry.edge(early),
+      );
+      early.branch(
+        early.compare('eq', early.int('and', k, early.constant(i32, 16n)), early.constant(i32, 0n)),
+        early.edge(none),
+        early.edge(shifted),
+      );
+      none.branch(
+        none.compare('eq', k, none.constant(i32, 0n)),
+        none.edge(low),
+        none.edge(tail, [k]),
+      );
+      shifted.jump(join, [shifted.int('lshr', k, shifted.constant(i32, 8n))]);
+      const v = join.parameters[0]!;
+      join.branch(join.compare('sgt', v, join.constant(i32, 64n)), join.edge(high), join.edge(merge));
+      high.store(high.constant(i64, 0x1004n), v);
+      high.return([high.constant(i32, 7n)]);
+      merge.jump(tail, [merge.int('or', v, merge.constant(i32, 0x40n))]);
+      const w = tail.parameters[0]!;
+      tail.branch(tail.compare('sle', w, tail.constant(i32, 65n)), tail.edge(low), tail.edge(next));
+      low.return([low.constant(i32, 1n)]);
+      next.branch(next.compare('eq', w, next.constant(i32, 66n)), next.edge(equal), next.edge(other));
+      equal.store(equal.constant(i64, 0x1008n), w);
+      equal.return([equal.constant(i32, 2n)]);
+      other.return([other.int('add', w, other.constant(i32, 3n))]);
+      const input = b.finish(entry, [i32]),
+        source = emit(input, language),
+        checked = emit(input, language, 'checked');
+      assert.doesNotMatch(source.emission.text, /\bgoto\b/, source.emission.text);
+      assert.match(checked.emission.text, /\bgoto\b/);
+      assert.ok(rules(source).includes('branching_tail_duplication'), source.emission.text);
+      // Both printed copies of the cascade's test map back to its one control.
+      const test = input.blocks.find((block) => block.id === next.id)!.terminator.id;
+      const reference = source.emission.ids.indexOf(test);
+      assert.ok(
+        source.emission.mappings.filter((mapping) => mapping.semantic_refs[0] === reference)
+          .length >= 2,
+      );
+      agree(source, checked, grid([a, k], [0n, 1n, 16n, 66n, 0x4200n, 0x1000n]));
+    });
+
+    test('an edge from a do/while body into its quiet test prints continue', () => {
+      // The skipped block prints the other edge's copies: a goto to the test
+      // block in the checked view, a continue in C source.
+      const b = program('source-do-while-continue'),
+        entry = b.block('entry', [i32]),
+        head = b.block('head', [i32, i32]),
+        odd = b.block('odd'),
+        mid = b.block('mid'),
+        join = b.block('join'),
+        latch = b.block('latch', [i32, i32]),
+        exit = b.block('exit', [i32]);
+      const n = entry.parameters[0]!;
+      entry.jump(head, [n, entry.constant(i32, 0n)]);
+      const [x, acc] = head.parameters as [Value, Value];
+      head.branch(
+        head.compare('ne', head.int('and', x, head.constant(i32, 1n)), head.constant(i32, 0n)),
+        head.edge(odd),
+        head.edge(join),
+      );
+      odd.store(odd.constant(i64, 0x1000n), x);
+      odd.branch(
+        odd.compare('ne', odd.int('and', x, odd.constant(i32, 2n)), odd.constant(i32, 0n)),
+        odd.edge(latch, [odd.int('add', x, odd.constant(i32, 1n)), odd.int('add', acc, odd.constant(i32, 5n))]),
+        odd.edge(mid),
+      );
+      mid.store(mid.constant(i64, 0x1004n), mid.int('add', x, mid.constant(i32, 1n)));
+      mid.jump(join);
+      join.jump(latch, [join.int('add', x, join.constant(i32, 1n)), join.int('add', acc, join.constant(i32, 1n))]);
+      const [next, sum] = latch.parameters as [Value, Value];
+      latch.branch(
+        latch.compare('ult', next, latch.constant(i32, 12n)),
+        latch.edge(head, [next, sum]),
+        latch.edge(exit, [sum]),
+      );
+      exit.return(exit.parameters);
+      const input = b.finish(entry, [i32]),
+        source = emit(input, language),
+        checked = emit(input, language, 'checked');
+      if (c) {
+        assert.match(source.emission.text, /\bcontinue;/, source.emission.text);
+        assert.match(source.emission.text, /\} while \(/);
+        assert.doesNotMatch(source.emission.text, /\bgoto\b/);
+        assert.ok(rules(source).includes('do_while_continue'));
+      } else assert.ok(!rules(source).includes('do_while_continue'));
+      assert.match(checked.emission.text, /\bgoto\b/);
+      agree(source, checked, [0n, 1n, 3n, 6n, 11n, 12n, 40n].map((value) => new Map([[n.id, value]])));
+    });
+
     const choices = [0n, 1n, 2n, 5n];
 
     test('&& operands leaving for one statement print as if/else', () => {
