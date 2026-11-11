@@ -28,12 +28,16 @@ export const jobIdSchema = id('job');
 export const artifactIdSchema = id('artifact');
 const entityIdPattern = idPattern('entity');
 const evidenceIdPattern = idPattern('evidence');
+const sliceIdPattern = idPattern('slice');
 /** Same acceptance set as `entityIdSchema`, without building a zod parse result per id. */
 export const isEntityId = (value: unknown): value is EntityId =>
   typeof value === 'string' && entityIdPattern.test(value);
 /** Same acceptance set as `evidenceIdSchema`, without building a zod parse result per id. */
 export const isEvidenceId = (value: unknown): value is z.infer<typeof evidenceIdSchema> =>
   typeof value === 'string' && evidenceIdPattern.test(value);
+/** Same acceptance set as `sliceIdSchema`, without building a zod parse result per id. */
+export const isSliceId = (value: unknown): value is z.infer<typeof sliceIdSchema> =>
+  typeof value === 'string' && sliceIdPattern.test(value);
 export type ProjectId = z.infer<typeof projectIdSchema>;
 export type ImageId = z.infer<typeof imageIdSchema>;
 export type EntityId = z.infer<typeof entityIdSchema>;
