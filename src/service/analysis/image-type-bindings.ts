@@ -108,8 +108,9 @@ export function imageTypeBindings(
   }
   const layouts = new SourceLayouts(
     records,
+    // The context's limits stop it, with the details its caller recognises.
     new AnalysisBudget({
-      max_work: context.remainingWork?.() ?? context.budget.work,
+      max_work: context.budget.work,
       checkpoint: (work) => context.checkpoint(work),
     }),
     abi.layout,
