@@ -70,7 +70,7 @@ export function targetAbi(target: Target): AbiProfile | undefined {
 // Components without independent releases are explicitly versioned by this
 // composition contract. Bump the corresponding entry when its semantics change.
 const analysis =
-  'pipeline/28;discovery/13;targets/2;ssa/5;values-effects/7;stack-calls/17;debug/4;library/13;types/20;annotations/3;structure/9;reconstruction/104';
+  'pipeline/28;discovery/13;targets/2;ssa/5;values-effects/7;stack-calls/17;debug/4;library/13;types/20;annotations/3;structure/9;reconstruction/105';
 const versionRecords = (() => {
   const arm = new Arm64Decoder(),
     x86 = new X86Decoder({ formatting: false });

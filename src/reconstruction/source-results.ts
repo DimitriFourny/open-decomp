@@ -68,10 +68,14 @@ export type SourcePrimaryResult =
       readonly type: DataType;
       readonly rejected: string;
       readonly untyped?: true;
+      /** Both carriers qualify and no caller demand decided: the write order on
+       * every exit path or the native written-result interface chose. */
+      readonly undemanded_choice?: true;
     }
   | {
       readonly kind: 'integer';
       readonly reason?: string;
+      readonly undemanded_choice?: true;
       readonly incidental_floating?: string;
       readonly floating_inert?: true;
       /** Whether the integer result register may be incidental on every return exit
@@ -1057,16 +1061,19 @@ export function selectSourcePrimaryResult(
         : {}),
       incidental_paths: incidentalPaths,
     };
+  const undemanded = integerQualifies && floatingQualifies && !integerDemanded && !floatingDemanded;
   return choice === 'float'
     ? {
         kind: 'float',
         location: { ...input.floating, width_bits: bitWidth(floatingType!) },
         type: floatingType!,
         rejected: evidence,
+        ...(undemanded ? { undemanded_choice: true as const } : {}),
       }
     : {
         kind: 'integer',
         reason: `${floatingName} also qualifies; ${evidence}`,
         incidental_paths: incidentalPaths,
+        ...(undemanded ? { undemanded_choice: true as const } : {}),
       };
 }
