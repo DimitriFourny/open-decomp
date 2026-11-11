@@ -576,10 +576,7 @@ function observeParameters(
       }
   // Such a value used after its call may still be an entry argument no use above
   // observed: the argument list then stays open (not closed by callee reads).
-  const suspects = ambiguous
-    ? []
-    : [...preserved].filter(([, input]) => mayHoldUnobserved(input)).map(([output]) => output);
-  if (suspects.length) {
+  if (preserved.size && !ambiguous) {
     const referenced = new Set<string>();
     for (const block of ir.blocks) {
       for (const node of block.instructions) {
@@ -660,7 +657,11 @@ function observeParameters(
       }
       return false;
     };
-    if (suspects.some(used)) ambiguous = true;
+    for (const [output, input] of preserved)
+      if (used(output) && mayHoldUnobserved(input)) {
+        ambiguous = true;
+        break;
+      }
   }
   const missingBanks = new Set<string>();
   for (const candidate of candidates) {
