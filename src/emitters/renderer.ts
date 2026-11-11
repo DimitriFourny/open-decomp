@@ -6049,7 +6049,8 @@ export class Renderer {
    * nothing but the test, and its repeat arm prints no copy. */
   private continueTest(loop: Extract<Region, { kind: 'loop' }>): string | undefined {
     const form = loop.form;
-    if (form?.kind !== 'do_while' || this.language !== 'c-like' || !this.sourceView) return undefined;
+    if (form?.kind !== 'do_while' || this.language !== 'c-like' || !this.sourceView)
+      return undefined;
     let last: Region = loop.body;
     while (last.kind === 'sequence') {
       this.context.checkpoint(1);
@@ -8408,7 +8409,7 @@ export class Renderer {
         this.localValidation.presentation(
           'reached_label_owner',
           this.input.function.id,
-          "structured with fewer labeled edges by letting a node own a block entered by labeled transfers from another node that reaches it: that node is laid out first, so every label stays a forward jump; edges, copies and effects are unchanged",
+          'structured with fewer labeled edges by letting a node own a block entered by labeled transfers from another node that reaches it: that node is laid out first, so every label stays a forward jump; edges, copies and effects are unchanged',
           [this.input.function.id],
         )
       ) {
@@ -9033,7 +9034,7 @@ export class Renderer {
         this.localValidation.presentation(
           'branching_tail_duplication',
           subject,
-          'the only labeled edge into a branching tail ends in an owned copy of it: the regions laid out from its entry to the end of their sequence, at most five blocks and eight printed lines, every block reached from that entry, with no loop, switch or short-circuit arm, every edge falling through to a block inside them and every path ending in a return, tail call or trap; the copy runs the same tests and effects in the same order on the edge\'s path as the label would, and copies retain original identities',
+          "the only labeled edge into a branching tail ends in an owned copy of it: the regions laid out from its entry to the end of their sequence, at most five blocks and eight printed lines, every block reached from that entry, with no loop, switch or short-circuit arm, every edge falling through to a block inside them and every path ending in a return, tail call or trap; the copy runs the same tests and effects in the same order on the edge's path as the label would, and copies retain original identities",
           [...branched],
         ))
     ) {

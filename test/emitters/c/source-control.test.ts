@@ -1639,7 +1639,6 @@ for (const language of ['c-like', 'python-like'] as const)
       );
     });
 
-
     /** Every combination of the given argument values. */
     const grid = (values: readonly Value[], choices: readonly bigint[]): Map<string, bigint>[] =>
       values.reduce<Map<string, bigint>[]>(
@@ -1683,14 +1682,22 @@ for (const language of ['c-like', 'python-like'] as const)
       );
       shifted.jump(join, [shifted.int('lshr', k, shifted.constant(i32, 8n))]);
       const v = join.parameters[0]!;
-      join.branch(join.compare('sgt', v, join.constant(i32, 64n)), join.edge(high), join.edge(merge));
+      join.branch(
+        join.compare('sgt', v, join.constant(i32, 64n)),
+        join.edge(high),
+        join.edge(merge),
+      );
       high.store(high.constant(i64, 0x1004n), v);
       high.return([high.constant(i32, 7n)]);
       merge.jump(tail, [merge.int('or', v, merge.constant(i32, 0x40n))]);
       const w = tail.parameters[0]!;
       tail.branch(tail.compare('sle', w, tail.constant(i32, 65n)), tail.edge(low), tail.edge(next));
       low.return([low.constant(i32, 1n)]);
-      next.branch(next.compare('eq', w, next.constant(i32, 66n)), next.edge(equal), next.edge(other));
+      next.branch(
+        next.compare('eq', w, next.constant(i32, 66n)),
+        next.edge(equal),
+        next.edge(other),
+      );
       equal.store(equal.constant(i64, 0x1008n), w);
       equal.return([equal.constant(i32, 2n)]);
       other.return([other.int('add', w, other.constant(i32, 3n))]);
@@ -1750,14 +1757,22 @@ for (const language of ['c-like', 'python-like'] as const)
       );
       hop.jump(join, [hop.int('lshr', k, hop.constant(i32, 8n))]);
       const v = join.parameters[0]!;
-      join.branch(join.compare('sgt', v, join.constant(i32, 64n)), join.edge(high), join.edge(merge));
+      join.branch(
+        join.compare('sgt', v, join.constant(i32, 64n)),
+        join.edge(high),
+        join.edge(merge),
+      );
       high.store(high.constant(i64, 0x1004n), v);
       high.return([high.constant(i32, 7n)]);
       merge.jump(tail, [merge.int('or', v, merge.constant(i32, 0x40n))]);
       const w = tail.parameters[0]!;
       tail.branch(tail.compare('sle', w, tail.constant(i32, 65n)), tail.edge(low), tail.edge(next));
       low.return([low.constant(i32, 1n)]);
-      next.branch(next.compare('eq', w, next.constant(i32, 66n)), next.edge(equal), next.edge(other));
+      next.branch(
+        next.compare('eq', w, next.constant(i32, 66n)),
+        next.edge(equal),
+        next.edge(other),
+      );
       equal.store(equal.constant(i64, 0x1008n), w);
       equal.return([equal.constant(i32, 2n)]);
       other.return([other.int('add', w, other.constant(i32, 3n))]);
@@ -1792,12 +1807,18 @@ for (const language of ['c-like', 'python-like'] as const)
       odd.store(odd.constant(i64, 0x1000n), x);
       odd.branch(
         odd.compare('ne', odd.int('and', x, odd.constant(i32, 2n)), odd.constant(i32, 0n)),
-        odd.edge(latch, [odd.int('add', x, odd.constant(i32, 1n)), odd.int('add', acc, odd.constant(i32, 5n))]),
+        odd.edge(latch, [
+          odd.int('add', x, odd.constant(i32, 1n)),
+          odd.int('add', acc, odd.constant(i32, 5n)),
+        ]),
         odd.edge(mid),
       );
       mid.store(mid.constant(i64, 0x1004n), mid.int('add', x, mid.constant(i32, 1n)));
       mid.jump(join);
-      join.jump(latch, [join.int('add', x, join.constant(i32, 1n)), join.int('add', acc, join.constant(i32, 1n))]);
+      join.jump(latch, [
+        join.int('add', x, join.constant(i32, 1n)),
+        join.int('add', acc, join.constant(i32, 1n)),
+      ]);
       const [next, sum] = latch.parameters as [Value, Value];
       latch.branch(
         latch.compare('ult', next, latch.constant(i32, 12n)),
@@ -1815,7 +1836,11 @@ for (const language of ['c-like', 'python-like'] as const)
         assert.ok(rules(source).includes('do_while_continue'));
       } else assert.ok(!rules(source).includes('do_while_continue'));
       assert.match(checked.emission.text, /\bgoto\b/);
-      agree(source, checked, [0n, 1n, 3n, 6n, 11n, 12n, 40n].map((value) => new Map([[n.id, value]])));
+      agree(
+        source,
+        checked,
+        [0n, 1n, 3n, 6n, 11n, 12n, 40n].map((value) => new Map([[n.id, value]])),
+      );
     });
 
     const choices = [0n, 1n, 2n, 5n];

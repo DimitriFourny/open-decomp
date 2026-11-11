@@ -1575,6 +1575,17 @@ export function structureControlFlow(
         terminator_id: block.terminator.id,
       };
     });
+    // Labeled edges into blocks other than small tails (the source view copies those).
+    const gotos =
+      exits +
+      [...labeled].filter((key) => {
+        budget.charge();
+        const split = key.lastIndexOf(':'),
+          block = key.slice(0, split),
+          slot = Number(key.slice(split + 1));
+        const target = slots(block).find((item) => item.slot === slot)!.target;
+        return !tailBlock(target, 0);
+      }).length;
     const value: StructuredFunction = {
       kind: 'structured_function',
       id: input.id,
@@ -1592,16 +1603,7 @@ export function structureControlFlow(
       work: budget.work,
       conditions: [...conditionHeads].map((node) => node.entry),
       tails: [...tailSources],
-      labeled:
-        exits +
-        [...labeled].filter((key) => {
-          budget.charge();
-          const split = key.lastIndexOf(':'),
-            block = key.slice(0, split),
-            slot = Number(key.slice(split + 1));
-          const target = slots(block).find((item) => item.slot === slot)!.target;
-          return !tailBlock(target, 0);
-        }).length,
+      labeled: gotos,
     };
   } catch (error) {
     const result = budget.result(null, error);
