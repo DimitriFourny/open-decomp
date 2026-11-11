@@ -16,6 +16,7 @@ import {
   type ProjectStore,
 } from '../../../src/core/index.js';
 import {
+  MAX_READS,
   analysisReadsetSchema,
   createAnalysisReadset,
   decodeStoredReadset,
@@ -314,4 +315,19 @@ test('consecutive single-ID reads of one fingerprint are stored as one run and d
     [-4, 0, 'entity_', ids, 0],
   ])
     assert.throws(() => decode([row]));
+});
+
+test('a ledger may grow past what one stored readset holds and says so', () => {
+  const collected = collector();
+  for (let index = 0; index < MAX_READS; index++) read(collected, index);
+  assert.equal(collected.exceeded, false);
+  // One more distinct read no longer fails the request: the result is published without it.
+  read(collected, MAX_READS);
+  read(collected, MAX_READS + 1);
+  assert.equal(collected.exceeded, true);
+  const readset = collected.finish();
+  assert.equal(readset.reads.length, MAX_READS + 2);
+  // In-request snapshots and fingerprints stay exact; only the stored form is bounded.
+  assert.equal(collected.readsetFingerprint(readset), direct(readset));
+  assert.throws(() => analysisReadsetSchema.parse(readset));
 });

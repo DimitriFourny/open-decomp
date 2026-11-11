@@ -283,6 +283,7 @@ export async function startHttpServer(
             createMcpServer(service, {
               preserveJobsOnDisconnect: true,
               defaults,
+              maxBudget: principal.config.max_budget,
               authorizeResource: async () =>
                 reserveAction(principal, false, context.requestInfo?.signal),
               authorizeTool: async (name, args) => {

@@ -15,6 +15,7 @@ import {
   validateToolResponse,
 } from '../core/index.js';
 import type {
+  Budget,
   ToolArgs,
   ToolInput,
   ToolName,
@@ -193,6 +194,16 @@ export interface McpServerPolicy {
   readonly preserveJobsOnDisconnect?: boolean;
   /** Server-wide defaults from the settings file; an explicit request argument always wins. */
   readonly defaults?: McpServerDefaults;
+  /** Ceiling on the decompile budget fields the service sizes from the function (the fields a
+   * request gives are checked by `authorizeTool`). */
+  readonly maxBudget?: Partial<Budget>;
+}
+
+/** The budget fields a prepared request gives itself (settings defaults included), without
+ * the schema's defaults. */
+function requestedBudget(input: unknown): Partial<Budget> | undefined {
+  const budget = (input as { budget?: unknown } | null)?.budget;
+  return budget !== null && typeof budget === 'object' ? (budget as Partial<Budget>) : undefined;
 }
 
 /** A compact one-object description of a failed result for text consumers. */
@@ -339,11 +350,20 @@ export function createMcpServer(service: QueryService, policy: McpServerPolicy =
         }
         const executed = validateToolResponse(
           name,
-          await service.execute(name, args as ToolInput<typeof name>, {
-            ...(policy.preserveJobsOnDisconnect ? {} : { signal: context.mcpReq.signal }),
-            ...(onProgress === undefined ? {} : { onProgress }),
-            max_result_bytes: MCP_CORE_RESULT_BYTES,
-          }),
+          await service.execute(
+            name,
+            // A decompile budget field the request did not give is sized from the function by
+            // the service: hand it the request's own budget, not the schema's defaults.
+            (name === 'function_decompile'
+              ? { ...args, budget: requestedBudget(prepared.input) }
+              : args) as ToolInput<typeof name>,
+            {
+              ...(policy.preserveJobsOnDisconnect ? {} : { signal: context.mcpReq.signal }),
+              ...(onProgress === undefined ? {} : { onProgress }),
+              ...(policy.maxBudget === undefined ? {} : { max_budget: policy.maxBudget }),
+              max_result_bytes: MCP_CORE_RESULT_BYTES,
+            },
+          ),
           args,
         );
         let result = executed;

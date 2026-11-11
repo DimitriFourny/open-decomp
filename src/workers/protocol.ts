@@ -2,6 +2,7 @@ import { z } from 'zod';
 import {
   artifactReadArgsSchema,
   artifactReadResultSchema,
+  SIZED_BUDGET_FIELDS,
   budgetSchema,
   diagnosticSchema,
   imageIdSchema,
@@ -34,6 +35,12 @@ const workerOperationSchema = toolNameSchema.exclude([
   'analysis_status',
 ]);
 export type WorkerOperation = z.output<typeof workerOperationSchema>;
+const sizedBudgetSchema = z.strictObject({
+  fields: z.array(z.enum(SIZED_BUDGET_FIELDS)).min(1).max(SIZED_BUDGET_FIELDS.length),
+  /** A trusted host's ceiling on the sized values (MCP HTTP principals). */
+  ceiling: budgetSchema.partial().optional(),
+});
+export type SizedBudget = z.output<typeof sizedBudgetSchema>;
 const executeSchema = z
   .strictObject({
     kind: z.literal('execute'),
@@ -41,6 +48,7 @@ const executeSchema = z
     args: z.unknown(),
     budget: budgetSchema,
     max_result_bytes: z.number().int().min(1024).max(MAX_FRAME_BYTES).optional(),
+    sized_budget: sizedBudgetSchema.optional(),
   })
   .superRefine((request, ctx) => {
     const parsed = toolSchemas[request.operation].input.safeParse(request.args);
@@ -57,6 +65,11 @@ export type ExecuteRequest = {
     args: ToolArgs<K>;
     budget: z.output<typeof budgetSchema>;
     max_result_bytes?: number;
+    /** `function_decompile` only: the budget fields the caller did not give. The process
+     * that runs the request sets them from the selected function's size before the
+     * request's context exists (`WorkerHandler.sizeBudget`); `budget` holds the plain
+     * defaults until then. */
+    sized_budget?: SizedBudget;
   };
 }[WorkerOperation];
 export type WorkRequest = ImportRequest | ExecuteRequest;

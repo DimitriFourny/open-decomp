@@ -20,6 +20,7 @@ import { BinaryOpenError, FunctionSelectionError, openBinary } from '../../src/a
 import type { BinarySession, ToolResult } from '../../src/api/index.js';
 import { manyFunctions } from '../cli/many-functions.js';
 import { SqliteProjectStore } from '../../src/project/store/index.js';
+import { DEFAULT_BUDGET } from '../../src/core/index.js';
 
 async function setup(t: TestContext) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'open-decomp-api-')));
@@ -308,5 +309,28 @@ test(
     assert.equal(listed.data.items.filter((item) => item.original_name === '_puts').length, 1);
     const result = await session.decompile({ name: '_puts' });
     assert.ok('data' in result && result.data.function_id === puts.id);
+  },
+);
+
+test(
+  'a decompile budget field the caller omits is resolved from the function size and recorded as given',
+  { timeout: 60000 },
+  async (t) => {
+    const { root, input, sessions } = await setup(t);
+    const session = await openBinary(input, { cachePath: join(root, 'cache') });
+    sessions.push(session);
+    const selector = { address: { space: 'va' as const, value: '0x100000574' } };
+    // A fixture function is far below 5,000 bytes: every omitted field is the plain default.
+    const omitted = await session.decompile(selector);
+    assert.deepEqual(omitted.budget, DEFAULT_BUDGET);
+    assert.equal(emission(omitted).cache, 'computed');
+    // The resolved budget is the request: spelling it out is the same cache entry.
+    const spelled = await session.decompile(selector, { budget: { ...DEFAULT_BUDGET } });
+    assert.equal(emission(spelled).cache, 'hit');
+    assert.deepEqual(emission(spelled).emission, emission(omitted).emission);
+    // A field the caller gives is used as given (the browser app sends only a deadline).
+    const partial = await session.decompile(selector, { budget: { deadline_ms: 300_000 } });
+    assert.deepEqual(partial.budget, { ...DEFAULT_BUDGET, deadline_ms: 300_000 });
+    assert.deepEqual(emission(partial).emission.text, emission(omitted).emission.text);
   },
 );

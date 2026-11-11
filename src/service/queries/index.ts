@@ -1,13 +1,21 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import {
   OperationError,
+  SIZED_BUDGET_FIELDS,
   artifactReadArgsSchema,
   decodeDiagnostic,
   encodeDiagnostic,
   isSchemaValidated,
   toolSchemas,
 } from '../../core/index.js';
-import type { ToolArgs, ToolInput, ToolName, ToolResult, WireJob } from '../../core/index.js';
+import type {
+  Budget,
+  ToolArgs,
+  ToolInput,
+  ToolName,
+  ToolResult,
+  WireJob,
+} from '../../core/index.js';
 import { ProjectWorkerPool } from '../../workers/index.js';
 import type {
   OpenJobReport,
@@ -29,8 +37,20 @@ export interface QueryCallOptions {
   readonly max_result_bytes?: number;
   /** How long wait:'auto' awaits a result before returning the durable job. */
   readonly auto_wait_ms?: number;
+  /** Trusted host ceiling on the `function_decompile` budget fields sized from the function
+   * (fields the request gives are the host's to authorize). */
+  readonly max_budget?: Partial<Budget>;
+  /** Internal: the budget fields the caller's own input omitted, when `execute` hands
+   * `submit` already parsed arguments. */
+  readonly omitted_budget?: readonly (typeof SIZED_BUDGET_FIELDS)[number][];
 }
 export const DEFAULT_AUTO_WAIT_MS = 10_000;
+
+/** The size-scaled budget fields a request's own input does not give. */
+function omittedBudgetFields(input: unknown): (typeof SIZED_BUDGET_FIELDS)[number][] {
+  const given = (input as { budget?: Record<string, unknown> } | null)?.budget ?? {};
+  return SIZED_BUDGET_FIELDS.filter((field) => given[field] === undefined);
+}
 /** Options of the open-time job (docs/internals/project-cache.md §4a). */
 export interface OpenJobOptions {
   /** Helper processes; default half the cores, at most 8. */
@@ -87,6 +107,13 @@ export class QueryService {
     options: QueryCallOptions = {},
   ): Promise<JobTicket> {
     const args = toolSchemas[operation].input.parse(input) as ToolArgs<K>;
+    // A decompile budget field the caller did not give is sized from the selected function
+    // by the process that runs it, before its context exists (`WorkerHandler.sizeBudget`):
+    // the job's deadline, context and cache identity then all carry the resolved budget.
+    const fields =
+      operation === 'function_decompile'
+        ? (options.omitted_budget ?? omittedBudgetFields(input))
+        : [];
     return this.#project(args.project_id).submit(
       {
         kind: 'execute',
@@ -96,6 +123,14 @@ export class QueryService {
         ...(options.max_result_bytes === undefined
           ? {}
           : { max_result_bytes: options.max_result_bytes }),
+        ...(fields.length
+          ? {
+              sized_budget: {
+                fields: [...fields],
+                ...(options.max_budget ? { ceiling: options.max_budget } : {}),
+              },
+            }
+          : {}),
       } as ExecuteRequest,
       options,
     );
@@ -297,7 +332,9 @@ export class QueryService {
         const ticket = await this.submit(
           operation as WorkerOperation,
           args as ToolInput<WorkerOperation>,
-          options,
+          operation === 'function_decompile'
+            ? { ...options, omitted_budget: omittedBudgetFields(input) }
+            : options,
         );
         let outcome: JobOutcome | undefined;
         if (automatic) {

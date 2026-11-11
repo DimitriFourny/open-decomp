@@ -130,8 +130,11 @@ export function functionTypeObjects(
   abi: AbiProfile,
   context: OperationContext,
 ): readonly ImageTypeObject[] {
+  // The context's own limits stop this walk (with the details its caller recognises): a
+  // limit of its own, set from the work remaining at entry, threw first with details no
+  // caller knew, and failed the request (`sqlite3ExprCodeTarget` at 26M work).
   const budget = new AnalysisBudget({
-    max_work: context.remainingWork?.() ?? context.budget.work,
+    max_work: context.budget.work,
     checkpoint: (work) => context.checkpoint(work),
   });
   const definitions = new Map<string, Expression>();
