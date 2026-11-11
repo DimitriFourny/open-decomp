@@ -43,6 +43,11 @@ interface NativeInterfaceStructure {
   readonly calls: readonly Extract<Instruction, { kind: 'call' }>[];
   readonly exits: readonly SSAForm['blocks'][number][];
   readonly tails: readonly SSAForm['blocks'][number][];
+  /** The reasons of each block's unknown effects, by block (blocks with any). */
+  readonly effects: ReadonlyMap<string, readonly string[]>;
+  /** Block and position of every load and store, by node. */
+  readonly sites: ReadonlyMap<string, { readonly block: string; readonly index: number }>;
+  readonly stores: readonly Extract<Instruction, { kind: 'store' }>[];
   readonly primary: readonly { readonly register: RegisterDescriptor }[];
   readonly aggregate: readonly { readonly register: RegisterDescriptor }[];
 }
@@ -112,6 +117,8 @@ function prepareNativeInterfaceIndex(
     stores: Extract<Instruction, { kind: 'store' }>[] = [];
   const exits: SSAForm['blocks'][number][] = [],
     tails: SSAForm['blocks'][number][] = [];
+  const effects = new Map<string, string[]>(),
+    sites = new Map<string, { readonly block: string; readonly index: number }>();
   const roots: NativeRoot[] = [];
   const root = (value: Value): void => {
     roots.push({ value, offset: 0, width: bitWidth(value.type) });
@@ -122,9 +129,16 @@ function prepareNativeInterfaceIndex(
   }
   for (const block of ir.blocks) {
     for (const parameter of block.parameters) values.set(parameter.id, parameter);
-    for (const node of block.instructions) {
+    for (const [position, node] of block.instructions.entries()) {
       context.checkpoint(1);
       if ('result' in node) values.set(node.result.id, node.result);
+      if (node.kind === 'load' || node.kind === 'store')
+        sites.set(node.id, { block: block.id, index: position });
+      else if (node.kind === 'unknown_effect') {
+        const reasons = effects.get(block.id) ?? [];
+        reasons.push(node.reason);
+        effects.set(block.id, reasons);
+      }
       if (node.kind === 'assign') {
         expressions.set(node.result.id, node.expression);
         if (block.id === ir.entry) entryAssignments.add(node.result.id);
@@ -226,6 +240,9 @@ function prepareNativeInterfaceIndex(
     calls,
     exits,
     tails,
+    effects,
+    sites,
+    stores,
     primary,
     aggregate,
   });

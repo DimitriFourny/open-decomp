@@ -11,6 +11,7 @@ import {
   sameType,
   type DataType,
   type Edge,
+  type Expression,
   type RegisterBinding,
   type SSAForm,
   type Value,
@@ -30,6 +31,7 @@ import {
 import { createNativeInterfaceIndex, type NativeInterfaceIndex } from './native-entry.js';
 import { parameterRegisters } from './native-abi.js';
 import type { NativeInterface } from './native-worklist.js';
+import { preservedCallOutputs } from '../../analysis/calls/preserved.js';
 
 /** Seed physical cells with independently observed scalar/vector lane types.
  * A 64-bit float split into two 32-bit SSA cells keeps offsets 0 and 32; it is
@@ -782,10 +784,26 @@ export function nativeIncidentalResult(
       .map((binding) => binding.value);
     if (values.length) callResults.set(node.id, values);
   }
+  // A call output its callee's written-register set proves unchanged is the value
+  // before the call, as in the source view (`callee_preserved_register`).
+  let resultExpressions: ReadonlyMap<string, Expression> = expressions;
+  for (const node of calls) {
+    const written = interfaces.get(node.id)?.written_registers;
+    if (!written) continue;
+    for (const [output, input] of preservedCallOutputs(node, written)) {
+      context.checkpoint(1);
+      if (resultExpressions === expressions) resultExpressions = new Map(expressions);
+      (resultExpressions as Map<string, Expression>).set(output.id, {
+        kind: 'cast',
+        op: 'bitcast',
+        value: input,
+      });
+    }
+  }
   const selected = selectSourcePrimaryResult({
     blocks,
     entry: blocks.get(ir.entry)!,
-    expressions,
+    expressions: resultExpressions,
     sources,
     typed: new Map(),
     parameters: parameterValues,

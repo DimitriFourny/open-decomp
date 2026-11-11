@@ -10,6 +10,7 @@ const probe = (command: string): boolean => {
 
 let clang: boolean | undefined;
 let python: boolean | undefined;
+let gcc: boolean | undefined;
 
 /** True when `/usr/bin/clang` runs (the macOS shim exists even without the Command Line Tools). */
 export const hasClang = (): boolean => (clang ??= probe(CLANG));
@@ -34,5 +35,16 @@ export function nativeAndPythonOracleSkip(): string | false {
   const native = nativeOracleSkip();
   if (native) return native;
   if (!hasPython3()) return 'python3 is unavailable or not runnable';
+  return false;
+}
+
+/**
+ * `node:test` `skip` value for oracles that need gcc's own x86-64 code generation
+ * (its interprocedural register allocation): compiled and run on x86-64 Linux only.
+ */
+export function gccOracleSkip(): string | false {
+  if (process.platform !== 'linux' || process.arch !== 'x64')
+    return 'gcc x86-64 oracles are built and run only on x86-64 Linux';
+  if (!(gcc ??= probe('gcc'))) return 'gcc is unavailable or not runnable';
   return false;
 }

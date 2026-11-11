@@ -143,6 +143,8 @@ import { nativeLibraryTails } from './native-library-tails.js';
 import { objcSourceFacts } from './objc-messages.js';
 import { calleeReadsGuess, likelyArities } from './likely-arity.js';
 import { nativeVariadicInterface } from './native-variadic.js';
+import { nativeWrittenRegisters, writtenRegisterDomain } from './native-written.js';
+import { preservedCallOutputs, writesRegister } from '../../analysis/calls/preserved.js';
 import { likelyTypes } from './likely-types.js';
 import { namingAnnotations } from '../../project/annotations/naming.js';
 
@@ -226,13 +228,29 @@ function mergeNativeInterface(
     parameters,
     parameter_types: ordered.map((item) => item.type),
     ...(parameter_shapes === undefined ? {} : { parameter_shapes }),
-    ...(proven.returns.length
-      ? {}
-      : {
-          returns: prepared.returns,
-          ...(prepared.return_types === undefined ? {} : { return_types: prepared.return_types }),
-        }),
+    ...(proven.returns.length ? {} : preparedReturns(proven, prepared, abi)),
     argument_list_complete: false,
+  };
+}
+
+/** The caller-observed result storage a callee summary without results falls back
+ * to, less the registers the callee's written-register set proves it leaves holding
+ * the caller's own value (a push/pop restore is no result). */
+function preparedReturns(
+  proven: NativeInterface,
+  prepared: NativeInterface,
+  abi: AbiProfile,
+): Pick<NativeInterface, 'returns' | 'return_types'> {
+  const written = proven.written_registers;
+  const domain = writtenRegisterDomain(abi);
+  const kept = prepared.returns.flatMap((register, index) =>
+    !written || !domain.has(register.root) || writesRegister(written, register) ? [index] : [],
+  );
+  return {
+    returns: kept.map((index) => prepared.returns[index]!),
+    ...(prepared.return_types === undefined
+      ? {}
+      : { return_types: kept.flatMap((index) => prepared.return_types?.[index] ?? []) }),
   };
 }
 
@@ -454,6 +472,17 @@ function observeParameters(
     list.push(copy.source);
     phiSources.set(copy.destination.id, list);
   }
+  // A call output the callee's written-register set proves unchanged is the value
+  // before the call (`preservedCallOutputs`); the stack facts were recovered with
+  // the whole clobber set and attribute no entry register to it.
+  const preserved = new Map<string, Value>();
+  for (const block of ir.blocks)
+    for (const node of block.instructions) {
+      const written = node.kind === 'call' ? interfaces.get(node.id)?.written_registers : undefined;
+      if (node.kind === 'call' && written)
+        for (const [output, input] of preservedCallOutputs(node, written))
+          preserved.set(output.id, input);
+    }
   const mayHoldUnobserved = (start: Value): boolean => {
     const pending = [start],
       seen = new Set<string>();
@@ -465,7 +494,9 @@ function observeParameters(
       const root = entryRoots.get(value.id);
       if ((root !== undefined && !observed.has(root)) || seen.size > 256) return true;
       const expression = definitions.get(value.id);
+      const input = preserved.get(value.id);
       if (expression) pending.push(...expressionOperands(expression));
+      else if (input) pending.push(input);
       else pending.push(...(phiSources.get(value.id) ?? []));
     }
     return false;
@@ -559,6 +590,95 @@ function observeParameters(
         context.checkpoint(1);
         if (byRoot.has(register.root) && !observed.has(register.root)) ambiguous = true;
       }
+  // Such a value used after its call may still be an entry argument no use above
+  // observed: the argument list then stays open (not closed by callee reads).
+  if (preserved.size && !ambiguous) {
+    const referenced = new Set<string>();
+    for (const block of ir.blocks) {
+      for (const node of block.instructions) {
+        context.checkpoint(1);
+        const operands =
+          node.kind === 'assign'
+            ? expressionOperands(node.expression)
+            : node.kind === 'load'
+              ? [node.address]
+              : node.kind === 'store'
+                ? [node.address, node.value]
+                : node.kind === 'call'
+                  ? [
+                      ...node.arguments,
+                      ...(node.target.kind === 'indirect' ? [node.target.value] : []),
+                    ]
+                  : [];
+        for (const operand of operands) referenced.add(operand.id);
+        // Argument registers a known callee reads (an opaque call's reach is tested
+        // by `passesUnobserved`; a direct call without interface is already ambiguous).
+        if (node.kind === 'call') {
+          const contract = calls
+            .get(node.id)
+            ?.contracts.find(
+              (item) => item.status === 'established' && item.layout.state === 'complete',
+            );
+          const read = new Set(
+            interfaces.get(node.id)?.parameters.map((register) => register.root) ??
+              contract?.layout.parameters.flatMap((parameter) =>
+                parameter.locations.flatMap((location) =>
+                  location.kind === 'register' ? [location.register.root] : [],
+                ),
+              ) ??
+              [],
+          );
+          for (const binding of node.register_inputs)
+            if (read.has(binding.register.root)) referenced.add(binding.value.id);
+        }
+      }
+      const control = block.terminator;
+      // A tail transfer passes the argument registers; a return its result registers.
+      const leaving =
+        control.kind === 'indirect'
+          ? byRoot
+          : control.kind === 'return'
+            ? new Set(returns.map((register) => register.root))
+            : undefined;
+      if (leaving)
+        for (const binding of ir.register_states.find((row) => row.block === block.id)?.exit ?? [])
+          if (leaving.has(binding.register.root)) referenced.add(binding.value.id);
+      for (const value of control.kind === 'branch'
+        ? [control.condition]
+        : control.kind === 'switch'
+          ? [control.value]
+          : control.kind === 'indirect'
+            ? [control.target]
+            : control.kind === 'return'
+              ? control.values
+              : [])
+        referenced.add(value.id);
+    }
+    const destinations = new Map<string, Value[]>();
+    for (const copy of storageCopies) {
+      const list = destinations.get(copy.source.id) ?? [];
+      list.push(copy.destination);
+      destinations.set(copy.source.id, list);
+    }
+    const used = (output: string): boolean => {
+      const pending = [output],
+        seen = new Set<string>();
+      while (pending.length) {
+        context.checkpoint(1);
+        const id = pending.pop()!;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        if (referenced.has(id) || seen.size > 256) return true;
+        for (const destination of destinations.get(id) ?? []) pending.push(destination.id);
+      }
+      return false;
+    };
+    for (const [output, input] of preserved)
+      if (used(output) && mayHoldUnobserved(input)) {
+        ambiguous = true;
+        break;
+      }
+  }
   const missingBanks = new Set<string>();
   for (const candidate of candidates) {
     if (!observed.has(candidate.root)) missingBanks.add(candidate.bank);
@@ -1949,6 +2069,54 @@ function observeNativeUnit(
         : {}),
     };
   }
+  // What the body may leave changed for its callers, closed over its callees'
+  // sets; a truncated body has none.
+  const written = unit.budget_truncated
+    ? undefined
+    : nativeWrittenRegisters(
+        unit.ir,
+        unit.reasons,
+        interfaces,
+        writtenRegisterDomain(input.components.abi),
+        context,
+        unit.interface_index,
+        unit.analysis?.stack,
+      );
+  if (written) {
+    // A result register the body leaves holding its entry value on every returning
+    // path (a push/pop restore, as Win64 stack probes do with rax) is the caller's
+    // own value, not a result.
+    const domain = writtenRegisterDomain(input.components.abi);
+    const kept = observed.returns.flatMap((register, index) =>
+      !domain.has(register.root) || writesRegister(written, register) ? [index] : [],
+    );
+    observed = {
+      ...observed,
+      written_registers: written,
+      ...(kept.length === observed.returns.length
+        ? {}
+        : {
+            returns: kept.map((index) => observed.returns[index]!),
+            ...(observed.return_types
+              ? { return_types: kept.flatMap((index) => observed.return_types?.[index] ?? []) }
+              : {}),
+            ...(observed.written_result
+              ? {
+                  written_result: {
+                    registers: observed.written_result.registers.filter(
+                      (register) => !domain.has(register.root) || writesRegister(written, register),
+                    ),
+                    types: observed.written_result.types.filter(
+                      (_, index) =>
+                        !domain.has(observed.written_result!.registers[index]!.root) ||
+                        writesRegister(written, observed.written_result!.registers[index]!),
+                    ),
+                  },
+                }
+              : {}),
+          }),
+    };
+  }
   if (unit.budget_truncated) {
     const { argument_list_closure: _closure, ...truncated } = observed;
     observed = {
@@ -2505,8 +2673,10 @@ export function recoverSourceEvidence(input: SourceFactsInput): SourceEvidence {
         abi,
         context,
       );
-      // Unfinished worklists never close an argument list.
+      // Unfinished worklists never close an argument list, and a cut call keeps
+      // its whole ABI clobber set.
       const {
+        written_registers: _writtenRegisters,
         parameter_shapes: _shapes,
         written_result: _written,
         argument_list_closure: _closure,
