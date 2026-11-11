@@ -228,13 +228,29 @@ function mergeNativeInterface(
     parameters,
     parameter_types: ordered.map((item) => item.type),
     ...(parameter_shapes === undefined ? {} : { parameter_shapes }),
-    ...(proven.returns.length
-      ? {}
-      : {
-          returns: prepared.returns,
-          ...(prepared.return_types === undefined ? {} : { return_types: prepared.return_types }),
-        }),
+    ...(proven.returns.length ? {} : preparedReturns(proven, prepared, abi)),
     argument_list_complete: false,
+  };
+}
+
+/** The caller-observed result storage a callee summary without results falls back
+ * to, less the registers the callee's written-register set proves it leaves holding
+ * the caller's own value (a push/pop restore is no result). */
+function preparedReturns(
+  proven: NativeInterface,
+  prepared: NativeInterface,
+  abi: AbiProfile,
+): Pick<NativeInterface, 'returns' | 'return_types'> {
+  const written = proven.written_registers;
+  const domain = writtenRegisterDomain(abi);
+  const kept = prepared.returns.flatMap((register, index) =>
+    !written || !domain.has(register.root) || writesRegister(written, register) ? [index] : [],
+  );
+  return {
+    returns: kept.map((index) => prepared.returns[index]!),
+    ...(prepared.return_types === undefined
+      ? {}
+      : { return_types: kept.flatMap((index) => prepared.return_types?.[index] ?? []) }),
   };
 }
 
