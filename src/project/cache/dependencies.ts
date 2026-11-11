@@ -28,7 +28,10 @@ import {
 } from '../../core/index.js';
 import { typeReferences } from '../annotations/subjects.js';
 
-const MAX_READS = 100000;
+/** Reads one stored readset holds. A request's ledger may grow past it (its in-request
+ * snapshots and fingerprints stay exact); its result is then published without a readset,
+ * valid for its exact revision only (`runCachedDecompilation`). */
+export const MAX_READS = 100000;
 const MAX_ANNOTATIONS = 100000;
 const recordKind = z.enum(['function', 'string', 'reference', 'symbol', 'import', 'export']);
 const selectorSchema = z.discriminatedUnion('kind', [
@@ -454,7 +457,6 @@ export class AnalysisDependencyCollector {
       this.#trace?.push({ key, read: existing, charges });
       return;
     }
-    if (this.#reads.size >= MAX_READS) exhausted('Analysis dependency readset bound exceeded');
     this.context.checkpoint(1);
     const read = {
       selector,
@@ -648,7 +650,6 @@ export class AnalysisDependencyCollector {
       if (kind === 'all_annotations' || kind === 'type_annotations') this.annotations();
       this.#trace?.push(entry);
       if (this.#reads.has(entry.key)) continue;
-      if (this.#reads.size >= MAX_READS) exhausted('Analysis dependency readset bound exceeded');
       for (let charge = 0; charge < entry.charges; charge++) this.context.checkpoint(1);
       this.#reads.set(entry.key, entry.read);
     }
@@ -658,6 +659,11 @@ export class AnalysisDependencyCollector {
    * the whole (growing) ledger: entries are built here from typed selectors and
    * digests in schema field order and never mutated. Only an empty ledger, which the
    * schema rejects, still goes through it. */
+  /** More reads than one stored readset holds (`MAX_READS`). */
+  get exceeded(): boolean {
+    return this.#reads.size > MAX_READS;
+  }
+
   finish(): AnalysisReadset {
     const readset: AnalysisReadset = this.#reads.size
       ? { version: 1, complete: true, reads: [...this.#reads.values()] }

@@ -29,6 +29,7 @@ import {
   type AnalysisComputation,
 } from '../../../src/project/cache/index.js';
 import { fixtureImage } from '../../metadata/fixture.js';
+import { MAX_READS, createAnalysisReadset } from '../../../src/project/cache/dependencies.js';
 
 async function project(t: TestContext) {
   const path = mkdtempSync(join(tmpdir(), 'open-decomp-cache-'));
@@ -1126,4 +1127,40 @@ test('artifacts store the readset and result proofs compactly, and format-2 arti
     legacyHit.result.artifacts[0]?.id,
     published.state === 'published' ? published.artifact.id : '',
   );
+});
+
+test('a result whose readset exceeds the stored bound publishes for its exact revision and says so', async (t) => {
+  const p = await project(t);
+  const context = createOperationContext({ budget: p.identity.budget });
+  const dependencies = createAnalysisReadset(p.state.store, 2, context);
+  for (let index = 0; index <= MAX_READS; index++) dependencies.recordProof(`proof_${index}`, null);
+  assert.equal(dependencies.exceeded, true);
+  const current = p.job(p.identity);
+  const result = await runCachedDecompilation(
+    {
+      store: p.state.store,
+      job_id: current.id,
+      identity: p.identity,
+      context,
+      inline_limit: 65536,
+      dependencies,
+    },
+    () => p.computation(p.identity),
+  );
+  assert.equal(result.state, p.computation(p.identity).result.state);
+  assert.ok(
+    result.diagnostics.some(
+      (item) =>
+        item.code === 'resource_limit' &&
+        item.message.startsWith(`Analysis read more than ${MAX_READS} recorded facts`),
+    ),
+  );
+  const handle = result.artifacts[0]!;
+  const stored = JSON.parse(
+    zstdDecompressSync(readFileSync(join(p.state.path, 'artifacts', `${handle.id}.zst`))).toString(
+      'utf8',
+    ),
+  ) as { dependencies?: unknown };
+  // No readset: the artifact serves its exact revision only.
+  assert.equal(stored.dependencies, undefined);
 });
